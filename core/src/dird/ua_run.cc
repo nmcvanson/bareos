@@ -595,6 +595,7 @@ int ModifyJobParameters(UaContext* ua, JobControlRecord* jcr, RunContext& rc)
         rc.store->store = select_storage_resource(ua);
         if (rc.store->store) {
           PmStrcpy(rc.store->store_source, T_("user selection"));
+          rc.store_explicit = true;
           SetRwstorage(jcr, rc.store);
           goto try_again;
         }
@@ -826,7 +827,13 @@ static bool ResetRestoreContext(UaContext* ua,
              && jcr->dir_impl->res.pool != jcr->dir_impl->res.job->pool) {
     PmStrcpy(jcr->dir_impl->res.pool_source, T_("user input"));
   }
-  SetRwstorage(jcr, rc.store);
+  /* Only override the storage list when the user actually named a storage.
+   * Otherwise keep the list built by SetJcrDefaults, so a storage group
+   * survives to the policy in DoNativeBackupInit. */
+  if (rc.store_explicit || !jcr->dir_impl->res.write_storage_list
+      || jcr->dir_impl->res.write_storage_list->size() <= 1) {
+    SetRwstorage(jcr, rc.store);
+  }
 
   if (rc.next_pool_name) {
     PmStrcpy(jcr->dir_impl->res.npool_source, T_("command line"));
@@ -2190,6 +2197,7 @@ static bool ScanCommandLineArguments(UaContext* ua, RunContext& rc)
   if (rc.StoreName) {
     rc.store->store = ua->GetStoreResWithName(rc.StoreName);
     PmStrcpy(rc.store->store_source, T_("command line"));
+    rc.store_explicit = true;
     if (!rc.store->store) {
       if (*rc.StoreName != 0) {
         ua->WarningMsg(T_("Storage \"%s\" not found.\n"), rc.StoreName);

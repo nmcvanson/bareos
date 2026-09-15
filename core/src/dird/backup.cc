@@ -170,6 +170,15 @@ bool DoNativeBackupInit(JobControlRecord* jcr)
     return false;
   }
 
+  /* A storage group survived to here: report the candidates and the current choice. */
+  if (jcr->dir_impl->res.write_storage_list->size() > 1) {
+    Jmsg(jcr, M_INFO, 0,
+         T_("Storage group: %d candidates, using \"%s\" (%s).\n"),
+         jcr->dir_impl->res.write_storage_list->size(),
+         jcr->dir_impl->res.write_storage->resource_name_,
+         jcr->dir_impl->res.wstore_source);
+  }
+
   if (!ValidateClient(jcr) || !ValidateStorage(jcr)) { return false; }
 
   CreateClones(jcr); /* run any clone jobs */
