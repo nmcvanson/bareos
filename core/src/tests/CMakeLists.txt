@@ -336,6 +336,16 @@ if(NOT client-only)
   )
   bareos_add_test(sql_query_test LINK_LIBRARIES Bareos::SQL GTest::gtest_main)
   bareos_add_test(
+    storage_group_list
+    LINK_LIBRARIES Bareos::Dir Bareos::Lib Bareos::Findlib testing_common
+                   Bareos::SQL GTest::gtest_main
+  )
+  bareos_add_test(
+    storage_group_policy
+    LINK_LIBRARIES Bareos::Dir Bareos::Lib Bareos::Findlib testing_common
+                   Bareos::SQL GTest::gtest_main
+  )
+  bareos_add_test(
     test_config_parser_dir
     LINK_LIBRARIES Bareos::Dir Bareos::Lib Bareos::Findlib testing_common
                    Bareos::SQL GTest::gtest_main

@@ -115,6 +115,8 @@ class DirectorResource
   uint32_t MaxConsoleConnections = 0; /* Max concurrent console connections */
   utime_t FDConnectTimeout = {0};     /* Timeout for connect in seconds */
   utime_t SDConnectTimeout = {0};     /* Timeout for connect in seconds */
+  utime_t StorageGroupConnectTimeout
+      = {0}; /* Timeout for one candidate while trying a storage group */
   utime_t heartbeat_interval = {0};   /* Interval to send heartbeats */
   utime_t stats_retention = {0}; /* Statistics retention period in seconds */
   bool ndmp_snooping = false;    /* NDMP Protocol specific snooping enabled */
@@ -418,6 +420,8 @@ class JobResource : public BareosResource {
   FilesetResource* fileset = nullptr;   /**< What to backup -- Fileset */
   CatalogResource* catalog = nullptr;   /**< Which Catalog to use */
   alist<StorageResource*>* storage = nullptr; /**< Where is device -- list of Storage to be used */
+  char* storage_group_policy = nullptr; /**< Storage group policy name, resolved Pool then Job then default */
+  uint64_t storage_group_policy_threshold = 0; /**< Threshold used by size-based storage group policies */
   PoolResource* pool = nullptr;       /**< Where is media -- Media Pool */
   PoolResource* full_pool = nullptr;  /**< Pool for Full backups */
   PoolResource* vfull_pool = nullptr; /**< Pool for Virtual Full backups */
@@ -576,6 +580,8 @@ class PoolResource : public BareosResource {
   PoolResource* NextPool = nullptr; /* Next pool for migration */
   alist<StorageResource*>* storage
       = nullptr;            /* Where is device -- list of Storage to be used */
+  char* storage_group_policy = nullptr; /* Storage group policy name */
+  uint64_t storage_group_policy_threshold = 0; /* Threshold for size-based policies */
   bool use_catalog = false; /* Maintain catalog for media */
   bool catalog_files = false;          /* Maintain file entries in catalog */
   bool purge_oldest_volume = false;    /* Purge oldest volume */
@@ -594,6 +600,9 @@ class PoolResource : public BareosResource {
   utime_t JobRetention = {0};         /* Job retention period in seconds */
   uint32_t MinBlocksize = 0;          /* Minimum Blocksize */
   uint32_t MaxBlocksize = 0;          /* Maximum Blocksize */
+
+  /* Methods */
+  virtual bool Validate() override;
 };
 
 // Run structure contained in Schedule Resource

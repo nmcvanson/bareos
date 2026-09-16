@@ -305,6 +305,7 @@ class RunContext {
   bool nextpool_set = false;
   bool accurate_set = false;
   bool ignoreduplicatecheck_set = false;
+  bool store_explicit = false;
 
   RunContext();
   ~RunContext();

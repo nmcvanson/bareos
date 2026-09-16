@@ -136,6 +136,7 @@ static const ResourceItem dir_items[] = {
   { "Password", CFG_TYPE_AUTOPASSWORD, ITEM(res_dir, password_), {config::Required{}}},
   { "FdConnectTimeout", CFG_TYPE_TIME, ITEM(res_dir, FDConnectTimeout), {config::DefaultValue{"180"}}},
   { "SdConnectTimeout", CFG_TYPE_TIME, ITEM(res_dir, SDConnectTimeout), {config::DefaultValue{"1800"}}},
+  { "StorageGroupConnectTimeout", CFG_TYPE_TIME, ITEM(res_dir, StorageGroupConnectTimeout), {config::DefaultValue{"60"}, config::Description{"Timeout for one connection attempt while trying the members of a storage group. Used only when a Job's Storage list holds more than one entry; a single-storage Job keeps using SdConnectTimeout."}}},
   { "HeartbeatInterval", CFG_TYPE_TIME, ITEM(res_dir, heartbeat_interval), {config::DefaultValue{"0"}}},
   { "StatisticsRetention", CFG_TYPE_TIME, ITEM(res_dir, stats_retention), {config::DeprecatedSince{22, 0, 0}, config::DefaultValue{"160704000"}}},
   { "StatisticsCollectInterval", CFG_TYPE_PINT32, ITEM(res_dir, stats_collect_interval), {config::DeprecatedSince{22, 0, 0}, config::IntroducedIn{14, 2, 0}, config::DefaultValue{"0"}}},
@@ -291,6 +292,8 @@ const ResourceItem job_items[] = {
   { "Level", CFG_TYPE_LEVEL, ITEM(res_job, JobLevel), {}},
   { "Messages", CFG_TYPE_RES, ITEM(res_job, messages), {config::Required{}, config::Code{R_MSGS}}},
   { "Storage", CFG_TYPE_ALIST_RES, ITEM(res_job, storage), {config::Code{R_STORAGE}}},
+  { "StorageGroupPolicy", CFG_TYPE_STR, ITEM(res_job, storage_group_policy), {config::Description{"Policy used to pick one Storage out of the Storage list. Overridden by the same directive on the Pool."}}},
+  { "StorageGroupPolicyThreshold", CFG_TYPE_SIZE64, ITEM(res_job, storage_group_policy_threshold), {config::Description{"Threshold used by size-based storage group policies."}}},
   { "Pool", CFG_TYPE_RES, ITEM(res_job, pool), {config::Required{}, config::Code{R_POOL}}},
   { "FullBackupPool", CFG_TYPE_RES, ITEM(res_job, full_pool), {config::Code{R_POOL}}},
   { "VirtualFullBackupPool", CFG_TYPE_RES, ITEM(res_job, vfull_pool), {config::Code{R_POOL}}},
@@ -411,6 +414,8 @@ static const ResourceItem pool_items[] = {
   { "MigrationLowBytes", CFG_TYPE_SIZE64, ITEM(res_pool, MigrationLowBytes), {}},
   { "NextPool", CFG_TYPE_RES, ITEM(res_pool, NextPool), {config::Code{R_POOL}}},
   { "Storage", CFG_TYPE_ALIST_RES, ITEM(res_pool, storage), {config::Code{R_STORAGE}}},
+  { "StorageGroupPolicy", CFG_TYPE_STR, ITEM(res_pool, storage_group_policy), {config::Description{"Policy used to pick one Storage out of the Storage list. Overrides the same directive on the Job."}}},
+  { "StorageGroupPolicyThreshold", CFG_TYPE_SIZE64, ITEM(res_pool, storage_group_policy_threshold), {config::Description{"Threshold used by size-based storage group policies."}}},
   { "AutoPrune", CFG_TYPE_BOOL, ITEM(res_pool, AutoPrune), {config::DefaultValue{"true"}}},
   { "Recycle", CFG_TYPE_BOOL, ITEM(res_pool, Recycle), {config::DefaultValue{"true"}}},
   { "RecyclePool", CFG_TYPE_RES, ITEM(res_pool, RecyclePool), {config::Code{R_POOL}}},
@@ -1164,6 +1169,40 @@ bool ValidateResource(int res_type,
   return true;
 }
 
+/* 
+ * Storage group policies that are implemented.
+ * A name listed here is accepted by the configuration parser; anything else
+ * is rejected with the list of valid names.
+ */
+static const char* storage_group_policies[]
+    = {"ListedOrder", "LeastUsed", nullptr};
+
+/* Check one StorageGroupPolicy value. An unset policy is valid: the effective
+ * policy is resolved Pool, then Job, then default, at job setup. */
+static bool ValidateStorageGroupPolicy(const char* policy,
+                                       const char* res_type,
+                                       const char* res_name)
+{
+  if (!policy) { return true; }
+
+  for (int i = 0; storage_group_policies[i]; i++) {
+    if (Bstrcasecmp(policy, storage_group_policies[i])) { return true; }
+  }
+
+  PoolMem valid(PM_MESSAGE);
+  for (int i = 0; storage_group_policies[i]; i++) {
+    if (i) { PmStrcat(valid, ", "); }
+    PmStrcat(valid, storage_group_policies[i]);
+  }
+
+  Jmsg(NULL, M_ERROR, 0,
+       T_("Invalid \"Storage Group Policy = %s\" in %s \"%s\" "
+          "resource. Valid policies are: %s\n"),
+       policy, res_type, res_name, valid.c_str());
+
+  return false;
+}
+
 bool JobResource::Validate()
 {
   /* For Copy and Migrate we can have Jobs without a client or fileset.
@@ -1205,7 +1244,19 @@ bool JobResource::Validate()
          T_("Job \"%s\" has level 'Base' which is deprecated!\n"),
          resource_name_);
   }
+
+  if (!ValidateStorageGroupPolicy(storage_group_policy, "Job",
+                                  resource_name_)) {
+    return false;
+  }
+
   return true;
+}
+
+bool PoolResource::Validate()
+{
+  return ValidateStorageGroupPolicy(storage_group_policy, "Pool",
+                                    resource_name_);
 }
 
 bool CatalogResource::Validate() { return true; }
@@ -3852,6 +3903,7 @@ static void FreeResource(BareosResource* res, int type)
       if (p->pool_type) { free(p->pool_type); }
       if (p->label_format) { free(p->label_format); }
       if (p->cleaning_prefix) { free(p->cleaning_prefix); }
+      if (p->storage_group_policy) { free(p->storage_group_policy); }
       if (p->storage) { delete p->storage; }
       delete p;
       break;
@@ -3884,6 +3936,7 @@ static void FreeResource(BareosResource* res, int type)
       if (p->RestoreBootstrap) { free(p->RestoreBootstrap); }
       if (p->WriteBootstrap) { free(p->WriteBootstrap); }
       if (p->selection_pattern) { free(p->selection_pattern); }
+      if (p->storage_group_policy) { free(p->storage_group_policy); }
       if (p->run_cmds) { delete p->run_cmds; }
       if (p->storage) { delete p->storage; }
       if (p->FdPluginOptions) { delete p->FdPluginOptions; }

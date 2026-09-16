@@ -74,5 +74,10 @@ extern int JobqRemove(jobq_t* wq, JobControlRecord* jcr);
 bool IncReadStore(JobControlRecord* jcr);
 void DecReadStore(JobControlRecord* jcr);
 
+/* Read a Storage's concurrent job counter under the queue's own mutex.
+ * The counter is only meaningful while that mutex is held, and the mutex is
+ * file scope in jobq.cc, so a reader outside this file needs this. */
+int GetStorageNumConcurrentJobs(StorageResource* store);
+
 } /* namespace directordaemon */
 #endif  // BAREOS_DIRD_JOBQ_H_

@@ -40,3 +40,46 @@ TEST(BadConfig, changing_pw_type)
 
   delete parser;
 }
+
+/* A.1.3: an unknown StorageGroupPolicy must be rejected, on the Pool and on
+ * the Job. Both fixtures are otherwise valid, so the policy name is the only
+ * possible reason to fail. */
+
+TEST(BadConfig, storage_group_policy_pool)
+{
+  InitDirGlobals();
+  std::string path_to_config
+      = std::string("configs/bad_configs/storage_group_policy_pool.conf");
+
+  auto* parser = directordaemon::InitDirConfig(path_to_config.c_str(), M_INFO);
+
+  ASSERT_NE(parser, nullptr);
+  directordaemon::my_config = parser;
+
+  EXPECT_FALSE(parser->ParseConfig());
+
+  delete parser;
+}
+
+TEST(BadConfig, storage_group_policy_job)
+{
+  InitDirGlobals();
+  std::string path_to_config
+      = std::string("configs/bad_configs/storage_group_policy_job.conf");
+
+  auto* parser = directordaemon::InitDirConfig(path_to_config.c_str(), M_INFO);
+
+  ASSERT_NE(parser, nullptr);
+  directordaemon::my_config = parser;
+
+  /* Job resources are deliberately not validated by SaveResource; they are
+   * validated after JobDefs have been applied, in PopulateDefs, which the
+   * daemon reaches through CheckResources. So parsing succeeds and the
+   * rejection happens one phase later. Pools are validated during parsing,
+   * which is why the Pool case above tests ParseConfig directly. */
+  EXPECT_TRUE(parser->ParseConfig());
+  EXPECT_FALSE(directordaemon::PopulateDefs());
+
+  delete parser;
+}
+
