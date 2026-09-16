@@ -30,6 +30,8 @@ resolution. Snapshot/attach/streaming and restore logic are not
 implemented yet.
 """
 
+import os
+
 from BareosFdWrapper import *  # noqa # pylint: disable=import-error,wildcard-import
 import bareosfd  # pylint: disable=import-error
 import BareosFdPluginBaseclass  # pylint: disable=import-error
@@ -39,6 +41,7 @@ from bareos_openstack_api.options import (  # pylint: disable=import-error
     UnknownOptionException,
 )
 from bareos_openstack_api.connection import connect  # pylint: disable=import-error
+from bareos_openstack_api import volumes  # pylint: disable=import-error
 
 
 @BareosPlugin  # pylint: disable=undefined-variable
@@ -56,6 +59,11 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
 
         self.conn = None
         self.instance = None
+        self.proxy = None
+        self.pending_volumes = []
+        self.volume_devices = {}
+        self.current_copy = None
+        self._device_fd = None
 
     def check_options(self, mandatory_options=None):
         """
@@ -139,15 +147,101 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
             bareosfd.M_INFO,
             f"Resolved instance '{self.instance.name}' ({self.instance.id})\n",
         )
+
+        self.proxy = self.conn.compute.find_server(self.options.proxy_instance_id)
+        if self.proxy is None:
+            bareosfd.JobMessage(
+                bareosfd.M_FATAL,
+                f"Proxy instance '{self.options.proxy_instance_id}' not found\n",
+            )
+            return bareosfd.bRC_Error
+
+        if self.options.include_volumes:
+            self.volume_devices = {
+                a.volume_id: a.device
+                for a in self.conn.compute.volume_attachments(self.instance)
+            }
+            self.pending_volumes = volumes.list_attached_volumes(
+                self.conn, self.instance
+            )
+
         return bareosfd.bRC_OK
 
     def start_backup_file(self, savepkt):
-        """Not implemented yet."""
-        del savepkt
-        bareosfd.JobMessage(
-            bareosfd.M_FATAL, "backup file enumeration not implemented yet\n"
+        """
+        Snapshot the next pending volume, attach the copy to the proxy,
+        and describe it as one virtual file per volume.
+        """
+        if not self.pending_volumes:
+            return bareosfd.bRC_Stop
+
+        volume = self.pending_volumes.pop(0)
+        tags = {
+            "created-by": "bareos",
+            "bareos-job-id": str(self.jobId),
+            "bareos-instance-uuid": self.instance.id,
+        }
+        try:
+            self.current_copy = volumes.snapshot_and_attach(
+                self.conn,
+                volume,
+                self.proxy,
+                tags,
+                timeout=self.options.poll_timeout,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            bareosfd.JobMessage(
+                bareosfd.M_FATAL,
+                f"Failed to snapshot/attach volume {volume.id}: {e}\n",
+            )
+            return bareosfd.bRC_Error
+
+        device_name = self.volume_devices.get(volume.id, volume.id).rsplit("/", 1)[-1]
+        filename = (
+            f"@OPENSTACK/{self.instance.name}/{self.instance.id}"
+            f"/disk-{device_name}.raw"
         )
-        return bareosfd.bRC_Error
+
+        savepkt.statp = bareosfd.StatPacket()
+        savepkt.statp.st_size = volume.size * 1024**3
+        savepkt.type = bareosfd.FT_REG
+        savepkt.fname = filename
+
+        bareosfd.JobMessage(
+            bareosfd.M_INFO, f"Backing up volume '{volume.name}' as {filename}\n"
+        )
+        return bareosfd.bRC_OK
+
+    def plugin_io_open(self, iop):
+        """
+        Open the attached device for reading - matches Proxmox's
+        stream-a-real-fd approach rather than the base class's default,
+        which assumes a real filesystem path (wrong for our virtual
+        device filenames).
+        """
+        self._device_fd = os.open(self.current_copy.device, os.O_RDONLY)
+        iop.filedes = self._device_fd
+        iop.status = bareosfd.iostat_do_in_core
+        return bareosfd.bRC_OK
+
+    def plugin_io_close(self, iop):
+        del iop
+        os.close(self._device_fd)
+        return bareosfd.bRC_OK
+
+    def end_backup_file(self):
+        """Detach and delete the temp volume/snapshot for the file just backed up."""
+        warnings = volumes.detach_and_cleanup(
+            self.conn,
+            self.proxy,
+            self.current_copy,
+            keep_snapshot=self.options.keep_snapshot,
+            timeout=self.options.poll_timeout,
+        )
+        for w in warnings:
+            bareosfd.JobMessage(bareosfd.M_WARNING, w + "\n")
+        self.current_copy = None
+        return bareosfd.bRC_OK
 
     def create_file(self, restorepkt):
         """Not implemented yet."""
