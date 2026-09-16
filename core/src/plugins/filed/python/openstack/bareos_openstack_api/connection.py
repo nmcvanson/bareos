@@ -37,7 +37,10 @@ def build_connect_kwargs(options):
     been called and returned no errors.
     """
     if "cloud" in options:
-        return {"cloud": options.cloud}
+        kwargs = {"cloud": options.cloud}
+        if not options.verify_ssl:
+            kwargs["verify"] = False
+        return kwargs
 
     kwargs = {"auth_url": options.auth_url}
     if options.region_name:

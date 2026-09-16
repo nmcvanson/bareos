@@ -31,6 +31,7 @@ implemented yet.
 """
 
 import os
+import subprocess
 import time
 
 from BareosFdWrapper import *  # noqa # pylint: disable=import-error,wildcard-import
@@ -44,6 +45,11 @@ from bareos_openstack_api.options import (  # pylint: disable=import-error
 from bareos_openstack_api.connection import connect  # pylint: disable=import-error
 from bareos_openstack_api import volumes  # pylint: disable=import-error
 from bareos_openstack_api import instance_metadata  # pylint: disable=import-error
+
+# A device node appearing after Cinder/Nova already report the attachment
+# "in-use" should take seconds, not the many minutes poll_timeout allows
+# for actual cloud operations - fail fast instead of hanging the job.
+DEVICE_APPEAR_TIMEOUT = 30
 
 
 @BareosPlugin  # pylint: disable=undefined-variable
@@ -62,8 +68,9 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         self.conn = None
         self.instance = None
         self.proxy = None
-        self.pending_volumes = []
+        self.tags = None
         self.volume_devices = {}
+        self.pending_volume_snapshots = []
         self.current_copy = None
         self._device_fd = None
         self.instance_metadata = None
@@ -127,21 +134,60 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         bareosfd.DebugMessage(100, "connecting to OpenStack\n")
         return connect(self.options)
 
+    def _run_snapshot_hook(self, option_name, cmd):
+        """Best-effort pre/post_snapshot_cmd hook, run on the proxy host."""
+        if not cmd:
+            return
+        bareosfd.JobMessage(bareosfd.M_INFO, f"Running {option_name}: {cmd}\n")
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=self.options.poll_timeout,
+                check=False,
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            bareosfd.JobMessage(
+                bareosfd.M_WARNING, f"{option_name} failed to run: {e}\n"
+            )
+            return
+        if result.returncode != 0:
+            bareosfd.JobMessage(
+                bareosfd.M_WARNING,
+                f"{option_name} exited with code {result.returncode}: "
+                f"{result.stderr}\n",
+            )
+
     def start_backup_job(self):
         """
-        Authenticate and resolve the target instance. Snapshot/attach/
-        streaming are not implemented yet.
+        Authenticate, resolve the target instance and proxy, then (best-
+        effort quiesce, then) snapshot every volume to be backed up up
+        front - so the guest is only quiesced for the snapshot step
+        itself, not for the create-volume/attach/stream/detach cycle that
+        happens later, per volume, in start_backup_file.
         """
         try:
             self.conn = self._connect()
         except Exception as e:  # pylint: disable=broad-except
+            bareosfd.DebugMessage(100, f"OpenStack authentication failed: {e}\n")
             bareosfd.JobMessage(
-                bareosfd.M_FATAL, f"OpenStack authentication failed: {e}\n"
+                bareosfd.M_FATAL,
+                f"OpenStack authentication failed: {type(e).__name__} "
+                "(see debug log for details)\n",
             )
             return bareosfd.bRC_Error
 
         instance_ref = self.options.instance
-        self.instance = self.conn.compute.find_server(instance_ref)
+        try:
+            self.instance = self.conn.compute.find_server(instance_ref)
+        except Exception as e:  # pylint: disable=broad-except
+            bareosfd.JobMessage(
+                bareosfd.M_FATAL,
+                f"Failed to resolve instance '{instance_ref}': {e}\n",
+            )
+            return bareosfd.bRC_Error
         if self.instance is None:
             bareosfd.JobMessage(
                 bareosfd.M_FATAL, f"Instance '{instance_ref}' not found\n"
@@ -153,21 +199,27 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
             f"Resolved instance '{self.instance.name}' ({self.instance.id})\n",
         )
 
-        self.proxy = self.conn.compute.find_server(self.options.proxy_instance_id)
-        if self.proxy is None:
+        proxy_ref = self.options.proxy_instance_id
+        try:
+            self.proxy = self.conn.compute.find_server(proxy_ref)
+        except Exception as e:  # pylint: disable=broad-except
             bareosfd.JobMessage(
                 bareosfd.M_FATAL,
-                f"Proxy instance '{self.options.proxy_instance_id}' not found\n",
+                f"Failed to resolve proxy instance '{proxy_ref}': {e}\n",
+            )
+            return bareosfd.bRC_Error
+        if self.proxy is None:
+            bareosfd.JobMessage(
+                bareosfd.M_FATAL, f"Proxy instance '{proxy_ref}' not found\n"
             )
             return bareosfd.bRC_Error
 
         attachments = None
+        volumes_to_snapshot = []
         if self.options.include_volumes:
-            attachments = list(
-                self.conn.compute.volume_attachments(self.instance)
-            )
+            attachments = list(self.conn.compute.volume_attachments(self.instance))
             self.volume_devices = {a.volume_id: a.device for a in attachments}
-            self.pending_volumes = volumes.list_attached_volumes(
+            volumes_to_snapshot = volumes.list_attached_volumes(
                 self.conn, self.instance, attachments=attachments
             )
 
@@ -180,6 +232,42 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
                 bareosfd.M_FATAL, f"Failed to collect instance metadata: {e}\n"
             )
             return bareosfd.bRC_Error
+
+        self.tags = {
+            "created-by": "bareos",
+            "bareos-job-id": str(self.jobId),
+            "bareos-instance-uuid": self.instance.id,
+        }
+
+        if volumes_to_snapshot:
+            self._run_snapshot_hook("pre_snapshot_cmd", self.options.pre_snapshot_cmd)
+            created_snapshots = []
+            try:
+                for volume in volumes_to_snapshot:
+                    snapshot = volumes.create_snapshot(
+                        self.conn,
+                        volume,
+                        self.tags,
+                        timeout=self.options.poll_timeout,
+                    )
+                    created_snapshots.append((volume, snapshot))
+            except Exception as e:  # pylint: disable=broad-except
+                for w in getattr(e, "cleanup_warnings", []):
+                    bareosfd.JobMessage(bareosfd.M_WARNING, w + "\n")
+                for _, snap in created_snapshots:
+                    try:
+                        self.conn.block_storage.delete_snapshot(snap.id)
+                    except Exception:  # pylint: disable=broad-except
+                        pass
+                bareosfd.JobMessage(
+                    bareosfd.M_FATAL, f"Failed to snapshot volumes: {e}\n"
+                )
+                return bareosfd.bRC_Error
+            finally:
+                self._run_snapshot_hook(
+                    "post_snapshot_cmd", self.options.post_snapshot_cmd
+                )
+            self.pending_volume_snapshots = created_snapshots
 
         return bareosfd.bRC_OK
 
@@ -206,38 +294,39 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
 
     def start_backup_file(self, savepkt):
         """
-        Snapshot the next pending volume, attach the copy to the proxy,
-        and describe it as one virtual file per volume.
+        Create a volume from the next pending snapshot, attach it to the
+        proxy, and describe it as one virtual file per volume. Snapshots
+        were already taken up front in start_backup_job (bracketed by the
+        quiesce hooks) - this only does the create-from-snapshot/attach
+        step per volume.
         """
         if not self.metadata_emitted:
             self.metadata_emitted = True
             return self._emit_metadata_object(savepkt)
 
-        if not self.pending_volumes:
+        if not self.pending_volume_snapshots:
             return bareosfd.bRC_Stop
 
-        volume = self.pending_volumes.pop(0)
-        tags = {
-            "created-by": "bareos",
-            "bareos-job-id": str(self.jobId),
-            "bareos-instance-uuid": self.instance.id,
-        }
+        volume, snapshot = self.pending_volume_snapshots.pop(0)
         try:
-            self.current_copy = volumes.snapshot_and_attach(
+            self.current_copy = volumes.create_volume_from_snapshot_and_attach(
                 self.conn,
-                volume,
+                snapshot,
                 self.proxy,
-                tags,
+                self.tags,
                 timeout=self.options.poll_timeout,
             )
         except Exception as e:  # pylint: disable=broad-except
+            for w in getattr(e, "cleanup_warnings", []):
+                bareosfd.JobMessage(bareosfd.M_WARNING, w + "\n")
             bareosfd.JobMessage(
-                bareosfd.M_FATAL,
-                f"Failed to snapshot/attach volume {volume.id}: {e}\n",
+                bareosfd.M_FATAL, f"Failed to attach volume {volume.id}: {e}\n"
             )
             return bareosfd.bRC_Error
 
-        device_name = self.volume_devices.get(volume.id, volume.id).rsplit("/", 1)[-1]
+        device_name = (self.volume_devices.get(volume.id) or volume.id).rsplit(
+            "/", 1
+        )[-1]
         filename = (
             f"@OPENSTACK/{self.instance.name}/{self.instance.id}"
             f"/disk-{device_name}.raw"
@@ -263,7 +352,7 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         on the proxy's OS yet.
         """
         device = self.current_copy.device
-        deadline = time.monotonic() + self.options.poll_timeout
+        deadline = time.monotonic() + DEVICE_APPEAR_TIMEOUT
         while True:
             try:
                 self._device_fd = os.open(device, os.O_RDONLY)
@@ -273,7 +362,7 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
                     bareosfd.JobMessage(
                         bareosfd.M_FATAL,
                         f"Device {device} did not appear within "
-                        f"{self.options.poll_timeout}s\n",
+                        f"{DEVICE_APPEAR_TIMEOUT}s\n",
                     )
                     return bareosfd.bRC_Error
                 time.sleep(1)

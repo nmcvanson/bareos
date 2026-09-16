@@ -92,7 +92,7 @@ class BareosFdOpenstackOptions:
 
         if "cloud" not in self and "auth_url" not in self:
             errors.append("One of 'cloud' or 'auth_url' must be set.")
-        elif "auth_url" in self:
+        elif "cloud" not in self and "auth_url" in self:
             has_appcred = (
                 "application_credential_id" in self
                 and "application_credential_secret" in self

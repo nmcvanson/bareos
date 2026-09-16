@@ -32,8 +32,12 @@ def collect_instance_metadata(conn, instance, attachments=None):
     Nova instance. Pass a precomputed `attachments` list to avoid
     re-fetching it when the caller already has one.
     """
-    flavor_id = (instance.flavor or {}).get("id")
-    flavor = conn.compute.find_flavor(flavor_id) if flavor_id else None
+    # Nova microversion >=2.47 drops "id" from the embedded flavor dict
+    # entirely, replacing it with "original_name" plus expanded fields.
+    flavor_ref = (instance.flavor or {}).get("id") or (instance.flavor or {}).get(
+        "original_name"
+    )
+    flavor = conn.compute.find_flavor(flavor_ref) if flavor_ref else None
 
     if attachments is None:
         attachments = conn.compute.volume_attachments(instance)

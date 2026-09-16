@@ -51,63 +51,84 @@ class AttachedVolumeCopy:
     device: str
 
 
-def snapshot_and_attach(conn, volume, proxy, tags, timeout=900):
+def create_snapshot(conn, volume, tags, timeout=900):
     """
-    Snapshot `volume`, create a new volume from that snapshot, and attach
-    it to `proxy`. On any failure, cleans up whatever was already created
-    (best-effort) before re-raising - callers do not need to call
-    detach_and_cleanup() themselves on the exception path.
+    Create a crash-consistent snapshot of `volume`. On failure, deletes
+    the snapshot if it was created but never reached 'available'; a
+    cleanup failure there is attached to the raised exception as
+    `cleanup_warnings` (a list of strings) rather than swallowed.
     """
-    snapshot = None
-    new_volume = None
-    attached = False
+    snapshot = conn.block_storage.create_snapshot(
+        volume_id=volume.id,
+        name=f"bareos-{volume.id}",
+        force=True,
+        metadata=tags,
+    )
     try:
-        snapshot = conn.block_storage.create_snapshot(
-            volume_id=volume.id,
-            name=f"bareos-{volume.id}",
-            force=True,
-            metadata=tags,
-        )
         conn.block_storage.wait_for_status(
             snapshot, status="available", failures=["error"], wait=timeout
         )
+    except Exception as e:
+        try:
+            conn.block_storage.delete_snapshot(snapshot.id)
+        except Exception as cleanup_e:  # pylint: disable=broad-except
+            e.cleanup_warnings = [
+                f"delete of snapshot {snapshot.id} failed: {cleanup_e}"
+            ]
+        raise
+    return snapshot
 
+
+def create_volume_from_snapshot_and_attach(conn, snapshot, proxy, tags, timeout=900):
+    """
+    Create a new volume from an already-taken snapshot and attach it to
+    `proxy`. On any failure, cleans up whatever was already created and
+    attaches the resulting warnings to the raised exception as
+    `cleanup_warnings` (empty list if cleanup fully succeeded).
+    """
+    new_volume = None
+    attached = False
+    try:
         new_volume = conn.block_storage.create_volume(
             name=f"bareos-restore-{snapshot.id}",
             snapshot_id=snapshot.id,
-            size=volume.size,
+            size=snapshot.size,
             metadata=tags,
         )
         conn.block_storage.wait_for_status(
             new_volume, status="available", failures=["error"], wait=timeout
         )
 
-        attachment = conn.compute.create_volume_attachment(
-            proxy, volume_id=new_volume.id
-        )
+        conn.compute.create_volume_attachment(proxy, volume_id=new_volume.id)
         attached = True
         new_volume = conn.block_storage.wait_for_status(
             new_volume, status="in-use", failures=["error"], wait=timeout
         )
+        # Re-fetch: the attachment object returned by create_volume_attachment()
+        # can have device=None - Nova assigns the device path asynchronously
+        # as the hypervisor completes the hotplug, not in the creation response.
+        attachment = conn.compute.get_volume_attachment(proxy, new_volume.id)
 
         return AttachedVolumeCopy(
-            original_volume_id=volume.id,
+            original_volume_id=snapshot.volume_id,
             snapshot_id=snapshot.id,
             volume_id=new_volume.id,
             device=attachment.device,
         )
-    except Exception:
-        _cleanup_partial(conn, proxy, snapshot, new_volume, attached, timeout)
+    except Exception as e:
+        e.cleanup_warnings = _cleanup_partial_volume(
+            conn, proxy, new_volume, attached, timeout
+        )
         raise
 
 
-def _cleanup_partial(conn, proxy, snapshot, new_volume, attached, timeout):
+def _cleanup_partial_volume(conn, proxy, new_volume, attached, timeout):
     """
-    Best-effort cleanup of whatever snapshot_and_attach() managed to create
-    before it failed. Never raises - matches detach_and_cleanup()'s
-    philosophy that anything left over is caught by tagging-based garbage
-    collection, not by this call succeeding.
+    Best-effort cleanup of a partially-created temp volume/attachment.
+    Never raises; returns a list of warning strings for anything that
+    couldn't be cleaned up (same convention as detach_and_cleanup()).
     """
+    warnings = []
     if attached and new_volume is not None:
         try:
             conn.compute.delete_volume_attachment(new_volume.id, proxy)
@@ -117,18 +138,14 @@ def _cleanup_partial(conn, proxy, snapshot, new_volume, attached, timeout):
                 failures=["error"],
                 wait=timeout,
             )
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except Exception as e:  # pylint: disable=broad-except
+            warnings.append(f"detach of volume {new_volume.id} failed: {e}")
     if new_volume is not None:
         try:
             conn.block_storage.delete_volume(new_volume.id)
-        except Exception:  # pylint: disable=broad-except
-            pass
-    if snapshot is not None:
-        try:
-            conn.block_storage.delete_snapshot(snapshot.id)
-        except Exception:  # pylint: disable=broad-except
-            pass
+        except Exception as e:  # pylint: disable=broad-except
+            warnings.append(f"delete of temp volume {new_volume.id} failed: {e}")
+    return warnings
 
 
 def detach_and_cleanup(conn, proxy, copy, keep_snapshot=False, timeout=900):
