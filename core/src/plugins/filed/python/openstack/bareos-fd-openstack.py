@@ -42,6 +42,7 @@ from bareos_openstack_api.options import (  # pylint: disable=import-error
 )
 from bareos_openstack_api.connection import connect  # pylint: disable=import-error
 from bareos_openstack_api import volumes  # pylint: disable=import-error
+from bareos_openstack_api import instance_metadata  # pylint: disable=import-error
 
 
 @BareosPlugin  # pylint: disable=undefined-variable
@@ -64,6 +65,9 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         self.volume_devices = {}
         self.current_copy = None
         self._device_fd = None
+        self.instance_metadata = None
+        self.metadata_emitted = False
+        self.object_index = 0
 
     def check_options(self, mandatory_options=None):
         """
@@ -165,6 +169,31 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
                 self.conn, self.instance
             )
 
+        self.instance_metadata = instance_metadata.collect_instance_metadata(
+            self.conn, self.instance
+        )
+
+        return bareosfd.bRC_OK
+
+    def _emit_metadata_object(self, savepkt):
+        """Emit the collected instance metadata as a restore object."""
+        filename = f"@OPENSTACK/{self.instance.name}/{self.instance.id}/instance.json"
+        object_data = bytearray(
+            instance_metadata.to_json_bytes(self.instance_metadata)
+        )
+
+        savepkt.statp = bareosfd.StatPacket()
+        savepkt.type = bareosfd.FT_RESTORE_FIRST
+        savepkt.fname = filename
+        savepkt.object_name = filename
+        savepkt.object = object_data
+        savepkt.object_len = len(object_data)
+        self.object_index += 1
+        savepkt.object_index = self.object_index
+
+        bareosfd.JobMessage(
+            bareosfd.M_INFO, f"Backing up instance metadata as {filename}\n"
+        )
         return bareosfd.bRC_OK
 
     def start_backup_file(self, savepkt):
@@ -172,6 +201,10 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         Snapshot the next pending volume, attach the copy to the proxy,
         and describe it as one virtual file per volume.
         """
+        if not self.metadata_emitted:
+            self.metadata_emitted = True
+            return self._emit_metadata_object(savepkt)
+
         if not self.pending_volumes:
             return bareosfd.bRC_Stop
 
@@ -231,6 +264,8 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
 
     def end_backup_file(self):
         """Detach and delete the temp volume/snapshot for the file just backed up."""
+        if self.current_copy is None:
+            return bareosfd.bRC_OK
         warnings = volumes.detach_and_cleanup(
             self.conn,
             self.proxy,
