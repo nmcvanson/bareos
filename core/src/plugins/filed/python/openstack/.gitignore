@@ -1,0 +1,11 @@
+# Local dev environment for this plugin (not part of the bareos-fd-openstack
+# package itself) — see DEV_SETUP.md.
+.venv/
+__pycache__/
+*.pyc
+clouds.yaml
+.env
+
+# DESIGN.md S14 M1 throwaway PoC - validates OpenStack mechanics, never
+# meant to ship or become part of a PR.
+poc/

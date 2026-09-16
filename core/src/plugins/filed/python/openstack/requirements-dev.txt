@@ -1,0 +1,5 @@
+# Dev/test dependencies for bareos-fd-openstack, not the plugin's runtime
+# requirement (that's just python3-openstacksdk, see DESIGN.md §13).
+openstacksdk>=4.0
+keystoneauth1>=5.0
+requests_mock>=1.12
