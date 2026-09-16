@@ -46,6 +46,7 @@
 #include "dird/sd_cmds.h"
 #include "ndmp/smc.h"
 #include "dird/storage.h"
+#include "dird/storage_group_policy.h"
 #include "include/auth_protocol_types.h"
 #include "include/protocol_types.h"
 
@@ -170,13 +171,18 @@ bool DoNativeBackupInit(JobControlRecord* jcr)
     return false;
   }
 
-  /* A storage group survived to here: report the candidates and the current choice. */
+  /* A storage group survived to here. Apply the policy, which filters the
+   * candidates and reorders them, then reports what it settled on. */
   if (jcr->dir_impl->res.write_storage_list->size() > 1) {
+    const char* policy_name = nullptr;
+    ResolveStorageGroupPolicy(jcr->dir_impl->res.job, jcr->dir_impl->res.pool,
+                              &policy_name);
+    int candidates = ApplyStorageGroupPolicy(jcr);
+
     Jmsg(jcr, M_INFO, 0,
-         T_("Storage group: %d candidates, using \"%s\" (%s).\n"),
-         jcr->dir_impl->res.write_storage_list->size(),
-         jcr->dir_impl->res.write_storage->resource_name_,
-         jcr->dir_impl->res.wstore_source);
+         T_("Storage group: %d candidates, using \"%s\" (%s, policy %s).\n"),
+         candidates, jcr->dir_impl->res.write_storage->resource_name_,
+         jcr->dir_impl->res.wstore_source, policy_name);
   }
 
   if (!ValidateClient(jcr) || !ValidateStorage(jcr)) { return false; }

@@ -119,6 +119,116 @@ expect_grep "Termination: *Backup OK" \
   "$singlelog" \
   "Single-storage backup did not terminate correctly."
 
+# ---------------------------------------------------------------------------
+# The cases above prove the LIST survives. The cases below prove the POLICY
+# actually changes what the job does.
+# ---------------------------------------------------------------------------
+
+disabledlog="$tmp/group-disabled.out"
+policylog="$tmp/group-policy.out"
+rm -f "$disabledlog" "$policylog"
+
+# Case 4: the first member is Enabled = no.
+#
+# This is the case that proves the feature does real work. Until now Enabled
+# on a Storage was parsed and read only by output filters -- nothing in the
+# Director acted on it. The policy filter must drop FileDisabled, report one
+# surviving candidate, and the data must actually be written through File2
+# rather than through the disabled member.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $disabledlog
+run job=backup-group-disabled level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 1 candidates, using .File2." \
+  "$disabledlog" \
+  "The disabled storage was not filtered out of the group."
+
+expect_grep "skipping .FileDisabled., it is disabled" \
+  "$disabledlog" \
+  "No warning was issued for the disabled group member."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$disabledlog" \
+  "The job did not write through the surviving member device."
+
+expect_not_grep "Using Device .FileStorage. to write." \
+  "$disabledlog" \
+  "The job wrote through the disabled member device."
+
+expect_grep "Termination: *Backup OK" \
+  "$disabledlog" \
+  "Backup through a filtered storage group did not terminate correctly."
+
+# Case 5: a policy declared by name is resolved and reported.
+#
+# Every member is idle, so LeastUsed sorts on equal counters and stable_sort
+# keeps the configured order. The observable is that the resolver ran and
+# named the declared policy rather than falling back to the default.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $policylog
+run job=backup-group-leastused level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "policy LeastUsed" \
+  "$policylog" \
+  "The declared LeastUsed policy was not resolved and reported."
+
+expect_grep "Termination: *Backup OK" \
+  "$policylog" \
+  "Backup with a declared storage group policy did not terminate correctly."
+
+# A group that declares no policy must report the default name, not blank.
+expect_grep "policy ListedOrder" \
+  "$grouplog" \
+  "A group with no declared policy did not report the default policy name."
+
+# Case 6: the same two members, declared in the opposite order.
+#
+# Both are enabled, so the Director still hands the Storage Daemon both
+# "use storage=" entries; only the order and write_storage differ. This is the
+# case that decides whether the policy ordering really selects the device or
+# whether the daemon picks for itself out of the menu it was given. The
+# Director discards the daemon answer (the save actual device name FIXME in
+# msgchan.cc), so the job log device line is the only observable.
+reversedlog="$tmp/group-reversed.out"
+rm -f "$reversedlog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $reversedlog
+run job=backup-group-reversed level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 2 candidates, using .File2." \
+  "$reversedlog" \
+  "Reversing the configured order did not change the Director choice."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$reversedlog" \
+  "The policy chose File2 but the data was not written through its device."
+
+expect_grep "Termination: *Backup OK" \
+  "$reversedlog" \
+  "Backup with a reversed storage group did not terminate correctly."
+
 check_for_zombie_jobs storage=File
 
 end_test

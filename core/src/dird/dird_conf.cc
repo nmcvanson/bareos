@@ -1168,16 +1168,13 @@ bool ValidateResource(int res_type,
   return true;
 }
 
-/* Storage group policies that are implemented.
- *
+/* 
+ * Storage group policies that are implemented.
  * A name listed here is accepted by the configuration parser; anything else
- * is rejected with the list of valid names. Bacula also defines FreeSpace and
- * FreeSpaceLeastUsed; both are omitted deliberately, because they need free
- * space accounting in the Storage Daemon and Bareos has none. Accepting a
- * name that silently does nothing would be worse than a configuration error,
- * and adding names later is backward compatible. */
+ * is rejected with the list of valid names.
+ */
 static const char* storage_group_policies[]
-    = {"ListedOrder", "LeastUsed", "LastBackedUpTo", nullptr};
+    = {"ListedOrder", "LeastUsed", nullptr};
 
 /* Check one StorageGroupPolicy value. An unset policy is valid: the effective
  * policy is resolved Pool, then Job, then default, at job setup. */
