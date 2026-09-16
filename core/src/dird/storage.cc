@@ -209,6 +209,27 @@ void SetWstorage(JobControlRecord* jcr, UnifiedStorageResource* store)
   jcr->dir_impl->res.write_storage_list->prepend(store->store);
 }
 
+/*
+ * Point write_storage at a member of write_storage_list.
+ * Returns false and changes nothing if store is not a member.
+ */
+bool SetCurrentWstorage(JobControlRecord* jcr, StorageResource* store)
+{
+  if (!jcr || !store || !jcr->dir_impl->res.write_storage_list) {
+    return false;
+  }
+
+  for (auto* candidate : jcr->dir_impl->res.write_storage_list) {
+    if (candidate == store) {
+      jcr->dir_impl->res.write_storage = store;
+      Dmsg1(100, "current write_storage=%s\n", store->resource_name_);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * May this job's write storage list be kept as a group?
  *

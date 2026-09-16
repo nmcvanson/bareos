@@ -55,6 +55,12 @@ JobResource* GetJob(const char* name)
 {
   return dynamic_cast<JobResource*>(my_config->GetResWithName(R_JOB, name));
 }
+
+StorageResource* GetStorage(const char* name)
+{
+  return dynamic_cast<StorageResource*>(
+      my_config->GetResWithName(R_STORAGE, name));
+}
 }  // namespace
 
 /* A Job declaring "Storage = storage01, storage02" must reach the job control
@@ -184,4 +190,121 @@ TEST(StorageGroupList, OnlyNativeBackupMayKeepAGroup)
 TEST(StorageGroupList, JobMayUseStorageGroupHandlesNull)
 {
   EXPECT_FALSE(JobMayUseStorageGroup(nullptr));
+}
+
+/* B.1: SetCurrentWstorage moves write_storage within the list the job
+ * already has, where SetWstorage frees the list and rebuilds it around one
+ * member. The policy in B.4 and the failover loop in stage C both need the
+ * non-destructive form. */
+TEST(StorageGroupList, SetCurrentWstorageMovesThePointer)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  JobResource* job = GetJob("job-with-policy");
+  ASSERT_NE(job, nullptr);
+  CopyWstorage(jcr.get(), job->storage, "Job resource");
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
+  ASSERT_STREQ(jcr->dir_impl->res.write_storage->resource_name_,
+               "storage01");
+
+  StorageResource* second = GetStorage("storage02");
+  ASSERT_NE(second, nullptr);
+
+  EXPECT_TRUE(SetCurrentWstorage(jcr.get(), second));
+
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, second);
+  /* the list must be untouched: same size, same members, same order */
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
+  EXPECT_STREQ((
+      (StorageResource*)jcr->dir_impl->res.write_storage_list->get(0))
+                   ->resource_name_,
+               "storage01");
+  EXPECT_STREQ((
+      (StorageResource*)jcr->dir_impl->res.write_storage_list->get(1))
+                   ->resource_name_,
+               "storage02");
+}
+
+/* A storage that is not in the list must be refused, and nothing may move.
+ * Stage C relies on this to skip a candidate rather than point the job at a
+ * storage the policy never approved. */
+TEST(StorageGroupList, SetCurrentWstorageRefusesANonMember)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  JobResource* job = GetJob("job-without-policy");
+  ASSERT_NE(job, nullptr);
+  CopyWstorage(jcr.get(), job->storage, "Job resource");
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+
+  StorageResource* before = jcr->dir_impl->res.write_storage;
+  StorageResource* outsider = GetStorage("storage02");
+  ASSERT_NE(outsider, nullptr);
+  ASSERT_NE(outsider, before);
+
+  EXPECT_FALSE(SetCurrentWstorage(jcr.get(), outsider));
+
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, before);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+}
+
+/* A one-member list is the common case in the field and must still work:
+ * selecting the only member succeeds and is a no-op. */
+TEST(StorageGroupList, SetCurrentWstorageOnASingleMemberList)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  JobResource* job = GetJob("job-without-policy");
+  ASSERT_NE(job, nullptr);
+  CopyWstorage(jcr.get(), job->storage, "Job resource");
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+
+  StorageResource* only = jcr->dir_impl->res.write_storage;
+  ASSERT_NE(only, nullptr);
+
+  EXPECT_TRUE(SetCurrentWstorage(jcr.get(), only));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, only);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+}
+
+/* Null arguments, and a job that has no list at all, must be refused rather
+ * than dereferenced. DoNativeBackupInit can reach the policy before the list
+ * exists if a config is malformed. */
+TEST(StorageGroupList, SetCurrentWstorageRejectsMissingInputs)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  StorageResource* any = GetStorage("storage01");
+  ASSERT_NE(any, nullptr);
+
+  /* no list built yet */
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list, nullptr);
+  EXPECT_FALSE(SetCurrentWstorage(jcr.get(), any));
+
+  EXPECT_FALSE(SetCurrentWstorage(nullptr, any));
+  EXPECT_FALSE(SetCurrentWstorage(jcr.get(), nullptr));
 }
