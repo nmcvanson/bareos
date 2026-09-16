@@ -49,7 +49,11 @@ def build_connect_kwargs(options):
     if options.project_id:
         kwargs["project_id"] = options.project_id
 
-    if "application_credential_id" in options:
+    has_appcred = (
+        "application_credential_id" in options
+        and "application_credential_secret" in options
+    )
+    if has_appcred:
         kwargs["auth_type"] = "v3applicationcredential"
         kwargs["application_credential_id"] = options.application_credential_id
         kwargs["application_credential_secret"] = (

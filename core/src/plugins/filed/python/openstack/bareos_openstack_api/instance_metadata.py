@@ -26,15 +26,19 @@ Kept free of any `bareosfd` dependency so this is unit-testable with plain
 import json
 
 
-def collect_instance_metadata(conn, instance):
-    """Collect flavor, image, volume-attachment, and network-port info for
-    a Nova instance."""
+def collect_instance_metadata(conn, instance, attachments=None):
+    """
+    Collect flavor, image, volume-attachment, and network-port info for a
+    Nova instance. Pass a precomputed `attachments` list to avoid
+    re-fetching it when the caller already has one.
+    """
     flavor_id = (instance.flavor or {}).get("id")
     flavor = conn.compute.find_flavor(flavor_id) if flavor_id else None
 
+    if attachments is None:
+        attachments = conn.compute.volume_attachments(instance)
     volume_attachments = [
-        {"volume_id": a.volume_id, "device": a.device}
-        for a in conn.compute.volume_attachments(instance)
+        {"volume_id": a.volume_id, "device": a.device} for a in attachments
     ]
 
     ports = [

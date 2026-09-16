@@ -31,6 +31,7 @@ implemented yet.
 """
 
 import os
+import time
 
 from BareosFdWrapper import *  # noqa # pylint: disable=import-error,wildcard-import
 import bareosfd  # pylint: disable=import-error
@@ -160,18 +161,25 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
             )
             return bareosfd.bRC_Error
 
+        attachments = None
         if self.options.include_volumes:
-            self.volume_devices = {
-                a.volume_id: a.device
-                for a in self.conn.compute.volume_attachments(self.instance)
-            }
+            attachments = list(
+                self.conn.compute.volume_attachments(self.instance)
+            )
+            self.volume_devices = {a.volume_id: a.device for a in attachments}
             self.pending_volumes = volumes.list_attached_volumes(
-                self.conn, self.instance
+                self.conn, self.instance, attachments=attachments
             )
 
-        self.instance_metadata = instance_metadata.collect_instance_metadata(
-            self.conn, self.instance
-        )
+        try:
+            self.instance_metadata = instance_metadata.collect_instance_metadata(
+                self.conn, self.instance, attachments=attachments
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            bareosfd.JobMessage(
+                bareosfd.M_FATAL, f"Failed to collect instance metadata: {e}\n"
+            )
+            return bareosfd.bRC_Error
 
         return bareosfd.bRC_OK
 
@@ -250,16 +258,40 @@ class BareosFdOpenstack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         Open the attached device for reading - matches Proxmox's
         stream-a-real-fd approach rather than the base class's default,
         which assumes a real filesystem path (wrong for our virtual
-        device filenames).
+        device filenames). Retries briefly since Cinder/Nova reporting the
+        attachment as ready doesn't guarantee the device node has appeared
+        on the proxy's OS yet.
         """
-        self._device_fd = os.open(self.current_copy.device, os.O_RDONLY)
+        device = self.current_copy.device
+        deadline = time.monotonic() + self.options.poll_timeout
+        while True:
+            try:
+                self._device_fd = os.open(device, os.O_RDONLY)
+                break
+            except FileNotFoundError:
+                if time.monotonic() > deadline:
+                    bareosfd.JobMessage(
+                        bareosfd.M_FATAL,
+                        f"Device {device} did not appear within "
+                        f"{self.options.poll_timeout}s\n",
+                    )
+                    return bareosfd.bRC_Error
+                time.sleep(1)
+            except OSError as e:
+                bareosfd.JobMessage(
+                    bareosfd.M_FATAL, f"Failed to open device {device}: {e}\n"
+                )
+                return bareosfd.bRC_Error
+
         iop.filedes = self._device_fd
         iop.status = bareosfd.iostat_do_in_core
         return bareosfd.bRC_OK
 
     def plugin_io_close(self, iop):
         del iop
-        os.close(self._device_fd)
+        if self._device_fd is not None:
+            os.close(self._device_fd)
+            self._device_fd = None
         return bareosfd.bRC_OK
 
     def end_backup_file(self):

@@ -29,12 +29,15 @@ earlier steps already failed.
 from dataclasses import dataclass
 
 
-def list_attached_volumes(conn, server):
-    """Return the Cinder volumes attached to a Nova server."""
-    volumes = []
-    for attachment in conn.compute.volume_attachments(server):
-        volumes.append(conn.block_storage.get_volume(attachment.volume_id))
-    return volumes
+def list_attached_volumes(conn, server, attachments=None):
+    """
+    Return the Cinder volumes attached to a Nova server. Pass a
+    precomputed `attachments` list to avoid re-fetching it when the caller
+    already has one (e.g. also needed for instance_metadata).
+    """
+    if attachments is None:
+        attachments = conn.compute.volume_attachments(server)
+    return [conn.block_storage.get_volume(a.volume_id) for a in attachments]
 
 
 @dataclass
@@ -51,42 +54,81 @@ class AttachedVolumeCopy:
 def snapshot_and_attach(conn, volume, proxy, tags, timeout=900):
     """
     Snapshot `volume`, create a new volume from that snapshot, and attach
-    it to `proxy`. Raises on failure - the caller is responsible for
-    calling detach_and_cleanup() on whatever was already created.
+    it to `proxy`. On any failure, cleans up whatever was already created
+    (best-effort) before re-raising - callers do not need to call
+    detach_and_cleanup() themselves on the exception path.
     """
-    snapshot = conn.block_storage.create_snapshot(
-        volume_id=volume.id,
-        name=f"bareos-{volume.id}",
-        force=True,
-        metadata=tags,
-    )
-    conn.block_storage.wait_for_status(
-        snapshot, status="available", failures=["error"], wait=timeout
-    )
+    snapshot = None
+    new_volume = None
+    attached = False
+    try:
+        snapshot = conn.block_storage.create_snapshot(
+            volume_id=volume.id,
+            name=f"bareos-{volume.id}",
+            force=True,
+            metadata=tags,
+        )
+        conn.block_storage.wait_for_status(
+            snapshot, status="available", failures=["error"], wait=timeout
+        )
 
-    new_volume = conn.block_storage.create_volume(
-        name=f"bareos-restore-{snapshot.id}",
-        snapshot_id=snapshot.id,
-        size=volume.size,
-        metadata=tags,
-    )
-    conn.block_storage.wait_for_status(
-        new_volume, status="available", failures=["error"], wait=timeout
-    )
+        new_volume = conn.block_storage.create_volume(
+            name=f"bareos-restore-{snapshot.id}",
+            snapshot_id=snapshot.id,
+            size=volume.size,
+            metadata=tags,
+        )
+        conn.block_storage.wait_for_status(
+            new_volume, status="available", failures=["error"], wait=timeout
+        )
 
-    attachment = conn.compute.create_volume_attachment(
-        proxy, volume_id=new_volume.id
-    )
-    new_volume = conn.block_storage.wait_for_status(
-        new_volume, status="in-use", failures=["error"], wait=timeout
-    )
+        attachment = conn.compute.create_volume_attachment(
+            proxy, volume_id=new_volume.id
+        )
+        attached = True
+        new_volume = conn.block_storage.wait_for_status(
+            new_volume, status="in-use", failures=["error"], wait=timeout
+        )
 
-    return AttachedVolumeCopy(
-        original_volume_id=volume.id,
-        snapshot_id=snapshot.id,
-        volume_id=new_volume.id,
-        device=attachment.device,
-    )
+        return AttachedVolumeCopy(
+            original_volume_id=volume.id,
+            snapshot_id=snapshot.id,
+            volume_id=new_volume.id,
+            device=attachment.device,
+        )
+    except Exception:
+        _cleanup_partial(conn, proxy, snapshot, new_volume, attached, timeout)
+        raise
+
+
+def _cleanup_partial(conn, proxy, snapshot, new_volume, attached, timeout):
+    """
+    Best-effort cleanup of whatever snapshot_and_attach() managed to create
+    before it failed. Never raises - matches detach_and_cleanup()'s
+    philosophy that anything left over is caught by tagging-based garbage
+    collection, not by this call succeeding.
+    """
+    if attached and new_volume is not None:
+        try:
+            conn.compute.delete_volume_attachment(new_volume.id, proxy)
+            conn.block_storage.wait_for_status(
+                conn.block_storage.get_volume(new_volume.id),
+                status="available",
+                failures=["error"],
+                wait=timeout,
+            )
+        except Exception:  # pylint: disable=broad-except
+            pass
+    if new_volume is not None:
+        try:
+            conn.block_storage.delete_volume(new_volume.id)
+        except Exception:  # pylint: disable=broad-except
+            pass
+    if snapshot is not None:
+        try:
+            conn.block_storage.delete_snapshot(snapshot.id)
+        except Exception:  # pylint: disable=broad-except
+            pass
 
 
 def detach_and_cleanup(conn, proxy, copy, keep_snapshot=False, timeout=900):
