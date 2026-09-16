@@ -829,8 +829,12 @@ static bool ResetRestoreContext(UaContext* ua,
   }
   /* Only override the storage list when the user actually named a storage.
    * Otherwise keep the list built by SetJcrDefaults, so a storage group
-   * survives to the policy in DoNativeBackupInit. */
-  if (rc.store_explicit || !jcr->dir_impl->res.write_storage_list
+   * survives to the policy in DoNativeBackupInit.
+   *
+   * Restricted to the job types JobMayUseStorageGroup() allows: every other
+   * type keeps its pre-existing behaviour exactly. */
+  if (rc.store_explicit || !JobMayUseStorageGroup(jcr)
+      || !jcr->dir_impl->res.write_storage_list
       || jcr->dir_impl->res.write_storage_list->size() <= 1) {
     SetRwstorage(jcr, rc.store);
   }

@@ -34,6 +34,7 @@
 #include "dird/director_jcr_impl.h"
 #include "dird/sd_cmds.h"
 #include "include/auth_protocol_types.h"
+#include "include/protocol_types.h"
 #include "lib/parse_conf.h"
 #include "lib/util.h"
 
@@ -206,6 +207,24 @@ void SetWstorage(JobControlRecord* jcr, UnifiedStorageResource* store)
 
   // Store not in list, so add it
   jcr->dir_impl->res.write_storage_list->prepend(store->store);
+}
+
+/**
+ * May this job's write storage list be kept as a group?
+ *
+ * Only a native backup reaches the storage group policy, and only it
+ * rebuilds the list from the Pool afterwards. Every other job type must keep
+ * the historical behaviour of collapsing the list to a single member, because
+ * nothing downstream would rebuild it. This matters most for Verify, whose
+ * read storage list is never rebuilt: leaving a group in place there switches
+ * the job silently from the Pool's storage to the Job's, since SetJcrDefaults
+ * prefers the Job where GetJobStorage prefers the Pool.
+ */
+bool JobMayUseStorageGroup(const JobControlRecord* jcr)
+{
+  if (!jcr) { return false; }
+  return jcr->getJobType() == JT_BACKUP
+         && jcr->getJobProtocol() == PT_NATIVE;
 }
 
 void FreeWstorage(JobControlRecord* jcr)

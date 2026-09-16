@@ -38,6 +38,7 @@ void CopyWstorage(JobControlRecord* jcr,
                   alist<StorageResource*>* storage,
                   const char* where);
 void SetWstorage(JobControlRecord* jcr, UnifiedStorageResource* store);
+bool JobMayUseStorageGroup(const JobControlRecord* jcr);
 void FreeWstorage(JobControlRecord* jcr);
 void CopyRstorage(JobControlRecord* jcr,
                   alist<StorageResource*>* storage,

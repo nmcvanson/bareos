@@ -27,8 +27,9 @@
  * Note on coverage: the guard added in A.3 lives in ResetRestoreContext,
  * which is static in ua_run.cc and cannot be reached from a unit test. What
  * is covered here is the behaviour that guard depends on -- CopyWstorage
- * keeping every member, and SetWstorage destroying all but one. The guard
- * itself is covered by the systemtest. */
+ * keeping every member, SetWstorage destroying all but one, and the
+ * JobMayUseStorageGroup predicate the guard now consults. The guard's own
+ * wiring is covered by the systemtest. */
 
 #include "testing_dir_common.h"
 
@@ -37,6 +38,8 @@
 #include "dird/jcr_util.h"
 #include "dird/storage.h"
 #include "include/jcr.h"
+#include "include/protocol_types.h"
+#include "include/job_types.h"
 
 using namespace directordaemon;
 
@@ -138,4 +141,47 @@ TEST(StorageGroupList, SingleStorageJobIsNotAGroup)
   ASSERT_NE(jcr->dir_impl->res.write_storage_list, nullptr);
   EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
   EXPECT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage01");
+}
+
+/* JobMayUseStorageGroup decides whether ResetRestoreContext keeps a group
+ * alive or collapses it the way it always did. Only a native backup may keep
+ * one: it is the only job type that reaches the policy, and the only one that
+ * rebuilds its write list from the Pool afterwards.
+ *
+ * Verify is the case that made this necessary. Its read storage list is never
+ * rebuilt, so a surviving group would switch it from the Pool's storage to the
+ * Job's -- SetJcrDefaults prefers the Job, GetJobStorage prefers the Pool. */
+TEST(StorageGroupList, OnlyNativeBackupMayKeepAGroup)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  jcr->setJobProtocol(PT_NATIVE);
+
+  jcr->setJobType(JT_BACKUP);
+  EXPECT_TRUE(JobMayUseStorageGroup(jcr.get()));
+
+  for (int job_type : {JT_VERIFY, JT_RESTORE, JT_MIGRATE, JT_COPY, JT_ADMIN,
+                       JT_CONSOLIDATE, JT_ARCHIVE}) {
+    jcr->setJobType(job_type);
+    EXPECT_FALSE(JobMayUseStorageGroup(jcr.get()))
+        << "job type '" << static_cast<char>(job_type)
+        << "' must not keep a storage group";
+  }
+
+  /* A non-native backup does not reach DoNativeBackupInit either. */
+  jcr->setJobType(JT_BACKUP);
+  jcr->setJobProtocol(PT_NDMP_BAREOS);
+  EXPECT_FALSE(JobMayUseStorageGroup(jcr.get()));
+}
+
+/* A null job control record must not crash the guard. */
+TEST(StorageGroupList, JobMayUseStorageGroupHandlesNull)
+{
+  EXPECT_FALSE(JobMayUseStorageGroup(nullptr));
 }
