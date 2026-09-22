@@ -246,6 +246,9 @@ class JobControlRecord {
   int64_t max_bandwidth{};  /**< Bandwidth limit for this Job */
   PathList* path_list{};      /**< Directory list (used by findlib) */
   bool is_passive_client_connection_probing{}; /**< Set if director probes a passive client connection */
+  /* Set while the Director tries one member of a storage group: M_FATAL
+   * is then reported as a warning (lib/message.cc). */
+  bool trying_storage_candidate{};
 
   /* These flags store whether a particular set of runscripts already ran
    * This is necessary to make sure that each configured runscript only runs
