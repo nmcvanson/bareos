@@ -25,6 +25,7 @@
 #define BAREOS_DIRD_DIRECTOR_JCR_IMPL_H_
 
 #include <optional>
+#include <string>
 
 #include "cats/cats.h"
 #include "lib/mem_pool.h"
@@ -139,6 +140,8 @@ struct DirectorJcrImpl {
     JobId_t VerifyJobId;                /**< Verify JobId specified by UA */
   };
   PoolMem fname{PM_FNAME};              /**< Name to put into catalog */
+  std::string write_device_name;        /**< Device the SD reserved to write */
+  bool uses_storage_group{};            /**< Job started with a storage group */
   POOLMEM* client_uname{};              /**< Client uname */
   POOLMEM* FDSecureEraseCmd{};          /**< Report: Secure Erase Command  */
   POOLMEM* SDSecureEraseCmd{};          /**< Report: Secure Erase Command  */
