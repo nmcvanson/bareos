@@ -56,8 +56,7 @@ static bool IncClientConcurrency(JobControlRecord* jcr);
 static void DecClientConcurrency(JobControlRecord* jcr);
 static bool IncJobConcurrency(JobControlRecord* jcr);
 static void DecJobConcurrency(JobControlRecord* jcr);
-static bool IncWriteStore(JobControlRecord* jcr);
-static void DecWriteStore(JobControlRecord* jcr);
+/* IncWriteStore and DecWriteStore are declared in jobq.h. */
 
 /*
  * Initialize a job queue
@@ -921,7 +920,9 @@ int GetStorageNumConcurrentJobs(StorageResource* store)
   return num_jobs;
 }
 
-static bool IncWriteStore(JobControlRecord* jcr)
+/* Charge a job against its write Storage's concurrency limit. Returns false
+ * when the Storage is already at its MaxConcurrentJobs. */
+bool IncWriteStore(JobControlRecord* jcr)
 {
   if (jcr->dir_impl->IgnoreStorageConcurrency) { return true; }
 
@@ -949,7 +950,7 @@ static bool IncWriteStore(JobControlRecord* jcr)
   return false;
 }
 
-static void DecWriteStore(JobControlRecord* jcr)
+void DecWriteStore(JobControlRecord* jcr)
 {
   if (jcr->dir_impl->res.write_storage
       && !jcr->dir_impl->IgnoreStorageConcurrency) {
