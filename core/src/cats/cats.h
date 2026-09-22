@@ -689,11 +689,14 @@ class BareosDb : public BareosDbQueryEnum {
                         char* job);
   bool FindLastJobid(JobControlRecord* jcr, const char* Name, JobDbRecord* jr);
   bool FindJobById(JobControlRecord* jcr, const std::string id);
+  /* restrict_to_storage limits the search to mr->StorageId, as InChanger
+   * does, but without requiring InChanger=1. */
   int FindNextVolume(JobControlRecord* jcr,
                      int index,
                      bool InChanger,
                      MediaDbRecord* mr,
-                     const char* unwanted_volumes);
+                     const char* unwanted_volumes,
+                     bool restrict_to_storage = false);
   bool FindFailedJobSince(JobControlRecord* jcr,
                           JobDbRecord* jr,
                           POOLMEM* stime,
@@ -810,7 +813,8 @@ class BareosDb : public BareosDbQueryEnum {
                       bool count,
                       OutputFormatter* sendit,
                       e_list_type type,
-                      bool descending = false);
+                      bool descending = false,
+                      const char* storagename = nullptr);
   void ListJobTotals(JobControlRecord* jcr,
                      JobDbRecord* jr,
                      OutputFormatter* sendit);
