@@ -240,12 +240,15 @@ bool SetCurrentWstorage(JobControlRecord* jcr, StorageResource* store)
  * read storage list is never rebuilt: leaving a group in place there switches
  * the job silently from the Pool's storage to the Job's, since SetJcrDefaults
  * prefers the Job where GetJobStorage prefers the Pool.
+ *
+ * A VirtualFull is excluded too: it never applies the policy. The decision
+ * is JobAttributesMayUseStorageGroup(), checked at compile time.
  */
 bool JobMayUseStorageGroup(const JobControlRecord* jcr)
 {
   if (!jcr) { return false; }
-  return jcr->getJobType() == JT_BACKUP
-         && jcr->getJobProtocol() == PT_NATIVE;
+  return JobAttributesMayUseStorageGroup(
+      jcr->getJobType(), jcr->getJobProtocol(), jcr->getJobLevel());
 }
 
 void FreeWstorage(JobControlRecord* jcr)

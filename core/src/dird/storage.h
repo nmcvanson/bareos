@@ -24,6 +24,12 @@
 
 #include "ndmp/smc.h"
 #include "dird/dird.h"
+#include "include/job_level.h"
+#include "include/job_types.h"
+#include "include/protocol_types.h"
+
+#include <cstdint>
+#include <string_view>
 
 template <typename T> class alist;
 
@@ -39,6 +45,39 @@ void CopyWstorage(JobControlRecord* jcr,
                   const char* where);
 void SetWstorage(JobControlRecord* jcr, UnifiedStorageResource* store);
 bool SetCurrentWstorage(JobControlRecord* jcr, StorageResource* store);
+
+/**
+ * May a job with these attributes keep a storage group? Only a native
+ * backup, and not a VirtualFull, which never applies the policy.
+ */
+constexpr bool JobAttributesMayUseStorageGroup(int32_t job_type,
+                                               int32_t protocol,
+                                               int32_t job_level)
+{
+  return job_type == JT_BACKUP && protocol == PT_NATIVE
+         && job_level != L_VIRTUAL_FULL;
+}
+
+/**
+ * Connect timeout for one storage group member: StorageGroupConnectTimeout
+ * when the job has a group and it is set, otherwise SdConnectTimeout.
+ */
+constexpr int64_t StorageCandidateConnectTimeout(bool uses_storage_group,
+                                                 int64_t group_timeout,
+                                                 int64_t sd_timeout)
+{
+  return (uses_storage_group && group_timeout > 0) ? group_timeout : sd_timeout;
+}
+
+/**
+ * Does a reservation reply name a real device? Under Just In Time
+ * Reservation, the daemon's default, it names a placeholder instead.
+ */
+constexpr bool ReservedDeviceIsKnown(std::string_view device_name)
+{
+  return !device_name.empty() && device_name != "JustInTime Device";
+}
+
 bool JobMayUseStorageGroup(const JobControlRecord* jcr);
 void FreeWstorage(JobControlRecord* jcr);
 void CopyRstorage(JobControlRecord* jcr,
