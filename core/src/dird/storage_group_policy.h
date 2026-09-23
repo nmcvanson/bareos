@@ -52,7 +52,7 @@ enum class StorageGroupPolicyType
 };
 
 /* Resolve the effective policy for a job: Pool first, then Job, then the
- * default. Matches the directive descriptions and Bacula's precedence.
+ * default, as both directive descriptions say.
  *
  * name_out, when given, receives the canonical name of the returned policy
  * as a static string. It is never null and never needs freeing. */

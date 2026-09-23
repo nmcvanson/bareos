@@ -138,29 +138,18 @@ void RebuildAlist(alist<StorageResource*>* list,
 }
 
 /**
- * Drop members this job must not use, in place.
+ * Drop members this job must not use, in place: those with Enabled = no.
  *
- * Two filters today:
- *   - Enabled = no on the Storage. Declared since forever and read only by
- *     output filters, so honouring it here is new behaviour and better than
- *     Bacula, whose STORE::is_enabled() has no caller at all.
- *   - members on a different Storage Daemon than the first. Every member is
- *     announced down the single socket opened to write_storage, and the SD
- *     matches device names and media types, never Storage names, so a
- *     cross-daemon member fails confusingly rather than cleanly.
- *
- * Never empties the list: if every member would be dropped the original is
- * kept and the caller warns. A configuration mistake must not turn into a
- * failed job.
+ * If every member is disabled the configured list is used unchanged, with
+ * a warning. A configuration mistake must not turn into a failed job.
  */
 void FilterCandidates(JobControlRecord* jcr,
                       std::vector<StorageResource*>& candidates)
 {
   if (candidates.size() < 2) { return; }
 
-  StorageResource* reference = candidates.front();
-  std::vector<StorageResource*> kept;
-  kept.reserve(candidates.size());
+  std::vector<StorageResource*> enabled;
+  enabled.reserve(candidates.size());
 
   for (auto* store : candidates) {
     if (!store->enabled) {
@@ -169,24 +158,17 @@ void FilterCandidates(JobControlRecord* jcr,
            store->resource_name_);
       continue;
     }
-    if (store != reference && !IsSameStorageDaemon(reference, store)) {
-      Jmsg(jcr, M_WARNING, 0,
-           T_("Storage group: skipping \"%s\", it is not on the same Storage "
-              "Daemon as \"%s\".\n"),
-           store->resource_name_, reference->resource_name_);
-      continue;
-    }
-    kept.push_back(store);
+    enabled.push_back(store);
   }
 
-  if (kept.empty()) {
+  if (enabled.empty()) {
     Jmsg(jcr, M_WARNING, 0,
-         T_("Storage group: every member was filtered out, using the "
+         T_("Storage group: every member is disabled, using the "
             "configured list unchanged.\n"));
     return;
   }
 
-  candidates.swap(kept);
+  candidates.swap(enabled);
 }
 
 } /* namespace */
@@ -209,8 +191,7 @@ StorageGroupPolicyType ResolveStorageGroupPolicy(const JobResource* job,
 {
   const char* declared = nullptr;
 
-  /* Pool wins over Job, matching the directive descriptions, the config
-   * validator's comment and Bacula's job.c precedence. */
+  /* Pool wins over Job, as both directive descriptions say. */
   if (pool && pool->storage_group_policy) {
     declared = pool->storage_group_policy;
   } else if (job && job->storage_group_policy) {
