@@ -117,9 +117,9 @@ class DirectorResource
   utime_t SDConnectTimeout = {0};     /* Timeout for connect in seconds */
   utime_t StorageGroupConnectTimeout
       = {0}; /* Timeout for one candidate while trying a storage group */
-  utime_t heartbeat_interval = {0};   /* Interval to send heartbeats */
-  utime_t stats_retention = {0}; /* Statistics retention period in seconds */
-  bool ndmp_snooping = false;    /* NDMP Protocol specific snooping enabled */
+  utime_t heartbeat_interval = {0}; /* Interval to send heartbeats */
+  utime_t stats_retention = {0};    /* Statistics retention period in seconds */
+  bool ndmp_snooping = false; /* NDMP Protocol specific snooping enabled */
   bool ndmp_fhinfo_set_zero_for_invalid_u_quad
       = false;  // Workaround for Isilon 9.1.0.0 not accepting -1 as value for
                 // FhInfo (which is the tape offset)
@@ -421,7 +421,6 @@ class JobResource : public BareosResource {
   CatalogResource* catalog = nullptr;   /**< Which Catalog to use */
   alist<StorageResource*>* storage = nullptr; /**< Where is device -- list of Storage to be used */
   char* storage_group_policy = nullptr; /**< Storage group policy name, resolved Pool then Job then default */
-  uint64_t storage_group_policy_threshold = 0; /**< Threshold used by size-based storage group policies */
   PoolResource* pool = nullptr;       /**< Where is media -- Media Pool */
   PoolResource* full_pool = nullptr;  /**< Pool for Full backups */
   PoolResource* vfull_pool = nullptr; /**< Pool for Virtual Full backups */
@@ -579,16 +578,15 @@ class PoolResource : public BareosResource {
   uint64_t MigrationLowBytes = 0;   /* When migration stops */
   PoolResource* NextPool = nullptr; /* Next pool for migration */
   alist<StorageResource*>* storage
-      = nullptr;            /* Where is device -- list of Storage to be used */
+      = nullptr; /* Where is device -- list of Storage to be used */
   char* storage_group_policy = nullptr; /* Storage group policy name */
-  uint64_t storage_group_policy_threshold = 0; /* Threshold for size-based policies */
-  bool use_catalog = false; /* Maintain catalog for media */
-  bool catalog_files = false;          /* Maintain file entries in catalog */
-  bool purge_oldest_volume = false;    /* Purge oldest volume */
-  bool recycle_oldest_volume = false;  /* Attempt to recycle oldest volume */
-  bool recycle_current_volume = false; /* Attempt recycle of current volume */
-  bool AutoPrune = false;              /* Default for pool auto prune */
-  bool Recycle = false;                /* Default for media recycle yes/no */
+  bool use_catalog = false;             /* Maintain catalog for media */
+  bool catalog_files = false;           /* Maintain file entries in catalog */
+  bool purge_oldest_volume = false;     /* Purge oldest volume */
+  bool recycle_oldest_volume = false;   /* Attempt to recycle oldest volume */
+  bool recycle_current_volume = false;  /* Attempt recycle of current volume */
+  bool AutoPrune = false;               /* Default for pool auto prune */
+  bool Recycle = false;                 /* Default for media recycle yes/no */
   uint32_t action_on_purge
       = 0; /* Action on purge, e.g. truncate the disk volume */
   PoolResource* RecyclePool

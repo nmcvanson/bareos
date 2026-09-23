@@ -292,7 +292,6 @@ const ResourceItem job_items[] = {
   { "Messages", CFG_TYPE_RES, ITEM(res_job, messages), {config::Required{}, config::Code{R_MSGS}}},
   { "Storage", CFG_TYPE_ALIST_RES, ITEM(res_job, storage), {config::Code{R_STORAGE}}},
   { "StorageGroupPolicy", CFG_TYPE_STR, ITEM(res_job, storage_group_policy), {config::Description{"Policy used to pick one Storage out of the Storage list. Overridden by the same directive on the Pool."}}},
-  { "StorageGroupPolicyThreshold", CFG_TYPE_SIZE64, ITEM(res_job, storage_group_policy_threshold), {config::Description{"Threshold used by size-based storage group policies."}}},
   { "Pool", CFG_TYPE_RES, ITEM(res_job, pool), {config::Required{}, config::Code{R_POOL}}},
   { "FullBackupPool", CFG_TYPE_RES, ITEM(res_job, full_pool), {config::Code{R_POOL}}},
   { "VirtualFullBackupPool", CFG_TYPE_RES, ITEM(res_job, vfull_pool), {config::Code{R_POOL}}},
@@ -414,7 +413,6 @@ static const ResourceItem pool_items[] = {
   { "NextPool", CFG_TYPE_RES, ITEM(res_pool, NextPool), {config::Code{R_POOL}}},
   { "Storage", CFG_TYPE_ALIST_RES, ITEM(res_pool, storage), {config::Code{R_STORAGE}}},
   { "StorageGroupPolicy", CFG_TYPE_STR, ITEM(res_pool, storage_group_policy), {config::Description{"Policy used to pick one Storage out of the Storage list. Overrides the same directive on the Job."}}},
-  { "StorageGroupPolicyThreshold", CFG_TYPE_SIZE64, ITEM(res_pool, storage_group_policy_threshold), {config::Description{"Threshold used by size-based storage group policies."}}},
   { "AutoPrune", CFG_TYPE_BOOL, ITEM(res_pool, AutoPrune), {config::DefaultValue{"true"}}},
   { "Recycle", CFG_TYPE_BOOL, ITEM(res_pool, Recycle), {config::DefaultValue{"true"}}},
   { "RecyclePool", CFG_TYPE_RES, ITEM(res_pool, RecyclePool), {config::Code{R_POOL}}},
@@ -1168,7 +1166,7 @@ bool ValidateResource(int res_type,
   return true;
 }
 
-/* 
+/*
  * Storage group policies that are implemented.
  * A name listed here is accepted by the configuration parser; anything else
  * is rejected with the list of valid names.

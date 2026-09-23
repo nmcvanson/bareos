@@ -450,13 +450,13 @@ TEST_F(ConfigParser_Dir, RunScriptInheritance)
   }
 }
 
-/* A.1: StorageGroupPolicy and StorageGroupPolicyThreshold are accepted on both
- * Job and Pool, keep their values, stay unset when not declared, and are
- * emitted by the generic resource printer, which is what "show job" and
- * "show pool" use. */
+/* StorageGroupPolicy is accepted on both Job and Pool, keeps its value,
+ * stays unset when not declared, and is emitted by the generic resource
+ * printer, which is what "show job" and "show pool" use. The removed
+ * StorageGroupPolicyThreshold must not reappear. */
 void test_StorageGroupPolicy(DirectorResource* dir)
 {
-  /* A.2: this fixture's Director declares no StorageGroupConnectTimeout,
+  /* This fixture's Director declares no StorageGroupConnectTimeout,
    * so it must carry the default. The declared case is in
    * test_StorageGroupConnectTimeout. */
   ASSERT_NE(dir, nullptr);
@@ -466,13 +466,11 @@ void test_StorageGroupPolicy(DirectorResource* dir)
       my_config->GetResWithName(R_JOB, "job-with-policy"));
   ASSERT_NE(job, nullptr);
   EXPECT_STREQ("ListedOrder", job->storage_group_policy);
-  EXPECT_EQ(job->storage_group_policy_threshold, 5368709120ULL);
 
   auto* pool = dynamic_cast<PoolResource*>(
       my_config->GetResWithName(R_POOL, "pool-with-policy"));
   ASSERT_NE(pool, nullptr);
   EXPECT_STREQ("LeastUsed", pool->storage_group_policy);
-  EXPECT_EQ(pool->storage_group_policy_threshold, 10737418240ULL);
 
   /* A Job that does not declare it keeps the unset value, which is what the
    * Pool-then-Job-then-default resolution will test against later. */
@@ -480,9 +478,8 @@ void test_StorageGroupPolicy(DirectorResource* dir)
       my_config->GetResWithName(R_JOB, "job-without-policy"));
   ASSERT_NE(plain, nullptr);
   EXPECT_EQ(plain->storage_group_policy, nullptr);
-  EXPECT_EQ(plain->storage_group_policy_threshold, 0ULL);
 
-  // The generic printer must emit both directives.
+  // The generic printer must emit the directive.
   OutputFormatter output_formatter
       = OutputFormatter(sprintit, nullptr, nullptr, nullptr);
   OutputFormatterResource send = OutputFormatterResource(&output_formatter);
@@ -492,8 +489,8 @@ void test_StorageGroupPolicy(DirectorResource* dir)
   EXPECT_NE(sprintoutput.find("StorageGroupPolicy = \"ListedOrder\""),
             std::string::npos)
       << "job output was: " << sprintoutput;
-  EXPECT_NE(sprintoutput.find("StorageGroupPolicyThreshold"),
-            std::string::npos);
+  EXPECT_EQ(sprintoutput.find("StorageGroupPolicyThreshold"), std::string::npos)
+      << "the directive was removed and must not reappear in show output";
 
   sprintoutput.clear();
   pool->PrintConfig(send, *my_config);
@@ -514,7 +511,7 @@ TEST_F(ConfigParser_Dir, StorageGroupPolicy)
   test_config_directive_type(test_StorageGroupPolicy);
 }
 
-/* A.2: StorageGroupConnectTimeout is accepted on the Director, keeps its value,
+/* StorageGroupConnectTimeout is accepted on the Director, keeps its value,
  * and is emitted by the generic resource printer. The default case is asserted
  * in test_StorageGroupPolicy, whose fixture declares no timeout. */
 void test_StorageGroupConnectTimeout(DirectorResource* dir)
