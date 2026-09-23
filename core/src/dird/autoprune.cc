@@ -79,7 +79,8 @@ void DoAutoprune(JobControlRecord* jcr)
 void PruneVolumes(JobControlRecord* jcr,
                   bool InChanger,
                   MediaDbRecord* mr,
-                  StorageResource* store)
+                  StorageResource* store,
+                  bool restrict_to_storage)
 {
   int i;
   int count;
@@ -134,6 +135,13 @@ void PruneVolumes(JobControlRecord* jcr,
     Bsnprintf(changer, sizeof(changer), "AND InChanger=1 AND StorageId=%s ",
               edit_int64(mr->StorageId, ed3));
     Mmsg(query, select, ed1, ed2, mr->MediaType, changer);
+  } else if (restrict_to_storage) {
+    /* Not a changer, but a member of a storage group: stay on this
+     * storage so a sibling member's volume is never pruned. */
+    char changer[100];
+    Bsnprintf(changer, sizeof(changer), "AND StorageId=%s ",
+              edit_int64(mr->StorageId, ed3));
+    Mmsg(query, select, ed1, ed2, mr->MediaType, changer);
   } else {
     Mmsg(query, select, ed1, ed2, mr->MediaType, "");
   }
@@ -186,6 +194,12 @@ void PruneVolumes(JobControlRecord* jcr,
           Dmsg1(100, "Vol=%s not inchanger or correct StoreId\n",
                 lmr.VolumeName);
           continue; /* skip this volume, ie not loadable */
+        }
+      } else if (restrict_to_storage) {
+        if (lmr.StorageId != mr->StorageId) {
+          Dmsg1(100, "Vol=%s not on this storage group member\n",
+                lmr.VolumeName);
+          continue;
         }
       }
       if (!lmr.Recycle) {
