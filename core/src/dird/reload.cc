@@ -21,10 +21,57 @@
 
 #include "dird/reload.h"
 
+#include <algorithm>
 #include <cassert>
 #include <atomic>
+#include <vector>
 
 namespace directordaemon {
+
+/**
+ * Warn about a Storage listed twice in a group and note members with
+ * different Media Types. Never rejects the configuration. Called from
+ * CheckResources, once the whole configuration is loaded.
+ */
+static void CheckStorageGroupMembers(const char* res_type,
+                                     const char* res_name,
+                                     alist<StorageResource*>* storage)
+{
+  if (!storage || storage->size() < 2) { return; }
+
+  std::vector<StorageResource*> seen;
+  seen.reserve(storage->size());
+
+  for (auto* store : storage) {
+    if (!store) { continue; }
+
+    if (std::find(seen.begin(), seen.end(), store) != seen.end()) {
+      /* Failover would try it twice, and LeastUsed would count it double. */
+      Jmsg(nullptr, M_WARNING, 0,
+           T_("%s \"%s\": Storage \"%s\" is listed more than once in the "
+              "Storage group. Later entries are redundant.\n"),
+           res_type, res_name, store->resource_name_);
+      continue;
+    }
+    seen.push_back(store);
+  }
+
+  if (seen.size() < 2) { return; }
+
+  const char* first_media = seen.front()->media_type;
+  for (auto* store : seen) {
+    if (first_media && store->media_type
+        && !bstrcmp(first_media, store->media_type)) {
+      /* Informational: such members never share volumes. */
+      Jmsg(nullptr, M_INFO, 0,
+           T_("%s \"%s\": Storage group members use different Media Types "
+              "(\"%s\" and \"%s\"). Volumes are not shared between them, "
+              "and Maximum Volumes counts the Pool as a whole.\n"),
+           res_type, res_name, seen.front()->media_type, store->media_type);
+      break;
+    }
+  }
+}
 
 /**
  * Make a quick check to see that we have all the
@@ -120,6 +167,19 @@ bool CheckResources()
         }
       }
     }
+  }
+
+  /* Every Job and Pool whose Storage list is a group. */
+  JobResource* group_job;
+  foreach_res (group_job, R_JOB) {
+    CheckStorageGroupMembers("Job", group_job->resource_name_,
+                             group_job->storage);
+  }
+
+  PoolResource* group_pool;
+  foreach_res (group_pool, R_POOL) {
+    CheckStorageGroupMembers("Pool", group_pool->resource_name_,
+                             group_pool->storage);
   }
 
   ConsoleResource* console;
