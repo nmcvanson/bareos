@@ -41,6 +41,7 @@
 #include "dird/inc_conf.h"
 #include "dird/director_jcr_impl.h"
 #include "dird/job.h"
+#include "dird/jobq.h"
 #include "dird/msgchan.h"
 #include "dird/quota.h"
 #include "dird/sd_cmds.h"
@@ -51,6 +52,7 @@
 #include "include/protocol_types.h"
 
 #include "cats/sql.h"
+#include "lib/alist.h"
 #include "lib/bnet.h"
 #include "lib/edit.h"
 #include "lib/berrno.h"
@@ -174,6 +176,10 @@ bool DoNativeBackupInit(JobControlRecord* jcr)
   /* A storage group survived to here. Apply the policy, which filters the
    * candidates and reorders them, then reports what it settled on. */
   if (jcr->dir_impl->res.write_storage_list->size() > 1) {
+    /* Recorded before the policy can shrink the list: volume selection
+     * reads it long after. */
+    jcr->dir_impl->uses_storage_group = true;
+
     const char* policy_name = nullptr;
     ResolveStorageGroupPolicy(jcr->dir_impl->res.job, jcr->dir_impl->res.pool,
                               &policy_name);
@@ -509,6 +515,127 @@ static bool ConfigureMessageThread(JobControlRecord* jcr)
   return true;
 }
 
+/**
+ * Move this job's concurrency charge (NumConcurrentJobs) to another member
+ * of its group. The new member is charged before the old one is released;
+ * if it is already at its limit, nothing changes and false is returned.
+ */
+static bool MoveWriteStorageCharge(JobControlRecord* jcr, StorageResource* to)
+{
+  StorageResource* from = jcr->dir_impl->res.write_storage;
+  if (from == to) { return true; }
+
+  /* IncWriteStore and DecWriteStore act on the current write_storage. */
+  if (!SetCurrentWstorage(jcr, to)) { return false; }
+  if (!IncWriteStore(jcr)) {
+    SetCurrentWstorage(jcr, from);
+    return false;
+  }
+
+  SetCurrentWstorage(jcr, from);
+  DecWriteStore(jcr);
+  SetCurrentWstorage(jcr, to);
+
+  return true;
+}
+
+/**
+ * Connect to a Storage Daemon that will take this job.
+ *
+ * Without a storage group this connects and starts the job, as before.
+ * With one, it tries the members in policy order, each on its own
+ * connection, and reserves the device in each attempt; the first member
+ * that accepts the job is used. device_reserved tells the caller not to
+ * reserve again.
+ */
+static bool OpenMessageChannelToWriteStorage(JobControlRecord* jcr,
+                                             bool* device_reserved)
+{
+  *device_reserved = false;
+
+  alist<StorageResource*>* candidates = jcr->dir_impl->res.write_storage_list;
+
+  /* The flag, not the list size: the policy may have shrunk the list. */
+  if (!jcr->dir_impl->uses_storage_group || !candidates
+      || candidates->size() < 2) {
+    if (!ConnectToStorageDaemon(jcr, 10, me->SDConnectTimeout, true)) {
+      return false;
+    }
+    return StartStorageDaemonJob(jcr);
+  }
+
+  const int64_t timeout = StorageCandidateConnectTimeout(
+      true, me->StorageGroupConnectTimeout, me->SDConnectTimeout);
+
+  StorageResource* failed = nullptr;
+  int tried = 0;
+
+  for (auto* store : candidates) {
+    if (failed) {
+      Jmsg(jcr, M_WARNING, 0,
+           T_("Storage group: \"%s\" could not take the job, trying "
+              "\"%s\".\n"),
+           failed->resource_name_, store->resource_name_);
+      failed = nullptr;
+    }
+
+    if (!MoveWriteStorageCharge(jcr, store)) {
+      Jmsg(jcr, M_WARNING, 0,
+           T_("Storage group: skipping \"%s\", it is at its Maximum "
+              "Concurrent Jobs.\n"),
+           store->resource_name_);
+      continue;
+    }
+
+    /* A new socket per attempt: ConnectToStorageDaemon reuses an open one. */
+    TerminateAndCloseJcrStoreSocket(jcr);
+
+    jcr->setJobStatusWithPriorityCheck(JS_WaitSD);
+    ++tried;
+
+    /* While set, M_FATAL is reported as a warning (lib/message.cc). */
+    jcr->trying_storage_candidate = true;
+
+    /* Offer the daemon this member only. */
+    alist<StorageResource*> offered(1, not_owned_by_alist);
+    offered.append(store);
+
+    bool ok = ConnectToStorageDaemon(jcr, 10, timeout, true)
+              && StartStorageDaemonJob(jcr)
+              && ReserveWriteDevice(jcr, &offered);
+
+    /* Dequeue before clearing the flag: the socket layer queues its errors
+     * (Qmsg), and they must be handled while the flag is still set. */
+    DequeueMessages(jcr);
+    jcr->trying_storage_candidate = false;
+
+    if (ok) {
+      *device_reserved = true;
+      if (tried > 1) {
+        Jmsg(jcr, M_INFO, 0,
+             T_("Storage group: failed over to \"%s\" after %d attempts.\n"),
+             store->resource_name_, tried);
+      }
+      return true;
+    }
+
+    failed = store;
+    if (jcr->IsJobCanceled()) { break; }
+  }
+
+  /* Out of members; the charge stays on the last member charged. */
+  TerminateAndCloseJcrStoreSocket(jcr);
+  Jmsg(jcr, M_FATAL, 0,
+       T_("Storage group: no member of the group could take the job. %d of "
+          "%d tried, last was \"%s\".\n"),
+       tried, candidates->size(),
+       jcr->dir_impl->res.write_storage
+           ? jcr->dir_impl->res.write_storage->resource_name_
+           : "(none)");
+
+  return false;
+}
+
 /*
  * Do a backup of the specified FileSet
  *
@@ -547,11 +674,11 @@ bool DoNativeBackup(JobControlRecord* jcr)
   Dmsg0(110, "Open connection with storage daemon\n");
   jcr->setJobStatusWithPriorityCheck(JS_WaitSD);
 
-  if (!ConnectToStorageDaemon(jcr, 10, me->SDConnectTimeout, true)) {
+  /* With a storage group this also reserves the device. */
+  bool device_reserved = false;
+  if (!OpenMessageChannelToWriteStorage(jcr, &device_reserved)) {
     return false;
   }
-
-  if (!StartStorageDaemonJob(jcr)) { return false; }
 
   jcr->setJobStatusWithPriorityCheck(JS_WaitFD);
   if (!ConnectToFileDaemon(jcr, 10, me->FDConnectTimeout, true)) {
@@ -637,7 +764,9 @@ bool DoNativeBackup(JobControlRecord* jcr)
     return false;  // error
   }
 
-  if (!ReserveWriteDevice(jcr, jcr->dir_impl->res.write_storage_list)) {
+  /* A job with a storage group has already reserved its device. */
+  if (!device_reserved
+      && !ReserveWriteDevice(jcr, jcr->dir_impl->res.write_storage_list)) {
     return false;
   }
 
@@ -888,10 +1017,23 @@ void UpdateBootstrapFile(JobControlRecord* jcr)
       bstrftimes(edt, sizeof(edt), time(nullptr));
       fprintf(fd, "# %s - %s - %s%s\n", edt, jcr->dir_impl->jr.Job,
               JobLevelToString(jcr->getJobLevel()), jcr->dir_impl->since);
+      /* Name the Storage the volumes were written through and, when the
+       * daemon reported one, the device. The bootstrap reader already
+       * accepts both keywords. */
+      const char* write_store
+          = jcr->dir_impl->res.write_storage
+                ? jcr->dir_impl->res.write_storage->resource_name_
+                : nullptr;
+
       for (int i = 0; i < VolCount; i++) {
         /* Write the record */
         fprintf(fd, "Volume=\"%s\"\n", VolParams[i].VolumeName);
         fprintf(fd, "MediaType=\"%s\"\n", VolParams[i].MediaType);
+        if (write_store) { fprintf(fd, "Storage=\"%s\"\n", write_store); }
+        if (!jcr->dir_impl->write_device_name.empty()) {
+          fprintf(fd, "Device=\"%s\"\n",
+                  jcr->dir_impl->write_device_name.c_str());
+        }
         if (VolParams[i].Slot > 0) {
           fprintf(fd, "Slot=%d\n", VolParams[i].Slot);
         }
