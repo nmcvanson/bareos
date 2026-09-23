@@ -40,11 +40,13 @@ bool FindRecycledVolume(JobControlRecord* jcr,
                         bool InChanger,
                         MediaDbRecord* mr,
                         StorageResource* store,
-                        const char* unwanted_volumes)
+                        const char* unwanted_volumes,
+                        bool restrict_to_storage)
 {
   bstrncpy(mr->VolStatus, "Recycle", sizeof(mr->VolStatus));
   SetStorageidInMr(store, mr);
-  if (jcr->db->FindNextVolume(jcr, 1, InChanger, mr, unwanted_volumes)) {
+  if (jcr->db->FindNextVolume(jcr, 1, InChanger, mr, unwanted_volumes,
+                              restrict_to_storage)) {
     jcr->dir_impl->MediaId = mr->MediaId;
     Dmsg1(20, "Find_next_vol MediaId=%u\n", jcr->dir_impl->MediaId);
     PmStrcpy(jcr->VolumeName, mr->VolumeName);
@@ -61,12 +63,14 @@ bool RecycleOldestPurgedVolume(JobControlRecord* jcr,
                                bool InChanger,
                                MediaDbRecord* mr,
                                StorageResource* store,
-                               const char* unwanted_volumes)
+                               const char* unwanted_volumes,
+                               bool restrict_to_storage)
 {
   bstrncpy(mr->VolStatus, "Purged", sizeof(mr->VolStatus));
   SetStorageidInMr(store, mr);
 
-  if (jcr->db->FindNextVolume(jcr, 1, InChanger, mr, unwanted_volumes)) {
+  if (jcr->db->FindNextVolume(jcr, 1, InChanger, mr, unwanted_volumes,
+                              restrict_to_storage)) {
     Dmsg1(20, "Find_next_vol MediaId=%u\n", mr->MediaId);
     SetStorageidInMr(store, mr);
     if (RecycleVolume(jcr, mr)) {
