@@ -19,12 +19,12 @@
    02110-1301, USA.
 */
 
-/* A.3: the write storage list is what a storage group lives in, and the
- * policy added in stage B reorders it. These tests pin down the two
+/* The write storage list is what a storage group lives in, and the storage
+ * group policy reorders it. These tests pin down the two
  * primitives that build and destroy it, so that a later change to either is
  * caught here rather than in a system test.
  *
- * Note on coverage: the guard added in A.3 lives in ResetRestoreContext,
+ * Note on coverage: the console run path's guard lives in ResetRestoreContext,
  * which is static in ua_run.cc and cannot be reached from a unit test. What
  * is covered here is the behaviour that guard depends on -- CopyWstorage
  * keeping every member, SetWstorage destroying all but one, and the
@@ -38,10 +38,57 @@
 #include "dird/jcr_util.h"
 #include "dird/storage.h"
 #include "include/jcr.h"
+#include "include/job_status.h"
+#include "lib/message.h"
 #include "include/protocol_types.h"
 #include "include/job_types.h"
+#include "include/job_level.h"
 
 using namespace directordaemon;
+
+/* The storage group guard's truth table, checked at compile time: only a
+ * native backup that is not a VirtualFull may keep a group. */
+static_assert(JobAttributesMayUseStorageGroup(JT_BACKUP, PT_NATIVE, L_FULL));
+static_assert(JobAttributesMayUseStorageGroup(JT_BACKUP,
+                                              PT_NATIVE,
+                                              L_INCREMENTAL));
+static_assert(JobAttributesMayUseStorageGroup(JT_BACKUP,
+                                              PT_NATIVE,
+                                              L_DIFFERENTIAL));
+
+static_assert(!JobAttributesMayUseStorageGroup(JT_BACKUP,
+                                               PT_NATIVE,
+                                               L_VIRTUAL_FULL));
+
+static_assert(!JobAttributesMayUseStorageGroup(JT_VERIFY, PT_NATIVE, L_FULL));
+static_assert(!JobAttributesMayUseStorageGroup(JT_RESTORE, PT_NATIVE, L_NONE));
+static_assert(!JobAttributesMayUseStorageGroup(JT_MIGRATE, PT_NATIVE, L_FULL));
+static_assert(!JobAttributesMayUseStorageGroup(JT_COPY, PT_NATIVE, L_FULL));
+static_assert(!JobAttributesMayUseStorageGroup(JT_CONSOLIDATE,
+                                               PT_NATIVE,
+                                               L_FULL));
+
+static_assert(!JobAttributesMayUseStorageGroup(JT_BACKUP,
+                                               PT_NDMP_BAREOS,
+                                               L_FULL));
+static_assert(!JobAttributesMayUseStorageGroup(JT_BACKUP,
+                                               PT_NDMP_NATIVE,
+                                               L_FULL));
+
+/* The per-member connect timeout: the group timeout for a group, the
+ * general one for a single storage. */
+static_assert(StorageCandidateConnectTimeout(true, 30, 180) == 30);
+static_assert(StorageCandidateConnectTimeout(false, 30, 180) == 180);
+
+/* A group timeout of 0 means unset: the general timeout applies. */
+static_assert(StorageCandidateConnectTimeout(true, 0, 180) == 180);
+static_assert(StorageCandidateConnectTimeout(false, 0, 180) == 180);
+
+/* The device recorded for the bootstrap file: a real name, never the Just
+ * In Time placeholder or an empty reply. */
+static_assert(ReservedDeviceIsKnown("FileStorage"));
+static_assert(!ReservedDeviceIsKnown("JustInTime Device"));
+static_assert(!ReservedDeviceIsKnown(""));
 
 namespace {
 constexpr const char* kConfig
@@ -65,7 +112,7 @@ StorageResource* GetStorage(const char* name)
 
 /* A Job declaring "Storage = storage01, storage02" must reach the job control
  * record with both members present, and write_storage pointing at the first.
- * This is the state stage B's policy reorders. */
+ * This is the state the storage group policy reorders. */
 TEST(StorageGroupList, CopyWstorageKeepsEveryMember)
 {
   InitDirGlobals();
@@ -93,7 +140,7 @@ TEST(StorageGroupList, CopyWstorageKeepsEveryMember)
 }
 
 /* SetWstorage is destructive: it frees the whole list before assigning. This
- * is why the console run path had to be guarded in A.3 -- calling it with a
+ * is why the console run path has to be guarded -- calling it with a
  * defaulted storage silently reduced a group of two to one. */
 TEST(StorageGroupList, SetWstorageCollapsesTheList)
 {
@@ -126,7 +173,7 @@ TEST(StorageGroupList, SetWstorageCollapsesTheList)
   EXPECT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage02");
 }
 
-/* A Job listing a single storage is not a group. The A.3 guard must leave
+/* A Job listing a single storage is not a group. The run path guard must leave
  * this case on the original code path, so confirm the list really is 1. */
 TEST(StorageGroupList, SingleStorageJobIsNotAGroup)
 {
@@ -168,6 +215,7 @@ TEST(StorageGroupList, OnlyNativeBackupMayKeepAGroup)
   ASSERT_NE(jcr.get(), nullptr);
 
   jcr->setJobProtocol(PT_NATIVE);
+  jcr->setJobLevel(L_FULL);
 
   jcr->setJobType(JT_BACKUP);
   EXPECT_TRUE(JobMayUseStorageGroup(jcr.get()));
@@ -186,16 +234,41 @@ TEST(StorageGroupList, OnlyNativeBackupMayKeepAGroup)
   EXPECT_FALSE(JobMayUseStorageGroup(jcr.get()));
 }
 
+/* The wrapper reads the level from the job: every backup level may keep a
+ * group except VirtualFull. */
+TEST(StorageGroupList, VirtualFullMayNotKeepAGroup)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr(NewDirectorJcr(director_config->GetCurrentConfiguration()),
+             &Test_FreeJcr);
+  ASSERT_NE(jcr.get(), nullptr);
+
+  jcr->setJobType(JT_BACKUP);
+  jcr->setJobProtocol(PT_NATIVE);
+
+  for (int level : {L_FULL, L_INCREMENTAL, L_DIFFERENTIAL}) {
+    jcr->setJobLevel(level);
+    EXPECT_TRUE(JobMayUseStorageGroup(jcr.get()))
+        << "level '" << static_cast<char>(level)
+        << "' is a real backup and may keep a group";
+  }
+
+  jcr->setJobLevel(L_VIRTUAL_FULL);
+  EXPECT_FALSE(JobMayUseStorageGroup(jcr.get()));
+}
+
 /* A null job control record must not crash the guard. */
 TEST(StorageGroupList, JobMayUseStorageGroupHandlesNull)
 {
   EXPECT_FALSE(JobMayUseStorageGroup(nullptr));
 }
 
-/* B.1: SetCurrentWstorage moves write_storage within the list the job
- * already has, where SetWstorage frees the list and rebuilds it around one
- * member. The policy in B.4 and the failover loop in stage C both need the
- * non-destructive form. */
+/* SetCurrentWstorage moves write_storage within the list the job already
+ * has, where SetWstorage frees the list and rebuilds it around one member.
+ * The policy and the failover loop both need the non-destructive form. */
 TEST(StorageGroupList, SetCurrentWstorageMovesThePointer)
 {
   InitDirGlobals();
@@ -210,8 +283,7 @@ TEST(StorageGroupList, SetCurrentWstorageMovesThePointer)
   ASSERT_NE(job, nullptr);
   CopyWstorage(jcr.get(), job->storage, "Job resource");
   ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
-  ASSERT_STREQ(jcr->dir_impl->res.write_storage->resource_name_,
-               "storage01");
+  ASSERT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage01");
 
   StorageResource* second = GetStorage("storage02");
   ASSERT_NE(second, nullptr);
@@ -221,19 +293,17 @@ TEST(StorageGroupList, SetCurrentWstorageMovesThePointer)
   EXPECT_EQ(jcr->dir_impl->res.write_storage, second);
   /* the list must be untouched: same size, same members, same order */
   ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
-  EXPECT_STREQ((
-      (StorageResource*)jcr->dir_impl->res.write_storage_list->get(0))
+  EXPECT_STREQ(((StorageResource*)jcr->dir_impl->res.write_storage_list->get(0))
                    ->resource_name_,
                "storage01");
-  EXPECT_STREQ((
-      (StorageResource*)jcr->dir_impl->res.write_storage_list->get(1))
+  EXPECT_STREQ(((StorageResource*)jcr->dir_impl->res.write_storage_list->get(1))
                    ->resource_name_,
                "storage02");
 }
 
 /* A storage that is not in the list must be refused, and nothing may move.
- * Stage C relies on this to skip a candidate rather than point the job at a
- * storage the policy never approved. */
+ * The failover loop relies on this to skip a candidate rather than point the
+ * job at a storage the policy never approved. */
 TEST(StorageGroupList, SetCurrentWstorageRefusesANonMember)
 {
   InitDirGlobals();
@@ -307,4 +377,41 @@ TEST(StorageGroupList, SetCurrentWstorageRejectsMissingInputs)
 
   EXPECT_FALSE(SetCurrentWstorage(nullptr, any));
   EXPECT_FALSE(SetCurrentWstorage(jcr.get(), nullptr));
+}
+
+/* M_FATAL during a storage group attempt is a warning; outside one it
+ * still fails the job. */
+TEST(StorageGroupList, FatalDuringACandidateAttemptDoesNotCondemnTheJob)
+{
+  InitMsg(nullptr, nullptr);
+
+  JobControlRecord jcr;
+  jcr.JobId = 0; /* keep the message out of any job log */
+  jcr.setJobStatusWithPriorityCheck(JS_Running);
+
+  jcr.trying_storage_candidate = true;
+  Jmsg(&jcr, M_FATAL, 0, "storage group candidate attempt\n");
+
+  EXPECT_EQ(jcr.getJobStatus(), JS_Running)
+      << "a failed candidate must leave the job runnable";
+  EXPECT_EQ(jcr.JobErrors, 0u)
+      << "a failed candidate is not an error against the job";
+  EXPECT_EQ(jcr.JobWarnings, 1u)
+      << "it is reported, as a warning rather than silently";
+}
+
+TEST(StorageGroupList, FatalOutsideACandidateAttemptCondemnsTheJob)
+{
+  InitMsg(nullptr, nullptr);
+
+  JobControlRecord jcr;
+  jcr.JobId = 0;
+  jcr.setJobStatusWithPriorityCheck(JS_Running);
+
+  /* The default, and the path every other job takes. */
+  ASSERT_FALSE(jcr.trying_storage_candidate);
+  Jmsg(&jcr, M_FATAL, 0, "the last candidate has failed\n");
+
+  EXPECT_EQ(jcr.getJobStatus(), JS_FatalError);
+  EXPECT_EQ(jcr.JobErrors, 1u);
 }
