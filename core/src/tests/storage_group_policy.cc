@@ -19,11 +19,9 @@
    02110-1301, USA.
 */
 
-/* B.2: the storage group policy framework -- name lookup, the
- * Pool-then-Job-then-default resolver, and the candidate filters.
- *
- * The policy classes themselves are B.3; only ListedOrder exists here, so
- * the ordering assertions below check that the configured order survives.
+/* The storage group policy: name lookup, the Pool-then-Job-then-default
+ * resolver, the Enabled filter, and ListedOrder's order. LeastUsed needs a
+ * running Director and is covered by the system tests.
  *
  * Every test reparses the configuration, so a test may mutate a resource
  * (to disable a storage, or to move one to another daemon) without
@@ -124,9 +122,7 @@ TEST(StorageGroupPolicy, NameLookupFallsBackToTheDefault)
 /* Resolver precedence                                                 */
 /* ------------------------------------------------------------------ */
 
-/* The Pool wins. This is the precedence the directive descriptions state,
- * the config validator's comment states, and Bacula implements. The plan
- * said the opposite until 16/09. */
+/* The Pool wins, as both directive descriptions say. */
 TEST(StorageGroupPolicy, ResolverPrefersThePoolOverTheJob)
 {
   InitDirGlobals();
@@ -234,9 +230,8 @@ TEST(StorageGroupPolicy, ApplyListedOrderKeepsTheConfiguredOrder)
   EXPECT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage01");
 }
 
-/* R13: Enabled = no on a Storage has been parsed forever and read only by
- * output filters. The policy filter is the first thing in the Director to
- * act on it. */
+/* Enabled = no on a Storage takes it out of every group it belongs to: the
+ * policy drops a disabled member before choosing. */
 TEST(StorageGroupPolicy, ApplyDropsADisabledMember)
 {
   InitDirGlobals();
@@ -281,11 +276,9 @@ TEST(StorageGroupPolicy, ApplyKeepsTheListWhenEveryMemberIsFiltered)
   EXPECT_STREQ(NameAt(list, 1), "storage02");
 }
 
-/* MSD-3: every member is announced down the one socket opened to
- * write_storage, and the Storage Daemon matches device names and media
- * types, never Storage names. A member on another daemon therefore fails
- * confusingly, so drop it with a clear warning instead. */
-TEST(StorageGroupPolicy, ApplyDropsAMemberOnAnotherStorageDaemon)
+/* A disabled first member is dropped, even on another Storage Daemon, and
+ * the other member is kept. */
+TEST(StorageGroupPolicy, DisabledFirstMemberIsDroppedWhicheverDaemonItIsOn)
 {
   InitDirGlobals();
   PConfigParser director_config(DirectorPrepareResources(kConfig));
@@ -295,16 +288,48 @@ TEST(StorageGroupPolicy, ApplyDropsAMemberOnAnotherStorageDaemon)
   ASSERT_NE(jcr.get(), nullptr);
   ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
 
+  StorageResource* first = GetStorage("storage01");
   StorageResource* second = GetStorage("storage02");
+  ASSERT_NE(first, nullptr);
   ASSERT_NE(second, nullptr);
-  second->SDport = GetStorage("storage01")->SDport + 1;
+
+  first->enabled = false;
+  second->SDport = first->SDport + 1;
 
   EXPECT_EQ(ApplyStorageGroupPolicy(jcr.get()), 1);
 
   auto* list = jcr->dir_impl->res.write_storage_list;
   ASSERT_EQ(list->size(), 1);
+  EXPECT_STREQ(NameAt(list, 0), "storage02");
+  EXPECT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage02");
+}
+
+/* A group may span Storage Daemons: every member is kept. */
+TEST(StorageGroupPolicy, CrossDaemonGroupKeepsEveryMember)
+{
+  InitDirGlobals();
+  PConfigParser director_config(DirectorPrepareResources(kConfig));
+  ASSERT_TRUE(director_config);
+
+  JcrPtr jcr = MakeJcrWithGroup(director_config, "job-with-policy");
+  ASSERT_NE(jcr.get(), nullptr);
+  ASSERT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
+
+  StorageResource* first = GetStorage("storage01");
+  StorageResource* second = GetStorage("storage02");
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  /* both enabled, neither on the other's daemon */
+  second->SDport = first->SDport + 1;
+
+  EXPECT_EQ(ApplyStorageGroupPolicy(jcr.get()), 2);
+
+  auto* list = jcr->dir_impl->res.write_storage_list;
+  ASSERT_EQ(list->size(), 2);
   EXPECT_STREQ(NameAt(list, 0), "storage01");
-  EXPECT_STREQ(jcr->dir_impl->res.write_storage->resource_name_, "storage01");
+  EXPECT_STREQ(NameAt(list, 1), "storage02")
+      << "the second daemon's member is the one failover exists to reach";
 }
 
 TEST(StorageGroupPolicy, ApplyRejectsMissingInputs)
