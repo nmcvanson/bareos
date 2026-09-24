@@ -1,0 +1,370 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+set -e
+set -o pipefail
+set -u
+#
+# A Job may declare several Storage resources ("Storage = File, File2"). The
+# Director keeps them in write_storage_list and hands the whole list to the
+# Storage Daemon, which picks a device.
+#
+# The console "run" command used to destroy that list: with no explicit
+# "storage=" it filled a default from GetJobStorage and then called
+# SetRwstorage unconditionally, which frees the list and rebuilds it with one
+# member. The scheduler never did this -- it overrides only when the Run
+# resource carries its own Storage directive.
+#
+# These three cases pin down the corrected behaviour.
+#
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+start_test
+
+grouplog="$tmp/group-default.out"
+explicitlog="$tmp/group-explicit.out"
+singlelog="$tmp/single-storage.out"
+
+rm -f "$grouplog" "$explicitlog" "$singlelog"
+
+# Case 1: a Job-declared group, started with no "storage=".
+# The list must survive to DoNativeBackupInit with both members present.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $grouplog
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 2 candidates" \
+  "$grouplog" \
+  "The storage group was collapsed before reaching DoNativeBackupInit."
+
+expect_grep "Termination: *Backup OK" \
+  "$grouplog" \
+  "Backup through a storage group did not terminate correctly."
+
+# Case 2: the same Job, but the user names a storage explicitly.
+# An explicit storage= is still an override and must collapse the group.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $explicitlog
+run job=backup-group storage=File2 level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_not_grep "Storage group:" \
+  "$explicitlog" \
+  "An explicit storage= must override the whole group, not just reorder it."
+
+expect_grep "Using Device \"FileStorage2\" to write." \
+  "$explicitlog" \
+  "Explicit storage=File2 did not reach FileStorage2."
+
+expect_grep "Termination: *Backup OK" \
+  "$explicitlog" \
+  "Backup with an explicit storage did not terminate correctly."
+
+# Case 3: a Job with a single Storage is not a group, and must behave exactly
+# as it did before this change.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $singlelog
+run job=backup-bareos-fd level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_not_grep "Storage group:" \
+  "$singlelog" \
+  "A Job with one Storage must not report a storage group."
+
+expect_grep "Termination: *Backup OK" \
+  "$singlelog" \
+  "Single-storage backup did not terminate correctly."
+
+# ---------------------------------------------------------------------------
+# The cases above prove the LIST survives. The cases below prove the POLICY
+# actually changes what the job does.
+# ---------------------------------------------------------------------------
+
+disabledlog="$tmp/group-disabled.out"
+policylog="$tmp/group-policy.out"
+rm -f "$disabledlog" "$policylog"
+
+# Case 4: the first member is Enabled = no.
+#
+# This is the case that proves the feature does real work. Until now Enabled
+# on a Storage was parsed and read only by output filters -- nothing in the
+# Director acted on it. The policy filter must drop FileDisabled, report one
+# surviving candidate, and the data must actually be written through File2
+# rather than through the disabled member.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $disabledlog
+run job=backup-group-disabled level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 1 candidates, using .File2." \
+  "$disabledlog" \
+  "The disabled storage was not filtered out of the group."
+
+expect_grep "skipping .FileDisabled., it is disabled" \
+  "$disabledlog" \
+  "No warning was issued for the disabled group member."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$disabledlog" \
+  "The job did not write through the surviving member device."
+
+expect_not_grep "Using Device .FileStorage. to write." \
+  "$disabledlog" \
+  "The job wrote through the disabled member device."
+
+expect_grep "Termination: *Backup OK" \
+  "$disabledlog" \
+  "Backup through a filtered storage group did not terminate correctly."
+
+# Case 5: a policy declared by name is resolved and reported.
+#
+# Every member is idle, so LeastUsed sorts on equal counters and stable_sort
+# keeps the configured order. The observable is that the resolver ran and
+# named the declared policy rather than falling back to the default.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $policylog
+run job=backup-group-leastused level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "policy LeastUsed" \
+  "$policylog" \
+  "The declared LeastUsed policy was not resolved and reported."
+
+expect_grep "Termination: *Backup OK" \
+  "$policylog" \
+  "Backup with a declared storage group policy did not terminate correctly."
+
+# A group that declares no policy must report the default name, not blank.
+expect_grep "policy ListedOrder" \
+  "$grouplog" \
+  "A group with no declared policy did not report the default policy name."
+
+# Case 6: the same two members, declared in the opposite order.
+#
+# Both are enabled, so the Director still hands the Storage Daemon both
+# "use storage=" entries; only the order and write_storage differ. This is the
+# case that decides whether the policy ordering really selects the device or
+# whether the daemon picks for itself out of the menu it was given. The
+# Director discards the daemon answer (the save actual device name FIXME in
+# msgchan.cc), so the job log device line is the only observable.
+reversedlog="$tmp/group-reversed.out"
+rm -f "$reversedlog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $reversedlog
+run job=backup-group-reversed level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 2 candidates, using .File2." \
+  "$reversedlog" \
+  "Reversing the configured order did not change the Director choice."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$reversedlog" \
+  "The policy chose File2 but the data was not written through its device."
+
+expect_grep "Termination: *Backup OK" \
+  "$reversedlog" \
+  "Backup with a reversed storage group did not terminate correctly."
+
+# Case 7: a console whose Storage ACL allows File but not File2 runs
+# backup-group ("Storage = File, File2"). File2 must be removed.
+acllog="$tmp/group-acl.out"
+rm -f "$acllog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $acllog
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+"${BAREOS_BCONSOLE_BINARY}" \
+  -c "${BAREOS_CONFIG_DIR}/bconsole-storage-acl.conf" \
+  <"$tmp/bconcmds" >"${NULL_DEV}" 2>&1
+
+expect_grep "No authorization for Storage .File2." \
+  "$acllog" \
+  "The refused group member was not reported to the console."
+
+# With File2 removed, one storage is left: no "Storage group:" line.
+expect_not_grep "Storage group: 2 candidates" \
+  "$acllog" \
+  "The refused group member was not removed from the candidate list."
+
+expect_grep "Using Device .FileStorage. to write." \
+  "$acllog" \
+  "The job did not write through the one member this console may use."
+
+expect_not_grep "using .File2." \
+  "$acllog" \
+  "The policy chose a Storage this console's ACL refuses."
+
+expect_not_grep "Using Device .FileStorage2. to write." \
+  "$acllog" \
+  "The job wrote through a Storage this console's ACL refuses."
+
+expect_grep "Termination: *Backup OK" \
+  "$acllog" \
+  "Backup from a restricted console did not terminate correctly."
+
+# The same job from the unrestricted console still sees both members, so the
+# filter is scoped to the console that is actually restricted.
+expect_grep "Storage group: 2 candidates" \
+  "$grouplog" \
+  "An unrestricted console must still see every group member."
+
+# Case 8: disable a group member at runtime, then enable it again.
+disablelog="$tmp/group-disable-cmd.out"
+reenablelog="$tmp/group-reenable-cmd.out"
+rm -f "$disablelog" "$reenablelog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $disablelog
+disable storage=File
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. disabled" \
+  "$disablelog" \
+  "disable storage= did not report the storage it disabled."
+
+expect_grep "skipping .File., it is disabled" \
+  "$disablelog" \
+  "The member disabled at runtime was not dropped by the policy filter."
+
+expect_grep "Storage group: 1 candidates" \
+  "$disablelog" \
+  "Disabling a member at runtime did not reduce the candidate list."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$disablelog" \
+  "The job did not move to the surviving member after a runtime disable."
+
+expect_grep "Termination: *Backup OK" \
+  "$disablelog" \
+  "Backup after a runtime disable did not terminate correctly."
+
+# Re-enabling puts it straight back into rotation.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $reenablelog
+enable storage=File
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. enabled" \
+  "$reenablelog" \
+  "enable storage= did not report the storage it enabled."
+
+expect_grep "Storage group: 2 candidates" \
+  "$reenablelog" \
+  "The re-enabled member did not return to the candidate list."
+
+expect_not_grep "it is disabled" \
+  "$reenablelog" \
+  "A member was still reported disabled after enable storage=."
+
+# ---------------------------------------------------------------------
+# Config-time report: backup-duplicate-member lists File twice, which is
+# reported when the configuration loads. Checked through reload.
+configlog="$tmp/group-config-check.out"
+rm -f "$configlog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $configlog
+reload
+@sleep 2
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. is listed more than once" \
+  "$configlog" \
+  "A Storage listed twice in a group was not reported."
+
+expect_grep "backup-duplicate-member" \
+  "$configlog" \
+  "The duplicate-member report did not name the Job it came from."
+
+check_for_zombie_jobs storage=File
+
+end_test

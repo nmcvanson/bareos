@@ -180,7 +180,7 @@ const char list_cmd_usage[] = NT_(
     "fileset [ ujobid=<complete_name> ] | "
     "jobs [job=<job-name>] [client=<client-name>] [jobstatus=<status>] "
     "[jobtype=<jobtype>] [joblevel=<joblevel>] [volume=<volumename>] "
-    "[pool=<pool>] "
+    "[pool=<pool>] [storage=<storage-name>] "
     "[days=<number>] [hours=<number>] [last] [count] | "
     "job=<job-name> [client=<client-name>] [jobstatus=<status>] "
     "[jobtype=<jobtype>] [joblevel=<joblevel>] [volume=<volumename>] "
@@ -325,12 +325,14 @@ static struct ua_cmdstruct commands[] = {
          "storage storage=<storage-name> | pool=<pool-name> | jobid=<jobid> | "
          "jobid=<jobid1,jobid2,...> | jobid=<jobid1-jobid9>]"),
      true, true},
-    {NT_("disable"), DisableCmd, T_("Disable a job/client/schedule"),
-     NT_("job=<job-name> client=<client-name> schedule=<schedule-name>"), true,
-     true},
-    {NT_("enable"), EnableCmd, T_("Enable a job/client/schedule"),
-     NT_("job=<job-name> client=<client-name> schedule=<schedule-name>"), true,
-     true},
+    {NT_("disable"), DisableCmd, T_("Disable a job/client/schedule/storage"),
+     NT_("job=<job-name> client=<client-name> schedule=<schedule-name> "
+         "storage=<storage-name>"),
+     true, true},
+    {NT_("enable"), EnableCmd, T_("Enable a job/client/schedule/storage"),
+     NT_("job=<job-name> client=<client-name> schedule=<schedule-name> "
+         "storage=<storage-name>"),
+     true, true},
     {NT_("estimate"), EstimateCmd,
      T_("Performs FileSet estimate, listing gives full listing"),
      NT_("fileset=<fileset-name> client=<client-name> level=<level> "
@@ -1022,6 +1024,7 @@ static void DoEnDisableCmd(UaContext* ua, bool setting)
   ScheduleResource* sched = NULL;
   ClientResource* client = NULL;
   JobResource* job = NULL;
+  StorageResource* store = NULL;
   std::string action(setting ? "enable" : "disable");
 
   int i = FindArg(ua, NT_("schedule"));
@@ -1054,17 +1057,33 @@ static void DoEnDisableCmd(UaContext* ua, bool setting)
         return;
       }
     } else {
-      i = FindArgWithValue(ua, NT_("job"));
+      i = FindArg(ua, NT_("storage"));
       if (i >= 0) {
-        job = ua->GetJobResWithName(ua->argv[i]);
-      } else {
-        job = select_enable_disable_job_resource(ua, setting);
-        if (!job) { return; }
-      }
+        i = FindArgWithValue(ua, NT_("storage"));
+        if (i >= 0) {
+          store = ua->GetStoreResWithName(ua->argv[i]);
+        } else {
+          store = select_storage_resource(ua);
+          if (!store) { return; }
+        }
 
-      if (!job) {
-        ua->ErrorMsg(T_("Job \"%s\" not found.\n"), ua->argv[i]);
-        return;
+        if (!store) {
+          ua->ErrorMsg(T_("Storage \"%s\" not found.\n"), ua->argv[i]);
+          return;
+        }
+      } else {
+        i = FindArgWithValue(ua, NT_("job"));
+        if (i >= 0) {
+          job = ua->GetJobResWithName(ua->argv[i]);
+        } else {
+          job = select_enable_disable_job_resource(ua, setting);
+          if (!job) { return; }
+        }
+
+        if (!job) {
+          ua->ErrorMsg(T_("Job \"%s\" not found.\n"), ua->argv[i]);
+          return;
+        }
       }
     }
   }
@@ -1090,6 +1109,14 @@ static void DoEnDisableCmd(UaContext* ua, bool setting)
     ua->send->ArrayStart("jobs");
     ua->send->ArrayItem(job->resource_name_);
     ua->send->ArrayEnd("jobs");
+  } else if (store) {
+    /* In memory only, like every enable and disable: reload restores it. */
+    store->enabled = setting;
+    ua->SendMsg(T_("Storage \"%s\" %sd\n"), store->resource_name_,
+                action.c_str());
+    ua->send->ArrayStart("storages");
+    ua->send->ArrayItem(store->resource_name_);
+    ua->send->ArrayEnd("storages");
   }
   ua->send->ObjectEnd(action.c_str());
 

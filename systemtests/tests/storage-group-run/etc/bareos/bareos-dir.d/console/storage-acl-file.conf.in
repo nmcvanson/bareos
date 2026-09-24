@@ -1,0 +1,17 @@
+# A restricted console that may use the Storage "File" but not "File2".
+Console {
+  Name = storage-acl-file
+  Password = "@dir_password@"
+
+  Storage ACL = File
+
+  Catalog ACL = *all*
+  Client ACL = *all*
+  Command ACL = *all*
+  FileSet ACL = *all*
+  Job ACL = *all*
+  Plugin Options ACL = *all*
+  Pool ACL = *all*
+  Schedule ACL = *all*
+  Where ACL = *all*
+}

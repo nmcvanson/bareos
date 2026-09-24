@@ -28,7 +28,8 @@ void DoAutoprune(JobControlRecord* jcr);
 void PruneVolumes(JobControlRecord* jcr,
                   bool InChanger,
                   MediaDbRecord* mr,
-                  StorageResource* store);
+                  StorageResource* store,
+                  bool restrict_to_storage = false);
 
 } /* namespace directordaemon */
 #endif  // BAREOS_DIRD_AUTOPRUNE_H_
