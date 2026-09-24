@@ -1,8 +1,6 @@
-#!/bin/bash
-
 #   BAREOS® - Backup Archiving REcovery Open Sourced
 #
-#   Copyright (C) 2022-2025 Bareos GmbH & Co. KG
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
 #
 #   This program is Free Software; you can redistribute it and/or
 #   modify it under the terms of version three of the GNU Affero General Public
@@ -19,23 +17,7 @@
 #   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 #   02110-1301, USA.
 
-set -e
-set -o pipefail
-set -u
-
-#shellcheck source=../../environment.in
-. ./environment
-
-#shellcheck source=../../scripts/functions
-. "${BAREOS_SCRIPTS_DIR}"/functions
-"${BAREOS_SCRIPTS_DIR}"/cleanup
-"${BAREOS_SCRIPTS_DIR}"/setup
-
-# Fill ${BackupDirectory} with data.
-setup_data
-
-bin/bareos start
-bin/bareos status
-
-# make sure that the director is up and running.
-print_debug "$(bin/bconsole <<<"status dir")"
+get_filename_component(BASENAME ${CMAKE_CURRENT_BINARY_DIR} NAME)
+# IGNORE_CONFIG_WARNINGS: requires directives 'Maximum Block Size (Sd ->
+# Device)' and 'Maximum Concurrent Jobs (Sd -> Device)'
+create_systemtest(${SYSTEMTEST_PREFIX} ${BASENAME} IGNORE_CONFIG_WARNINGS)

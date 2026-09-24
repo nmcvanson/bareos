@@ -229,6 +229,142 @@ expect_grep "Termination: *Backup OK" \
   "$reversedlog" \
   "Backup with a reversed storage group did not terminate correctly."
 
+# Case 7: a console whose Storage ACL allows File but not File2 runs
+# backup-group ("Storage = File, File2"). File2 must be removed.
+acllog="$tmp/group-acl.out"
+rm -f "$acllog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $acllog
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+"${BAREOS_BCONSOLE_BINARY}" \
+  -c "${BAREOS_CONFIG_DIR}/bconsole-storage-acl.conf" \
+  <"$tmp/bconcmds" >"${NULL_DEV}" 2>&1
+
+expect_grep "No authorization for Storage .File2." \
+  "$acllog" \
+  "The refused group member was not reported to the console."
+
+# With File2 removed, one storage is left: no "Storage group:" line.
+expect_not_grep "Storage group: 2 candidates" \
+  "$acllog" \
+  "The refused group member was not removed from the candidate list."
+
+expect_grep "Using Device .FileStorage. to write." \
+  "$acllog" \
+  "The job did not write through the one member this console may use."
+
+expect_not_grep "using .File2." \
+  "$acllog" \
+  "The policy chose a Storage this console's ACL refuses."
+
+expect_not_grep "Using Device .FileStorage2. to write." \
+  "$acllog" \
+  "The job wrote through a Storage this console's ACL refuses."
+
+expect_grep "Termination: *Backup OK" \
+  "$acllog" \
+  "Backup from a restricted console did not terminate correctly."
+
+# The same job from the unrestricted console still sees both members, so the
+# filter is scoped to the console that is actually restricted.
+expect_grep "Storage group: 2 candidates" \
+  "$grouplog" \
+  "An unrestricted console must still see every group member."
+
+# Case 8: disable a group member at runtime, then enable it again.
+disablelog="$tmp/group-disable-cmd.out"
+reenablelog="$tmp/group-reenable-cmd.out"
+rm -f "$disablelog" "$reenablelog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $disablelog
+disable storage=File
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. disabled" \
+  "$disablelog" \
+  "disable storage= did not report the storage it disabled."
+
+expect_grep "skipping .File., it is disabled" \
+  "$disablelog" \
+  "The member disabled at runtime was not dropped by the policy filter."
+
+expect_grep "Storage group: 1 candidates" \
+  "$disablelog" \
+  "Disabling a member at runtime did not reduce the candidate list."
+
+expect_grep "Using Device .FileStorage2. to write." \
+  "$disablelog" \
+  "The job did not move to the surviving member after a runtime disable."
+
+expect_grep "Termination: *Backup OK" \
+  "$disablelog" \
+  "Backup after a runtime disable did not terminate correctly."
+
+# Re-enabling puts it straight back into rotation.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $reenablelog
+enable storage=File
+run job=backup-group level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. enabled" \
+  "$reenablelog" \
+  "enable storage= did not report the storage it enabled."
+
+expect_grep "Storage group: 2 candidates" \
+  "$reenablelog" \
+  "The re-enabled member did not return to the candidate list."
+
+expect_not_grep "it is disabled" \
+  "$reenablelog" \
+  "A member was still reported disabled after enable storage=."
+
+# ---------------------------------------------------------------------
+# Config-time report: backup-duplicate-member lists File twice, which is
+# reported when the configuration loads. Checked through reload.
+configlog="$tmp/group-config-check.out"
+rm -f "$configlog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $configlog
+reload
+@sleep 2
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage .File. is listed more than once" \
+  "$configlog" \
+  "A Storage listed twice in a group was not reported."
+
+expect_grep "backup-duplicate-member" \
+  "$configlog" \
+  "The duplicate-member report did not name the Job it came from."
+
 check_for_zombie_jobs storage=File
 
 end_test

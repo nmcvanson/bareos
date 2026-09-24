@@ -1,0 +1,539 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+set -e
+set -o pipefail
+set -u
+#
+# Storage group members with different Media Types and separate archive
+# directories. Each case checks that the device written, the volume's
+# catalog Media Type and Storage, and the directory the volume file is in
+# all agree, and that a restore reads the data back from the same device.
+#
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+start_test
+
+report="$tmp/mediatype-report.txt"
+: >"$report"
+
+bcon()
+{
+  printf "%s\n" "$@" >"$tmp/bconcmds"
+  run_bconsole
+}
+
+# Poll the catalog until a job is terminal. A job stuck waiting for a mount is
+# cancelled after the timeout rather than blocking bconsole "wait" forever.
+wait_terminal()
+{
+  local jobid="$1" limit="${2:-90}" i status
+  for ((i = 0; i < limit; i++)); do
+    bcon "@out $tmp/status.out" \
+      ".sql query=\"SELECT 'STATUS=' || jobstatus FROM job WHERE jobid=${jobid}\""
+    status=$(grep -o "STATUS=[A-Za-z]" "$tmp/status.out" | tail -1 | cut -d= -f2 || :)
+    case "$status" in
+      T | E | e | f | A | W) echo "$status"; return ;;
+    esac
+    sleep 1
+  done
+  bcon "@out $tmp/cancel.out" "status storage=FileA" "status storage=FileB" \
+    "cancel jobid=${jobid} yes"
+  echo "STUCK($status)"
+}
+
+queued_jobid()
+{
+  grep "Job queued. JobId=" "$1" | tail -1 | sed -n -e 's/^.*JobId=//p'
+}
+
+# restore_and_verify <backup jobid> <device that wrote it>
+#
+# Restore one backup job and check that it terminated normally, read from
+# the device that wrote the data, and restored files identical to the source.
+restore_and_verify()
+{
+  local jobid="$1" wrotedev="$2"
+  local restlog="$tmp/restore-${jobid}.out"
+  local restdir="$tmp/bareos-restores-${jobid}"
+  local restid rstatus readdev
+
+  rm -rf "$restdir"
+  bcon "@out $restlog" \
+    "restore client=bareos-fd jobid=${jobid} where=${restdir} all done yes"
+  restid=$(queued_jobid "$restlog")
+  rstatus=$(wait_terminal "$restid")
+  bcon "@out $restlog" "messages"
+
+  # The Storage Daemon names the device it mounts for reading, one line per
+  # volume. More than one distinct device would itself be wrong here.
+  readdev=$(grep "JobId ${restid}: Ready to read from volume" "$restlog" \
+    | sed -n -e 's/.*on device "\([^"]*\)".*/\1/p' | sort -u \
+    | paste -sd, - || :)
+
+  {
+    echo "   restore (JobId ${restid}): ${rstatus}"
+    echo "   restore read from : ${readdev:-<none>}"
+  } >>"$report"
+
+  # "|| :" on every pipeline that may find nothing: set -e and pipefail are
+  # on, and a failing case must be reported, not abort the cases after it.
+  if [ "$rstatus" != "T" ]; then
+    grep "JobId ${restid}:" "$restlog" | grep -i "storage\|device\|volume\|mount\|error\|fatal" \
+      | tail -8 | sed 's/^/     /' >>"$report" || :
+    estat=1
+    return
+  fi
+
+  if [ "$readdev" != "$wrotedev" ]; then
+    echo "   MISMATCH: the restore did not read from the device that wrote" >>"$report"
+    estat=1
+  fi
+
+  # check_restore_diff reports through the global dstat, and compares the
+  # source tree with its copy under the restore directory.
+  dstat=0
+  check_restore_diff "${BackupDirectory}" "$restdir" \
+    >"$tmp/restore-diff-${jobid}.out" 2>&1 || :
+  if [ "${dstat:-0}" -ne 0 ]; then
+    echo "   MISMATCH: the restored files differ from the source" >>"$report"
+    estat=1
+  else
+    echo "   restored data     : identical to the source" >>"$report"
+  fi
+}
+
+# check_case <label> <jobid> <log> <expected storage or "">
+check_case()
+{
+  local label="$1" jobid="$2" log="$3" expect="$4"
+  local status chosen device vols vol mtype store dir
+
+  status=$(wait_terminal "$jobid")
+  bcon "@out $log" "messages"
+
+  chosen=$(grep "JobId ${jobid}: Storage group:" "$log" \
+    | sed -n -e 's/.*using "\([^"]*\)".*/\1/p' | tail -1 || :)
+  device=$(grep "JobId ${jobid}: Using Device" "$log" \
+    | sed -n -e 's/.*Device "\([^"]*\)".*/\1/p' | tail -1 || :)
+
+  bcon "@out $tmp/vol-${jobid}.out" \
+    ".sql query=\"SELECT DISTINCT 'VOL=' || m.volumename || '|' || m.mediatype || '|' || COALESCE(s.name,'-') FROM jobmedia jm JOIN media m ON m.mediaid=jm.mediaid LEFT JOIN storage s ON s.storageid=m.storageid WHERE jm.jobid=${jobid}\""
+  vols=$(grep -o "VOL=[A-Za-z0-9_.-]*|[^ |]*|[^ |]*" "$tmp/vol-${jobid}.out" | cut -d= -f2 || :)
+
+  {
+    echo "== ${label} (JobId ${jobid})"
+    echo "   job status        : ${status}"
+    echo "   Director chose    : ${chosen:-<none>}"
+    echo "   SD wrote to device: ${device:-<none>}"
+  } >>"$report"
+
+  if [ "$status" != "T" ]; then
+    echo "   backup did not terminate OK; last job messages:" >>"$report"
+    grep "JobId ${jobid}:" "$log" | tail -15 | sed 's/^/     /' >>"$report" || :
+    estat=1
+  fi
+
+  if [ -n "$expect" ] && [ "$chosen" != "$expect" ]; then
+    echo "   MISMATCH: expected the Director to choose ${expect}" >>"$report"
+    estat=1
+  fi
+  if [ -n "$chosen" ] && [ "$device" != "FileStorage${chosen#File}" ]; then
+    echo "   MISMATCH: device is not the chosen storage's device" >>"$report"
+    estat=1
+  fi
+
+  for vol in $vols; do
+    IFS='|' read -r vname mtype store <<<"$vol"
+    dir="-"
+    [ -f "${archivedir}/a/${vname}" ] && dir="storage/a"
+    [ -f "${archivedir}/b/${vname}" ] && dir="storage/b"
+    echo "   volume ${vname}: catalog MediaType=${mtype} Storage=${store}, file in ${dir}" >>"$report"
+    if [ "$device" = "FileStorageA" ] && { [ "$mtype" != "FileA" ] || [ "$dir" != "storage/a" ]; }; then
+      echo "   MISMATCH: written by FileStorageA but catalog/location disagree" >>"$report"
+      estat=1
+    fi
+    if [ "$device" = "FileStorageB" ] && { [ "$mtype" != "FileB" ] || [ "$dir" != "storage/b" ]; }; then
+      echo "   MISMATCH: written by FileStorageB but catalog/location disagree" >>"$report"
+      estat=1
+    fi
+    if [ "$mtype" != "FileA" ] || [ "$store" != "FileA" ]; then
+      if [ "$mtype" != "FileB" ] || [ "$store" != "FileB" ]; then
+        echo "   MISMATCH: catalog MediaType and Storage disagree" >>"$report"
+        estat=1
+      fi
+    fi
+  done
+
+  [ "$status" = "T" ] || { echo >>"$report"; return; }
+
+  restore_and_verify "$jobid" "$device"
+  echo >>"$report"
+}
+
+# Case 1: mixed group, idle system, ListedOrder -> FileA.
+log1="$tmp/case1.out"
+bcon "@out /dev/null" "messages" "@out $log1" "run job=backup-mixed level=Full yes"
+check_case "case 1: idle, ListedOrder FileA,FileB" "$(queued_jobid "$log1")" "$log1" FileA
+
+# Case 2: the same members reversed -> FileB, a different Media Type.
+log2="$tmp/case2.out"
+bcon "@out /dev/null" "messages" "@out $log2" "run job=backup-mixed-reversed level=Full yes"
+check_case "case 2: idle, ListedOrder FileB,FileA" "$(queued_jobid "$log2")" "$log2" FileB
+
+# Case 3: FileStorageA busy (device limit 1). ListedOrder still chooses FileA,
+# and the job must wait for FileStorageA rather than take FileStorageB.
+log3="$tmp/case3.out"
+bcon "@out /dev/null" "messages" "@out $log3" \
+  "run job=backup-slow-a level=Full yes" "@sleep 3" \
+  "run job=backup-mixed level=Full yes"
+slow3=$(grep "Job queued. JobId=" "$log3" | head -1 | sed -n -e 's/^.*JobId=//p')
+check_case "case 3: FileStorageA busy, ListedOrder FileA,FileB" "$(queued_jobid "$log3")" "$log3" FileA
+wait_terminal "$slow3" >/dev/null
+
+# Case 4: same load, LeastUsed. FileA has one running job, so FileB is chosen.
+log4="$tmp/case4.out"
+bcon "@out /dev/null" "messages" "@out $log4" \
+  "run job=backup-slow-a level=Full yes" "@sleep 3" \
+  "run job=backup-mixed-leastused level=Full yes"
+slow4=$(grep "Job queued. JobId=" "$log4" | head -1 | sed -n -e 's/^.*JobId=//p')
+check_case "case 4: FileStorageA busy, LeastUsed FileA,FileB" "$(queued_jobid "$log4")" "$log4" FileB
+wait_terminal "$slow4" >/dev/null
+
+# ---------------------------------------------------------------------
+# Case 5: two members sharing one Media Type, with separate archive
+# directories. Alternate between them: no volume may be handed to the other
+# member and marked in Error.
+sharedlog="$tmp/shared-mediatype.out"
+volumeslog="$tmp/shared-volumes.out"
+rm -f "$sharedlog" "$volumeslog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $sharedlog
+run job=backup-shared level=Full yes
+wait
+run job=backup-shared-reversed level=Full yes
+wait
+run job=backup-shared level=Full yes
+wait
+run job=backup-shared-reversed level=Full yes
+wait
+run job=backup-shared level=Full yes
+wait
+run job=backup-shared-reversed level=Full yes
+wait
+messages
+@$out $volumeslog
+list volumes pool=Full
+END_OF_DATA
+
+run_bconsole
+
+# Every one of the six backups must have terminated normally.
+if [ "$(grep -c "Termination: *Backup OK" "$sharedlog")" -lt 6 ]; then
+  set_error "Not all six shared-media-type backups terminated OK."
+fi
+
+# The Storage Daemon condemns a volume it cannot find in its own directory.
+expect_not_grep "not on device" \
+  "$sharedlog" \
+  "A member was handed a volume living in the other member's directory."
+
+expect_not_grep "Marking Volume .* in Error" \
+  "$sharedlog" \
+  "A healthy volume was marked in Error by a sibling group member."
+
+# And nothing may be left condemned in the catalog.
+expect_not_grep "Error" \
+  "$volumeslog" \
+  "A volume was left in Error: volume rotation is broken for this pool."
+
+# ---------------------------------------------------------------------
+# Case 6: the same with FileD disabled, so the policy drops it from the list.
+# The job must still search only FileC's volumes. FileD, not FileC, because
+# case 5 ends on FileD, which owns the most recent volume.
+filteredlog="$tmp/shared-filtered.out"
+filteredvols="$tmp/shared-filtered-volumes.out"
+rm -f "$filteredlog" "$filteredvols"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $filteredlog
+disable storage=FileD
+run job=backup-shared level=Full yes
+wait
+run job=backup-shared level=Full yes
+wait
+enable storage=FileD
+messages
+@$out $filteredvols
+list volumes pool=Full
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "skipping .FileD., it is disabled" \
+  "$filteredlog" \
+  "The disabled member was not filtered out of the group."
+
+expect_not_grep "not on device" \
+  "$filteredlog" \
+  "A filtered group still handed a member a sibling's volume."
+
+expect_not_grep "Marking Volume .* in Error" \
+  "$filteredlog" \
+  "A volume was condemned after a group member was filtered out."
+
+expect_not_grep "Error" \
+  "$filteredvols" \
+  "A volume was left in Error once the group lost a member."
+
+# ---------------------------------------------------------------------
+# Case 7: a member that cannot be reached is skipped, not fatal.
+# backup-failover declares "Storage = FileUnreachable, FileA", and nothing
+# listens on FileUnreachable's port: the job must fail over to FileA.
+failoverlog="$tmp/failover.out"
+rm -f "$failoverlog"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $failoverlog
+run job=backup-failover level=Full yes
+wait
+messages
+END_OF_DATA
+
+run_bconsole
+
+expect_grep "Storage group: 2 candidates" \
+  "$failoverlog" \
+  "The unreachable member was filtered out instead of being tried."
+
+expect_grep "could not take the job, trying .FileA." \
+  "$failoverlog" \
+  "The job did not fail over from the unreachable member to FileA."
+
+expect_grep "Using Device .FileStorageA. to write" \
+  "$failoverlog" \
+  "The job did not end up writing through the surviving member."
+
+expect_grep "Termination: *Backup OK" \
+  "$failoverlog" \
+  "A group with one unreachable member failed the job instead of failing over."
+
+expect_not_grep "Fatal error" \
+  "$failoverlog" \
+  "A candidate's failure was reported as fatal although the job survived it."
+
+# ---------------------------------------------------------------------
+# Case 8: a copy job's Next Pool declares "Storage = FileA, FileC", and
+# FileStorageA is busy. The copy must still write to FileA, the member the
+# catalog records, so its volume must be in storage/a.
+copylog="$tmp/copy-group.out"
+copyvols="$tmp/copy-group-volumes.out"
+rm -f "$copylog" "$copyvols"
+
+bcon "@out ${NULL_DEV}" "messages" "@out $copylog" \
+  "run job=backup-copysrc level=Full yes"
+srcid=$(queued_jobid "$copylog")
+wait_terminal "$srcid" >/dev/null
+
+# "wait" with no argument: the copy control job ends before the job it
+# queues has written anything.
+bcon "@out ${NULL_DEV}" "messages" "@out $copylog" \
+  "run job=backup-slow-a level=Full yes" "@sleep 3" \
+  "run job=copy-to-group yes" "wait" "messages"
+
+copyid=$(grep -oE "Copying JobId [0-9]+ started" "$copylog" \
+  | tail -1 | grep -oE "[0-9]+" || :)
+
+bcon "@out $copylog" "messages"
+bcon "@out $copyvols" "list volumes pool=CopyDst"
+
+# "|| :" keeps an empty grep from aborting the runner (set -e, pipefail).
+copyvol=$(grep -oE "CopyDst-[0-9]+" "$copyvols" | sort -u | head -1 || :)
+
+copydir="-"
+if [ -n "$copyvol" ]; then
+  [ -f "${archivedir}/a/${copyvol}" ] && copydir="storage/a"
+  [ -f "${archivedir}/b/${copyvol}" ] && copydir="storage/b"
+  [ -f "${archivedir}/c/${copyvol}" ] && copydir="storage/c"
+fi
+
+{
+  echo "== case 8: copy to a two-storage Next Pool, FileStorageA busy"
+  echo "   copying JobId     : ${copyid:-<none>}"
+  echo "   CopyDst volume    : ${copyvol:-<none>}"
+  echo "   Next Pool records : FileA (first member, via CopyWstorage)"
+  echo "   volume really in  : ${copydir}"
+} >>"$report"
+
+# A copy that copied nothing writes no volume: fail rather than pass vacuously.
+if [ -z "$copyvol" ]; then
+  echo "   MISMATCH: the copy job wrote no CopyDst volume at all" >>"$report"
+  set_error "Case 8 copied nothing, so it tested nothing."
+elif [ "$copydir" != "storage/a" ]; then
+  echo "   MISMATCH: recorded on FileA, written through another member's device" >>"$report"
+  set_error "A Next Pool volume was written to a member the catalog does not name."
+fi
+
+# ---------------------------------------------------------------------
+# Case 9: the bootstrap file names the member that was written.
+# backup-mixed writes through FileA, so the file must name FileA and
+# FileStorageA, and neither FileB nor FileStorageB.
+bsrlog="$tmp/bootstrap.out"
+rm -f "$bsrlog"
+
+bcon "@out ${NULL_DEV}" "messages" "@out $bsrlog" \
+  "run job=backup-mixed level=Full yes"
+bsrid=$(queued_jobid "$bsrlog")
+wait_terminal "$bsrid" >/dev/null
+bcon "@out $bsrlog" "messages"
+
+# DefaultJob writes "@working_dir@/%c.bsr"; a Full truncates it, so it holds
+# this job alone (checked below by the job name).
+bsrfile="${working_dir}/bareos-fd.bsr"
+{
+  echo "== case 9: bootstrap file records the storage and device"
+  echo "   bootstrap         : ${bsrfile}"
+  if [ -f "$bsrfile" ]; then
+    sed 's/^/     /' "$bsrfile"
+  else
+    echo "     <file not written>"
+  fi
+} >>"$report"
+
+if [ ! -f "$bsrfile" ]; then
+  echo "   MISMATCH: no bootstrap file was written" >>"$report"
+  set_error "Case 9 found no bootstrap file, so it tested nothing."
+else
+  expect_grep "backup-mixed" \
+    "$bsrfile" \
+    "The bootstrap file is not the one this case job wrote."
+
+  expect_grep 'Storage="FileA"' \
+    "$bsrfile" \
+    "The bootstrap file does not name the Storage the job wrote through."
+
+  expect_grep 'Device="FileStorageA"' \
+    "$bsrfile" \
+    "The bootstrap file does not name the device the daemon reserved."
+
+  expect_not_grep 'Storage="FileB"' \
+    "$bsrfile" \
+    "The bootstrap file names a member this job did not write to."
+
+  expect_not_grep 'Device="FileStorageB"' \
+    "$bsrfile" \
+    "The bootstrap file names a device this job did not write to."
+fi
+
+# ---------------------------------------------------------------------
+# Case 10: a restore reads each volume from the member that wrote it.
+# Restore the last backup-shared and backup-shared-reversed job, one per
+# member of the shared-Media-Type group, and compare with the source.
+shared_devices=()
+for jobname in backup-shared backup-shared-reversed; do
+  bcon "@out $tmp/lastjob.out" \
+    ".sql query=\"SELECT 'LAST=' || MAX(jobid) FROM job WHERE name='${jobname}' AND jobstatus='T'\""
+  lastid=$(grep -o "LAST=[0-9]*" "$tmp/lastjob.out" | tail -1 | cut -d= -f2 || :)
+  wrotedev=""
+  if [ -n "$lastid" ]; then
+    wrotedev=$(grep -h "JobId ${lastid}: Using Device" "$sharedlog" "$filteredlog" \
+      | sed -n -e 's/.*Device "\([^"]*\)".*/\1/p' | tail -1 || :)
+  fi
+
+  echo "== case 10: restore ${jobname} (JobId ${lastid:-<none>}), written by ${wrotedev:-<none>}" >>"$report"
+  if [ -z "$lastid" ] || [ -z "$wrotedev" ]; then
+    echo "   MISMATCH: no completed ${jobname} job to restore" >>"$report"
+    set_error "Case 10 found no ${jobname} job to restore, so it tested nothing."
+    continue
+  fi
+  shared_devices+=("$wrotedev")
+  restore_and_verify "$lastid" "$wrotedev"
+  echo >>"$report"
+done
+
+# Both members must be covered, or the case proves less than it claims.
+if [ "${#shared_devices[@]}" -ne 2 ] \
+  || [ "${shared_devices[0]}" = "${shared_devices[1]}" ]; then
+  set_error "Case 10 did not restore from both members of the shared group."
+fi
+
+# ---------------------------------------------------------------------
+# Case 11: "list jobs storage=" lists the jobs a member wrote, and refuses an
+# unknown storage. Job names are matched with a trailing space, so
+# "backup-shared " does not match "backup-shared-reversed".
+listc="$tmp/list-storage-c.out"
+listd="$tmp/list-storage-d.out"
+listbad="$tmp/list-storage-bad.out"
+bcon "@out $listc" "list jobs storage=FileC"
+bcon "@out $listd" "list jobs storage=FileD"
+bcon "@out $listbad" "list jobs storage=NoSuchStorage"
+
+{
+  echo "== case 11: list jobs storage="
+  echo "   FileC lists : $(grep -c "backup-shared " "$listc" || :) backup-shared," \
+    "$(grep -c "backup-shared-reversed" "$listc" || :) backup-shared-reversed"
+  echo "   FileD lists : $(grep -c "backup-shared " "$listd" || :) backup-shared," \
+    "$(grep -c "backup-shared-reversed" "$listd" || :) backup-shared-reversed"
+} >>"$report"
+
+expect_grep "backup-shared " \
+  "$listc" \
+  "list jobs storage=FileC does not list the jobs FileC wrote."
+
+expect_not_grep "backup-shared-reversed" \
+  "$listc" \
+  "list jobs storage=FileC lists a job that FileD wrote."
+
+expect_grep "backup-shared-reversed" \
+  "$listd" \
+  "list jobs storage=FileD does not list the jobs FileD wrote."
+
+expect_not_grep "backup-shared " \
+  "$listd" \
+  "list jobs storage=FileD lists a job that FileC wrote."
+
+expect_grep 'Storage "NoSuchStorage" not found' \
+  "$listbad" \
+  "An unknown storage= was not refused."
+
+expect_not_grep "backup-shared" \
+  "$listbad" \
+  "An unknown storage= listed jobs instead of refusing."
+
+echo "---------------- storage group / media type report ----------------"
+cat "$report"
+echo "---------------------------------------------------------------------"
+
+end_test

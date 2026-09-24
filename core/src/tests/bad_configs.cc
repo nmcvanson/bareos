@@ -41,7 +41,7 @@ TEST(BadConfig, changing_pw_type)
   delete parser;
 }
 
-/* A.1.3: an unknown StorageGroupPolicy must be rejected, on the Pool and on
+/* An unknown StorageGroupPolicy must be rejected, on the Pool and on
  * the Job. Both fixtures are otherwise valid, so the policy name is the only
  * possible reason to fail. */
 
@@ -82,4 +82,3 @@ TEST(BadConfig, storage_group_policy_job)
 
   delete parser;
 }
-

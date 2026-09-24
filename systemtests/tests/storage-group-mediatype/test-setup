@@ -34,6 +34,15 @@ set -u
 # Fill ${BackupDirectory} with data.
 setup_data
 
+# About 3 MB of incompressible data, so a job limited to 300K/s holds its
+# device for roughly ten seconds.
+head -c 3000000 /dev/urandom >"${BackupDirectory}/random.bin"
+
+# One archive directory per device, so where a volume physically lands can be
+# checked independently of what the catalog records.
+rm -rf "${archivedir}/a" "${archivedir}/b" "${archivedir}/c" "${archivedir}/d"
+mkdir -p "${archivedir}/a" "${archivedir}/b" "${archivedir}/c" "${archivedir}/d"
+
 bin/bareos start
 bin/bareos status
 

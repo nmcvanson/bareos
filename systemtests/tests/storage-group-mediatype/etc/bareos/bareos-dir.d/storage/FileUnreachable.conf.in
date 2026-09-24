@@ -1,0 +1,11 @@
+# A member whose Storage Daemon is not there: the real address and
+# password, on sd2_port, which this test allocates and nothing listens on.
+Storage {
+  Name = FileUnreachable
+  Address = @hostname@
+  Password = "@sd_password@"
+  Device = FileStorageA
+  Media Type = FileA
+  Port = @sd2_port@
+  MaximumConcurrentJobs = 10
+}
