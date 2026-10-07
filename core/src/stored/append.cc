@@ -51,6 +51,7 @@
 #include <utility>
 #include <condition_variable>
 #include "lib/channel.h"
+#include "stored/append_queue_bytes.h"
 
 namespace {
 /* Responses sent to the daemon */
@@ -95,9 +96,7 @@ void ProcessedFile::SendAttributesToDirector(JobControlRecord* jcr)
 }
 
 void ProcessedFile::AddAttribute(DeviceRecord* record)
-{
-  attributes_.emplace_back(ProcessedFileData(record));
-}
+{ attributes_.emplace_back(ProcessedFileData(record)); }
 
 bool IsAttribute(DeviceRecord* record)
 {
@@ -129,6 +128,7 @@ class MessageHandler {
   struct message_type {
     std::size_t size;
     PoolMem data;
+    std::size_t allocated;  // bytes of data's buffer, held in the queue
   };
 
   struct error_type {
@@ -144,15 +144,27 @@ class MessageHandler {
 
   using result_type = std::variant<signal_type, message_type, error_type>;
 
-  MessageHandler(BareosSocket* t_fd)
+  /* At most 500 messages, and with a byte bound at most that many bytes of
+   * message buffers plus one message, wait for the job. */
+  MessageHandler(BareosSocket* t_fd, std::size_t byte_bound = 0)
       : MessageHandler{t_fd,
                        // 500 msg reserves at most 256MB in size
                        // probably much less because of signals
-                       channel::CreateBufferedChannel<result_type>(500)}
+                       channel::CreateBufferedChannel<result_type>(500),
+                       byte_bound}
   {
   }
 
-  std::optional<result_type> get_msg() { return output.get(); }
+  std::optional<result_type> get_msg()
+  {
+    std::optional<result_type> result = output.get();
+    if (result) {
+      if (auto* message = std::get_if<message_type>(&*result)) {
+        queued_bytes.Remove(message->allocated);
+      }
+    }
+    return result;
+  }
 
   const char* error()
   {
@@ -170,10 +182,12 @@ class MessageHandler {
  private:
   MessageHandler(BareosSocket* t_fd,
                  std::pair<channel::input<result_type>,
-                           channel::output<result_type>> chan_pair)
+                           channel::output<result_type>> chan_pair,
+                 std::size_t byte_bound)
       : fd{t_fd}
       , input{std::move(chan_pair.first)}
       , output{std::move(chan_pair.second)}
+      , queued_bytes{byte_bound}
       , receive_thread{enlist, this}
   {
   }
@@ -181,6 +195,7 @@ class MessageHandler {
   BareosSocket* fd;
   channel::input<result_type> input;
   channel::output<result_type> output;
+  AppendQueueBytes queued_bytes;
 
   // receive_thread has to be defined last!
   // The thread created will try to access this class immediately after
@@ -212,7 +227,15 @@ class MessageHandler {
           }
         } else {
           std::size_t length = n;
-          result = message_type{length, std::move(msg)};
+          const std::size_t allocated = SizeofPoolMemory(msg.addr());
+          result = message_type{length, std::move(msg), allocated};
+
+          // Waits while the job holds the bound; stops when it stops reading.
+          while (!queued_bytes.WaitBelowBound(std::chrono::milliseconds{100})) {
+            input.try_update_status();
+            if (input.closed()) { break; }
+          }
+          queued_bytes.Add(allocated);
         }
         fd->msg = nullptr;
 
@@ -410,7 +433,7 @@ bool DoAppendData(JobControlRecord* jcr, BareosSocket* bs, const char* what)
           cloned->fd_, cloned->errmsg);
     return false;
   }
-  MessageHandler handler(cloned);
+  MessageHandler handler(cloned, me->max_append_queue_size);
 
   for (last_file_index = 0; ok && !jcr->IsJobCanceled();) {
     /* Read Stream header from the daemon.

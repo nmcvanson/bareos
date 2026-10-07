@@ -3,5 +3,6 @@ Storage {
   Working Directory =  "@working_dir@"
   Scripts Directory = "@CMAKE_SOURCE_DIR@/core/scripts"
   Port = @sd_port@
+  Maximum Append Queue Size = 4 m
   @sd_backend_config@
 }

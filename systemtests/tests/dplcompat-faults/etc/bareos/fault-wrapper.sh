@@ -26,6 +26,8 @@
 #   fail-list-once         the next "list" fails (the file is removed)
 #   list-empty-after-ok    "list" of a volume prints nothing once this many
 #                          uploads of that volume succeeded
+#   slow-uploads           every upload waits this many seconds before it
+#                          reads its data
 # Every upload try is logged to $fault_dir/upload.log as
 # "<volume>.<chunk> ok|failed <epoch seconds>".
 
@@ -92,6 +94,9 @@ _EOT_
     get_filesize "$storage_path/$2.$3"
     ;;
   upload)
+    if [ -e "$fault_dir/slow-uploads" ]; then
+      sleep "$(cat "$fault_dir/slow-uploads")"
+    fi
     if upload_fails; then
       cat >/dev/null
       log_upload "$2.$3" failed

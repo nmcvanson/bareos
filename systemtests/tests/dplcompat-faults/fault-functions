@@ -28,7 +28,14 @@ faults_clear()
   mkdir -p "${fault_dir}"
   rm -f "${fault_dir}/fail-uploads" "${fault_dir}/fail-uploads-until" \
     "${fault_dir}/list-empty-after-ok" "${fault_dir}/fail-uploads-once" \
-    "${fault_dir}/fail-list-once"
+    "${fault_dir}/fail-list-once" "${fault_dir}/slow-uploads"
+}
+
+# Every upload waits the given number of seconds.
+fault_slow_uploads()
+{
+  mkdir -p "${fault_dir}"
+  echo "$1" >"${fault_dir}/slow-uploads"
 }
 
 fault_fail_uploads()
@@ -72,6 +79,21 @@ setup_bigdata()
   if [ ! -f "${bigdata_dir}/random.bin" ]; then
     dd if=/dev/urandom of="${bigdata_dir}/random.bin" bs=1M count=40 2>/dev/null
   fi
+}
+
+# 160 MB of incompressible data for the QueueData fileset.
+setup_queuedata()
+{
+  mkdir -p "${tmp}/queuedata"
+  if [ ! -f "${tmp}/queuedata/random.bin" ]; then
+    dd if=/dev/urandom of="${tmp}/queuedata/random.bin" bs=1M count=160 2>/dev/null
+  fi
+}
+
+# Resident memory in kB of the storage daemon of this test.
+sd_rss_kb()
+{
+  "${AWK}" '/^VmRSS:/ {print $2}' "/proc/$(pidof "$(basename "${BAREOS_STORAGEDAEMON_BINARY}")")/status"
 }
 
 # 2 MB of incompressible data for the SmallData fileset.

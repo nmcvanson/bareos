@@ -1,0 +1,9 @@
+FileSet {
+  Name = "QueueData"
+  Include {
+    Options {
+      Signature = XXH128
+    }
+    File = "@tmpdir@/queuedata"
+  }
+}

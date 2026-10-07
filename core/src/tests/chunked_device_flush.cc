@@ -159,12 +159,14 @@ constexpr size_t kChunk = 10 * 1024 * 1024;
 class FakeChunkedDevice : public ChunkedDevice {
  public:
   std::atomic<bool> fail_uploads{false};
+  std::atomic<bool> stale_busy{false};  // failed uploads leave EBUSY behind
   std::atomic<bool> hold_uploads{false};
   std::atomic<bool> fail_list{false};
   std::atomic<bool> writer_canceled{false};
   std::atomic<bool> fail_thread_start{false};
   std::atomic<int> upload_delay_ms{0};
   std::atomic<int> fail_next_uploads{0};
+  std::atomic<int> conflict_next_uploads{0};  // report a lease conflict
   std::atomic<int> uploads_started{0};
   std::atomic<int> truncates{0};
   std::string reason;
@@ -200,6 +202,7 @@ class FakeChunkedDevice : public ChunkedDevice {
   }
 
   using ChunkedDevice::ChunkedVolumeSize;
+  using ChunkedDevice::ChunksNotUploaded;
   using ChunkedDevice::CloseChunk;
   using ChunkedDevice::ReadChunked;
   using ChunkedDevice::SetupChunk;
@@ -267,9 +270,17 @@ class FakeChunkedDevice : public ChunkedDevice {
   bool FlushRemoteChunk(chunk_io_request* request) override
   {
     if (request->wbuflen == 0) { return true; }
+    int left = conflict_next_uploads.load();
+    if (left > 0
+        && conflict_next_uploads.compare_exchange_strong(left, left - 1)) {
+      PmStrcpy(errmsg, "stale message of another job\n");
+      request->lease_conflict = true;
+      return false;
+    }
     auto inflight_lease = getInflightLease(request);
     if (!inflight_lease) {
       PmStrcpy(errmsg, "chunk is already being uploaded\n");
+      request->lease_conflict = true;
       return false;
     }
     {
@@ -285,6 +296,7 @@ class FakeChunkedDevice : public ChunkedDevice {
                                fail_next, fail_next - 1);
     if (fail_uploads || fail_once) {
       PmStrcpy(errmsg, "injected upload failure\n");
+      if (stale_busy) { dev_errno = EBUSY; }
       return false;
     }
     std::lock_guard<std::mutex> lock(store_mutex_);
@@ -559,6 +571,23 @@ TEST(chunked_device_flush, TransientOutageShorterThanTheTimeoutSucceeds)
 
   EXPECT_EQ(dev.Stored(0), std::string(data.data(), kChunk));
   EXPECT_EQ(dev.Stored(1), std::string(data.data() + kChunk, 100));
+  EXPECT_EQ(dev.CloseChunk(), 0);
+}
+
+/* A lease conflict on an io-thread is no failed try: with retries = 1 a
+ * counted try would make the device read-only, and no error is reported. */
+TEST(chunked_device_flush, LeaseConflictOnAnIoThreadIsRequeuedWithoutATry)
+{
+  FakeChunkedDevice dev{1, 1, 30};
+  dev.conflict_next_uploads = 2;
+  const auto data = Pattern(4096);
+  WriteVolume(dev, data);
+
+  EXPECT_TRUE(dev.Wait()) << dev.reason;
+  EXPECT_EQ(dev.conflict_next_uploads.load(), 0);
+  EXPECT_EQ(dev.Stored(0), std::string(data.data(), data.size()));
+  EXPECT_EQ(dev.Attempts().size(), 1u);
+  EXPECT_FALSE(Contains(dev.reason, "stale message")) << dev.reason;
   EXPECT_EQ(dev.CloseChunk(), 0);
 }
 
@@ -1017,6 +1046,20 @@ TEST(chunked_device_flush, TruncateIsRefusedWhileAChunkIsKept)
   EXPECT_EQ(dev.truncates.load(), 0);
 }
 
+/* An EBUSY left in dev_errno by another job is not a lease conflict: the
+ * failed upload still fails the writer and the chunk is kept and retried. */
+TEST(chunked_device_flush, StaleBusyErrnoIsNotALeaseConflict)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  dev.stale_busy = true;
+  const auto data = Pattern(2 * kChunk);
+  FailFirstBlockingChunk(dev, data);
+
+  dev.fail_uploads = false;
+  EXPECT_TRUE(dev.Wait()) << dev.reason;
+  EXPECT_EQ(dev.Stored(0), std::string(data.data(), kChunk));
+}
+
 TEST(chunked_device_flush, KeptChunkOfAnotherVolumeKeepsTheReleaseWaiting)
 {
   FakeChunkedDevice dev{0, 0, 60};
@@ -1060,8 +1103,8 @@ TEST(chunked_device_flush, ReadOfAnotherVolumeLeavesTheKeptChunkIntact)
 }
 
 /* A release flush copies chunk 0 with 4096 bytes and its upload is held; the
- * writer then fills chunk 0, whose upload fails as the copy is in flight.
- * Returns the release wait's thread, still waiting. */
+ * writer then fills chunk 0, whose upload meets the copy in flight and is
+ * kept. Returns the release wait's thread, still waiting. */
 std::thread KeepTwoCopiesOfChunkZero(FakeChunkedDevice& dev,
                                      const std::vector<char>& data,
                                      bool& waited_ok,
@@ -1077,27 +1120,45 @@ std::thread KeepTwoCopiesOfChunkZero(FakeChunkedDevice& dev,
   });
   while (dev.uploads_started.load() < 1) { std::this_thread::sleep_for(10ms); }
 
-  int write_errno = 0;
-  std::vector<char> rest(data.begin() + 4096, data.end());
-  WriteUntilRefused(dev, rest, 10s, write_errno);
-  EXPECT_EQ(write_errno, EIO);
+  // The writer goes on: the same chunk in flight is not a failed upload.
+  constexpr size_t block = 1024 * 1024;
+  for (size_t done = 4096; done < data.size(); done += block) {
+    const size_t count = std::min(block, data.size() - done);
+    EXPECT_EQ(dev.WriteChunked(0, data.data() + done, count),
+              static_cast<ssize_t>(count));
+  }
   return release;
 }
 
 TEST(chunked_device_flush, ReleaseWaitDuringAKeepIsNeverWrittenEarly)
 {
-  FakeChunkedDevice dev{0, 0, 10};
-  const auto data = Pattern(2 * kChunk);
-  bool waited_ok = false;
-  std::string stored_when_done;
-  std::thread release
-      = KeepTwoCopiesOfChunkZero(dev, data, waited_ok, stored_when_done);
+  auto jcr = std::make_shared<JobControlRecord>();
+  SetJcrInThreadSpecificData(jcr.get());
+  {
+    FakeChunkedDevice dev{0, 0, 10};
+    const auto data = Pattern(2 * kChunk);
+    bool waited_ok = false;
+    std::string stored_when_done;
+    std::thread release
+        = KeepTwoCopiesOfChunkZero(dev, data, waited_ok, stored_when_done);
+    EXPECT_NE(jcr->getJobStatus(), JS_FatalError);
+    EXPECT_EQ(dev.WriteChunked(0, data.data(), 0), 0);
 
-  // The copy uploads; the job still waits for the kept full chunk.
-  dev.hold_uploads = false;
-  release.join();
-  EXPECT_TRUE(waited_ok) << dev.reason;
-  EXPECT_EQ(stored_when_done, std::string(data.data(), kChunk));
+    /* The copy uploads and its size is what the release wait expects, while
+     * the kept full chunk is not due for a retry yet: the wait must go on. */
+    dev.hold_uploads = false;
+    while (dev.Stored(0).empty()) { std::this_thread::sleep_for(10ms); }
+    std::this_thread::sleep_for(300ms);
+
+    // Both jobs now wait for the kept full chunk.
+    dev.SelectVolume("TestVolume", data.size());
+    EXPECT_TRUE(dev.Wait()) << dev.reason;
+    release.join();
+    EXPECT_TRUE(waited_ok) << dev.reason;
+    EXPECT_EQ(stored_when_done, std::string(data.data(), kChunk));
+    EXPECT_EQ(dev.Stored(1), std::string(data.data() + kChunk, kChunk));
+  }
+  SetJcrInThreadSpecificData(nullptr);
 }
 
 TEST(chunked_device_flush, LargerCopyOfAKeptChunkWinsInEitherOrder)
@@ -1114,13 +1175,62 @@ TEST(chunked_device_flush, LargerCopyOfAKeptChunkWinsInEitherOrder)
     release.join();
     EXPECT_FALSE(waited_ok);
 
-    /* Both retries are due (pauses are at most 2.5 s here) and the small copy
+    /* All retries are due (pauses are at most 2.5 s here) and the small copy
      * is tried first; it fails once when it must be stored last. */
     std::this_thread::sleep_for(3s);
     dev.fail_next_uploads = smaller_last ? 1 : 0;
     dev.fail_uploads = false;
-    dev.SelectVolume("TestVolume", kChunk);
+    dev.SelectVolume("TestVolume", data.size());
     EXPECT_TRUE(dev.Wait()) << dev.reason;
     EXPECT_EQ(dev.Stored(0), std::string(data.data(), kChunk));
+  }
+}
+
+TEST(chunked_device_flush, CancelWaitsForAtMostOneKeptChunkUpload)
+{
+  FakeChunkedDevice dev{0, 0, 10};
+  const auto data = Pattern(2 * kChunk);
+  bool waited_ok = false;
+  std::string stored_when_done;
+  dev.fail_uploads = true;
+  std::thread release
+      = KeepTwoCopiesOfChunkZero(dev, data, waited_ok, stored_when_done);
+  dev.hold_uploads = false;
+  release.join();
+
+  // Every kept chunk is due; each try takes 1.5 s and fails.
+  std::this_thread::sleep_for(3s);
+  dev.upload_delay_ms = 1500;
+  const auto start = SteadyClock::now();
+  EXPECT_FALSE(
+      dev.Wait([start] { return SteadyClock::now() - start > 100ms; }));
+  EXPECT_LT(SteadyClock::now() - start, 2500ms);
+  EXPECT_TRUE(Contains(dev.reason, "canceled")) << dev.reason;
+  dev.upload_delay_ms = 0;
+}
+
+TEST(chunked_device_flush, ChunksNotUploadedNameQueuedAndKeptChunks)
+{
+  {
+    FakeChunkedDevice dev{1, 0, 60};
+    dev.hold_uploads = true;
+    WriteVolume(dev, Pattern(2 * kChunk + 10));
+    while (dev.uploads_started.load() < 1) {
+      std::this_thread::sleep_for(10ms);
+    }
+    // Chunk 0 is with the io-thread; chunk 1 waits in the queue.
+    const auto chunks = dev.ChunksNotUploaded();
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_EQ(chunks[0].first, "TestVolume");
+    EXPECT_EQ(chunks[0].second, 1);
+    dev.hold_uploads = false;
+  }
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    FailFirstBlockingChunk(dev, Pattern(2 * kChunk));
+    const auto chunks = dev.ChunksNotUploaded();
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_EQ(chunks[0].first, "TestVolume");
+    EXPECT_EQ(chunks[0].second, 0);
   }
 }

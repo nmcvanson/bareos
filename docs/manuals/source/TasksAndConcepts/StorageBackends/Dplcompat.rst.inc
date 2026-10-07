@@ -86,6 +86,13 @@ program_timeout
    quickly. Make sure your have enough memory or reduce the number of ioslots.
 
 .. note::
+   Memory: each concurrent backup job on a dplcompat device holds up to the
+   value of the Storage Daemon directive Maximum Append Queue Size (bytes;
+   0 = no bound) of client data in the Storage Daemon, plus
+   :math:`(iothreads * ioslots + 1) * chunksize` bytes of chunk buffers on the
+   device.
+
+.. note::
    With ``iothreads`` set to 0 each chunk is uploaded while the job writes. If
    that upload fails, the job fails with "could not upload chunk N of volume V"
    and the volume is marked Full. The chunk is kept in the storage daemon's

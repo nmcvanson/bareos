@@ -1,0 +1,110 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# Slow uploads with the append queue bound of the test's Storage resource
+# (Maximum Append Queue Size = 4 MiB): a 160 MB job on a device with one upload
+# thread and one slot ends OK, the Storage Daemon's resident memory grows by
+# no more than the bound, three chunk buffers and a margin (without the bound
+# the queue alone would hold about 130 MB), and the restore is byte-identical.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+# Queue bound, three chunk buffers of 10 MiB and a margin, in kB.
+growth_limit_kb=$(((4 + 30 + 30) * 1024))
+
+start_test
+setup_queuedata
+faults_clear
+
+log="$tmp/queue-bound.out"
+rm -f "$log"
+rm -rf "$RestoreDirectory"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=Queue-0001 storage=dplcompat-queue pool=Queue
+quit
+END_OF_DATA
+run_bconsole
+
+fault_slow_uploads 4
+base_kb=$(sd_rss_kb)
+peak_kb=${base_kb}
+start=${SECONDS}
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-queue yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole &
+console_pid=$!
+while kill -0 "${console_pid}" 2>/dev/null; do
+  rss_kb=$(sd_rss_kb)
+  if ((rss_kb > peak_kb)); then peak_kb=${rss_kb}; fi
+  sleep 0.5
+done
+wait "${console_pid}"
+elapsed=$((SECONDS - start))
+faults_clear
+good_jobid=$(queued_jobid "$log")
+
+expect_termination "${good_jobid}" "Backup OK"
+echo "SD resident memory: start ${base_kb} kB, peak ${peak_kb} kB, ${elapsed} s" \
+  >>"${tmp}/queue-bound-rss.log"
+# Without a stalled upload the queue does not fill and nothing is shown.
+if ((elapsed < 30)); then
+  set_error "the job took ${elapsed} s: the uploads were not slowed"
+fi
+if ((peak_kb - base_kb > growth_limit_kb)); then
+  set_error "SD memory grew by $((peak_kb - base_kb)) kB, more than ${growth_limit_kb} kB"
+fi
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+restore jobid=${good_jobid} client=bareos-fd where=$RestoreDirectory all done yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+
+expect_grep "Termination:.*Restore OK" "$log" "the restore did not end OK"
+check_restore_diff "${tmp}/queuedata"
+
+end_test

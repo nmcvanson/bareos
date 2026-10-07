@@ -284,11 +284,13 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   utl::Dfmt(debug_trace, FMT_STRING("Flushing chunk {}/{}"), obj_name,
             obj_chunk);
 
+  // Another thread uploads this chunk now: flagged on the request.
   auto inflight_lease = getInflightLease(request);
   if (!inflight_lease) {
     utl::Dfmt(debug_info,
               FMT_STRING("Could not acquire inflight lease for {}/{}"),
               obj_name, obj_chunk);
+    request->lease_conflict = true;
     return false;
   }
 

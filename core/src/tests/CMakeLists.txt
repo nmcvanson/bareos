@@ -531,6 +531,7 @@ if(NOT client-only)
 endif()
 
 if(NOT client-only AND NOT HAVE_WIN32)
+  bareos_add_test(append_queue_bytes LINK_LIBRARIES GTest::gtest_main)
   bareos_add_test(
     chunked_device_flush LINK_LIBRARIES chunked-device Bareos::LibSD
                                         Bareos::Lib GTest::gtest_main

@@ -40,6 +40,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 template <typename T> class alist;
 
@@ -102,6 +104,7 @@ struct chunk_io_request {
   uint8_t tries; /* Number of times the flush was tried to the backing store */
   bool release;  /* Should we release the data to which the buffer points ? */
   int64_t retry_at_ms; /* Steady clock time (ms) before which no retry */
+  bool lease_conflict; /* Set by FlushRemoteChunk: chunk is being uploaded */
 };
 
 struct chunk_descriptor {
@@ -228,7 +231,7 @@ class ChunkedDevice : public Device {
   int PendingChunksOfVolume(const char* volname);
   void KeepCurrentChunk(bool failed, const std::string& error);
   bool UploadKeptChunk(std::list<KeptChunk>::iterator entry);
-  void TryKeptChunks(bool only_due);
+  void TryKeptChunks(bool only_due, size_t limit = SIZE_MAX);
   void ClearKeptReadonly();
 
  protected:
@@ -256,6 +259,7 @@ class ChunkedDevice : public Device {
   bool LoadChunk();
   bool WaitUntilChunksWritten(const std::function<bool()>& is_canceled,
                               std::string& reason);
+  std::vector<std::pair<std::string, uint16_t>> ChunksNotUploaded();
   // Virtual so that tests can cancel the writer or fail the thread start.
   virtual bool WriterCanceled();
   virtual bool StartIoThreads();

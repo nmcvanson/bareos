@@ -43,3 +43,12 @@ Storage {
   Port = "@sd_port@"
   Maximum Concurrent Jobs = 2
 }
+
+Storage {
+  Name = dplcompat-queue
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-queue
+  Media Type = dplcompat-queue
+  Port = "@sd_port@"
+}
