@@ -1,7 +1,7 @@
 /*
    BAREOS® - Backup Archiving REcovery Open Sourced
 
-   Copyright (C) 2024-2025 Bareos GmbH & Co. KG
+   Copyright (C) 2024-2026 Bareos GmbH & Co. KG
 
    This program is Free Software; you can redistribute it and/or
    modify it under the terms of version three of the GNU Affero General Public
@@ -23,6 +23,8 @@
 
 #include "include/bareos.h"
 #include <fmt/format.h>
+#include <charconv>
+#include <system_error>
 #include "crud_storage.h"
 #include "lib/berrno.h"
 #include "lib/bpipe.h"
@@ -96,18 +98,33 @@ class BPipeHandle {
 
   FILE* getReadFd() { return bpipe->rfd; }
   FILE* getWriteFd() { return bpipe->wfd; }
-  std::string getOutput()
+  /* Reads the program's output up to its end, feeding the watchdog for every
+   * byte, so a program that keeps printing is not killed. */
+  tl::expected<std::string, std::string> getOutput()
   {
     close_write();
     std::string output;
-    char iobuf[1024];
-    while (!feof(bpipe->rfd)) {
-      size_t rsize = fread(iobuf, 1, 1024, bpipe->rfd);
-      if (rsize > 0 && !ferror(bpipe->rfd)) { output.append(iobuf, rsize); }
+    while (true) {
+      const int c = getc(bpipe->rfd);
+      if (c != EOF) {
+        output.push_back(static_cast<char>(c));
+        reset_timeout();
+      } else if (ferror(bpipe->rfd)) {
+        if (errno != EINTR) {
+          return tl::unexpected(
+              fmt::format(FMT_STRING("read error after {} bytes of output"),
+                          output.size()));
+        }
+        clearerr(bpipe->rfd);
+      } else {
+        return output;
+      }
     }
-    return output;
   }
-  void reset_timeout() { TimerKeepalive(*bpipe->timer_id); }
+  void reset_timeout()
+  {
+    if (bpipe->timer_id) { TimerKeepalive(*bpipe->timer_id); }
+  }
   bool timed_out() { return bpipe->timer_id && bpipe->timer_id->killed; }
   void close_write()
   {
@@ -131,9 +148,7 @@ class BPipeHandle {
 
 // std::isalnum is locale-sensitive but we need ASCII-only
 bool is_ascii_alnum(char c)
-{
-  return std::isdigit(c) || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z');
-}
+{ return std::isdigit(c) || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'); }
 
 bool is_valid_env_name(const std::string& name)
 {
@@ -175,9 +190,7 @@ tl::expected<void, std::string> CrudStorage::set_program(
 }
 
 void CrudStorage::set_program_timeout(std::chrono::seconds timeout)
-{
-  m_program_timeout = timeout;
-}
+{ m_program_timeout = timeout; }
 
 tl::expected<BStringList, std::string> CrudStorage::get_supported_options()
 {
@@ -192,12 +205,17 @@ tl::expected<BStringList, std::string> CrudStorage::get_supported_options()
                        "== Output ==\n"
                        "{}"
                        "============"),
-            ret, output);
+            ret, output.value_or(""));
   if (ret != 0) {
     return tl::unexpected(
         fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
   }
-  BStringList options{output, '\n'};
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
+  }
+  BStringList options{*output, '\n'};
   if (!options.empty() && options.back().empty()) { options.pop_back(); }
   return options;
 }
@@ -233,10 +251,15 @@ tl::expected<void, std::string> CrudStorage::test_connection()
                        "== Output ==\n"
                        "{}"
                        "============"),
-            ret, output);
+            ret, output.value_or(""));
   if (ret != 0) {
     return tl::unexpected(
         fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+  }
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
   }
   return {};
 }
@@ -257,15 +280,20 @@ auto CrudStorage::stat(std::string_view obj_name, std::string_view obj_part)
                        "== Output ==\n"
                        "{}"
                        "============"),
-            ret, output);
+            ret, output.value_or(""));
   if (ret != 0) {
     utl::Dfmt(debug_info, FMT_STRING("stat returned {}"), ret);
     return tl::unexpected(
         fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
   }
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
+  }
 
   Stat stat;
-  if (int n = sscanf(output.c_str(), "%zu\n", &stat.size); n != 1) {
+  if (int n = sscanf(output->c_str(), "%zu\n", &stat.size); n != 1) {
     return tl::unexpected(fmt::format(
         FMT_STRING("could not parse data returned by {}\n"), cmdline));
   }
@@ -282,29 +310,75 @@ auto CrudStorage::list(std::string_view obj_name)
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
   if (!bph) { return tl::unexpected(bph.error()); }
-  auto rfh = bph->getReadFd();
-
-  std::map<std::string, Stat> result;
-  while (!feof(rfh)) {
-    Stat stat;
-    auto obj_part = std::string(129, '\0');
-    if (int n = fscanf(rfh, "%128s %zu\n", obj_part.data(), &stat.size);
-        n != 2) {
-      utl::Dfmt(debug_info, FMT_STRING("fscanf() returned {}"), n);
-      return tl::unexpected(fmt::format(
-          FMT_STRING("could not parse data returned by {}"), cmdline));
-    }
-    obj_part.resize(std::strlen(obj_part.c_str()));
-    result[obj_part] = stat;
-
-    utl::Dfmt(debug_trace, FMT_STRING("volume={} part={} size={}"), obj_name,
-              obj_part, stat.size);
-  }
+  auto output = bph->getOutput();
 
   if (auto ret = bph->close(); ret != 0) {
     utl::Dfmt(debug_info, FMT_STRING("list returned {}"), ret);
     return tl::unexpected(
         fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+  }
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
+  }
+
+  auto result = parse_list_output(*output);
+  if (!result) {
+    utl::Dfmt(debug_info, FMT_STRING("list output not parsable: {}"),
+              result.error());
+    return tl::unexpected(
+        fmt::format(FMT_STRING("could not parse data returned by {}: {}\n"),
+                    cmdline, result.error()));
+  }
+  for (const auto& [obj_part, stat] : *result) {
+    utl::Dfmt(debug_trace, FMT_STRING("volume={} part={} size={}"), obj_name,
+              obj_part, stat.size);
+  }
+  return result;
+}
+
+auto CrudStorage::parse_list_output(std::string_view output)
+    -> tl::expected<std::map<std::string, Stat>, std::string>
+{
+  constexpr std::string_view blanks{" \t\r"};
+  std::map<std::string, Stat> result;
+  size_t line_number{0};
+
+  while (!output.empty()) {
+    const size_t end_of_line = output.find('\n');
+    std::string_view line = output.substr(0, end_of_line);
+    output.remove_prefix(end_of_line == std::string_view::npos
+                             ? output.size()
+                             : end_of_line + 1);
+    ++line_number;
+
+    const size_t name_start = line.find_first_not_of(blanks);
+    if (name_start == std::string_view::npos) { continue; }
+    const size_t name_end = line.find_first_of(blanks, name_start);
+    const size_t size_start = line.find_first_not_of(blanks, name_end);
+    const size_t size_end = size_start == std::string_view::npos
+                                ? std::string_view::npos
+                                : line.find_first_of(blanks, size_start);
+    const bool trailing_junk
+        = size_end != std::string_view::npos
+          && line.find_first_not_of(blanks, size_end) != std::string_view::npos;
+    if (size_start == std::string_view::npos || trailing_junk) {
+      return tl::unexpected(fmt::format(
+          FMT_STRING("line {} is not \"<name> <size>\""), line_number));
+    }
+
+    const std::string_view size_text = line.substr(
+        size_start, size_end == std::string_view::npos ? std::string_view::npos
+                                                       : size_end - size_start);
+    Stat stat;
+    const auto [ptr, ec] = std::from_chars(
+        size_text.data(), size_text.data() + size_text.size(), stat.size);
+    if (ec != std::errc{} || ptr != size_text.data() + size_text.size()) {
+      return tl::unexpected(
+          fmt::format(FMT_STRING("line {} has no valid size"), line_number));
+    }
+    result[std::string{line.substr(name_start, name_end - name_start)}] = stat;
   }
   return result;
 }
@@ -356,11 +430,16 @@ tl::expected<void, std::string> CrudStorage::upload(std::string_view obj_name,
                        "== Output ==\n"
                        "{}"
                        "============"),
-            ret, output);
+            ret, output.value_or(""));
   if (ret != 0) {
     return tl::unexpected(fmt::format(
         FMT_STRING("Upload failed with returncode={} after data was sent\n"),
         ret));
+  }
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
   }
   return {};
 }
@@ -441,10 +520,15 @@ tl::expected<void, std::string> CrudStorage::remove(std::string_view obj_name,
                        "== Output ==\n"
                        "{}"
                        "============"),
-            ret, output);
+            ret, output.value_or(""));
   if (ret != 0) {
     return tl::unexpected(
         fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+  }
+  if (!output) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
+                    cmdline, output.error()));
   }
   return {};
 }

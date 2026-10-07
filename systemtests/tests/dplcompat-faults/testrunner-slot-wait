@@ -1,0 +1,132 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# Upload outage during a job larger than the upload queue (two slots, four
+# chunks): the job does not block, it fails within flush_timeout + 60 s with
+# "no upload progress", as a write error and not as the end of the volume;
+# the queued chunks are kept and reach the store when the outage ends, and
+# the device then takes the next job, which restores byte-identical.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+start_test
+setup_bigdata
+faults_clear
+
+log="$tmp/slot-wait.out"
+rm -f "$log"
+rm -rf "$RestoreDirectory"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=SlotWait-0001 storage=dplcompat-slot pool=SlotWait
+quit
+END_OF_DATA
+run_bconsole
+
+fault_fail_uploads
+start=${SECONDS}
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-slot-wait yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+elapsed=$((SECONDS - start))
+failed_jobid=$(queued_jobid "$log")
+
+expect_termination "${failed_jobid}" "Backup Error"
+expect_grep "no upload progress for 120 seconds" "$log" \
+  "the job log does not give the reason of the refused write"
+expect_not_grep "End of medium" "$log" \
+  "the refused write was taken for the end of the volume"
+if ((elapsed > 180)); then
+  set_error "job ${failed_jobid} took ${elapsed} s, more than flush_timeout + 60 s"
+fi
+volumes=$(console_output "list volumes pool=SlotWait")
+if ! grep -qE "SlotWait-0001\s*\|\s*Full\s*\|" <<<"${volumes}"; then
+  set_error "the volume of the refused write is not Full"
+fi
+if grep -q "SlotWait-0002" <<<"${volumes}"; then
+  set_error "the job moved on to another volume after the refused write"
+fi
+
+# The outage ends: the kept chunks are uploaded, the device takes a new job.
+uploads_before=$(upload_log_lines)
+faults_clear
+for chunk in 0000 0001 0002; do
+  wait_uploaded dplcompat-slot SlotWait-0001 "${chunk}" "${uploads_before}" 90
+done
+
+# The store holds every byte the catalog has for the volume, plus at most the
+# first part of the refused block: less than one Maximum Block Size (64512 by
+# default), so 1 MiB is a safe bound.
+stored=0
+for f in "${archivedir}"/SlotWait-0001.*; do
+  stored=$((stored + $(get_file_size "$f")))
+done
+volbytes=$(volume_bytes SlotWait-0001)
+if ((stored < volbytes || stored - volbytes >= 1048576)); then
+  set_error "store has ${stored} bytes of SlotWait-0001, catalog ${volbytes}"
+fi
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-slot-wait yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+good_jobid=$(queued_jobid "$log")
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+restore jobid=${good_jobid} client=bareos-fd where=$RestoreDirectory all done yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+
+expect_termination "${good_jobid}" "Backup OK"
+expect_grep "Termination:.*Restore OK" "$log" "the restore did not end OK"
+check_restore_diff "${bigdata_dir}"
+
+end_test

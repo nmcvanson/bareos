@@ -1,7 +1,7 @@
 /*
    BAREOS® - Backup Archiving REcovery Open Sourced
 
-   Copyright (C) 2024-2024 Bareos GmbH & Co. KG
+   Copyright (C) 2024-2026 Bareos GmbH & Co. KG
 
    This program is Free Software; you can redistribute it and/or
    modify it under the terms of version three of the GNU Affero General Public
@@ -49,6 +49,9 @@ class CrudStorage {
                                        std::string_view obj_part);
   tl::expected<std::map<std::string, Stat>, std::string> list(
       std::string_view obj_name);
+  // Parses "<name> <size>" lines; an empty output is an empty listing.
+  static tl::expected<std::map<std::string, Stat>, std::string>
+  parse_list_output(std::string_view output);
   tl::expected<void, std::string> upload(std::string_view obj_name,
                                          std::string_view obj_part,
                                          gsl::span<char> obj_data);

@@ -44,9 +44,26 @@ ioslots
    greater than 1 for cached and to 0 for direct writing.
 
 retries
-   Number of writing tries before discarding the data (0-255, default: 0).
-   Setting this to a value greater zero will cause data-loss if the backend is
-   not available.
+   Number of upload tries of a chunk after which the device refuses further
+   writes (0-255, default: 0 = no limit). The chunk is not discarded: it stays
+   queued and is retried until it is uploaded. Jobs writing to the device in
+   the meantime fail with a message naming the chunk. Once every queued chunk
+   is uploaded, the device takes writes again.
+
+flush_timeout
+   Seconds without a successful chunk upload after which a job that waits for
+   its uploads at its end fails with "Failed to flush device", and a job that
+   waits for a free upload slot fails with "no upload progress" (default: 1800,
+   minimum 1). It must be longer than the upload of one chunk takes. The
+   chunks still queued are kept and retried. After a refused write the volume
+   is marked Full and the device refuses writes until the chunks are uploaded;
+   after a failed wait at the end of a job, the next append to the volume
+   compares its size with the catalog. While a device holds chunks it cannot
+   upload, every later job writing to it fails by its own deadline. A failed
+   upload is tried again after 5 seconds, then after a pause that doubles with
+   each try up to 60 seconds, but at most a quarter of ``flush_timeout``. A
+   job canceled while it waits for its uploads ends within a few seconds; a
+   job that only reads from the device does not wait for them.
 
 program
    The wrapper program to use. Either an absolute path or the name of a program
@@ -54,7 +71,8 @@ program
 
 program_timeout
    Timeout in seconds after which the wrapper program is presumed dead if it
-   does not respond to I/O operations (default: 30).
+   does not respond to I/O operations (default: 30). Output of the program
+   counts as a response, so a ``list`` that keeps printing is not killed.
 
 
 .. tip::
@@ -67,6 +85,76 @@ program_timeout
    memory for the device. With larger chunksize settings, this escalates pretty
    quickly. Make sure your have enough memory or reduce the number of ioslots.
 
+.. note::
+   With ``iothreads`` set to 0 each chunk is uploaded while the job writes. If
+   that upload fails, the job fails with "could not upload chunk N of volume V"
+   and the volume is marked Full. The chunk is kept in the storage daemon's
+   memory and the device refuses writes: every job writing to it fails with
+   "refuses writes", also one that wants to mount another volume. The kept
+   chunk is tried again when a job that waits for its uploads at its end does
+   so (within ``flush_timeout``, pauses as above), and once whenever the device
+   is opened or closed. When it is uploaded, the device takes writes again. A
+   job ends OK only after every kept chunk of the device is uploaded. At most
+   two chunks are kept per device (a warning names more); they are lost only
+   if the storage daemon stops, which it then logs. Canceling a job that
+   retries kept chunks takes up to two times ``program_timeout`` plus one
+   second when the backend hangs instead of failing. With ``Maximum
+   Concurrent Jobs`` above 1 on the device, a job may fail and the device
+   refuse writes while another job uploads the same chunk at its end; no data
+   is lost. Use ``iothreads`` of 1 or more for concurrent jobs on one device.
+
+.. note::
+   A device that refuses writes, for any volume, also fails a job whose own
+   chunks are all uploaded when it ends ("refuses writes"), since the device
+   cannot tell whose data the refused chunks hold.
+
+.. note::
+   While a device refuses writes, each backup job that tries to open it marks
+   the volume it was given in Error ("not on device", "Marking Volume ... in
+   Error"), also a healthy volume. Restores read Error volumes as usual. Once
+   the storage daemon logs that the device "takes writes again", compare the
+   sizes of each such volume's objects in the bucket with the catalog's
+   VolBytes (``s3cmd ls s3://<bucket>/<volume>/`` against
+   ``list volume=<volume>``). If the bucket holds at least VolBytes:
+
+   - a volume named in a job's "could not upload chunk N of volume V" or
+     "refuses writes: chunk N of volume V" message held a kept chunk:
+     ``update volume=<volume> volstatus=Used``, so nothing is appended to it;
+   - a volume named only in "not on device" or "Marking Volume ... in Error"
+     is healthy: ``update volume=<volume> volstatus=Append``.
+
+   A volume whose bucket holds less than VolBytes stays in Error.
+
+.. warning::
+   Do not purge, truncate or relabel a dplcompat volume while chunks of it may
+   still wait for upload in a storage daemon, that is after a job that wrote
+   to it was canceled or ended with "Failed to flush device", "made no
+   progress", "no upload progress", "could not upload chunk", "could not
+   queue chunk" or "refuses writes". Wait until the sizes of the volume's
+   objects in the bucket add up to at least the catalog's VolBytes
+   (``s3cmd ls s3://<bucket>/<volume>/`` against ``list volume=<volume>``), or
+   until every storage daemon that wrote to it has been restarted (its queue
+   is then gone, with any data not yet uploaded). Only the device that holds
+   the chunks refuses the truncate ("cannot be truncated before they are
+   uploaded"); another device or another storage daemon does not know about
+   them. When a backup job recycles such a volume, the refused truncate fails
+   that job ("Truncate error") and marks the volume Error; once its chunks
+   are uploaded, ``update volume=<volume> volstatus=Recycle`` lets it be
+   recycled again. If a storage daemon stops while a failed job's chunks are
+   still queued, that job's Full volume stays shorter than the catalog says.
+
+.. note::
+   Versions without the ``flush_timeout`` option behave differently: a backend
+   outage keeps a job and its device waiting without limit, also a job that
+   only reads; a failed upload is retried only every 300 seconds; ``retries``
+   greater than zero discards a chunk after its last try; a write refused by
+   the device, or a failed upload with ``iothreads`` set to 0, lets the job go
+   on with another volume without that chunk's data; a ``list`` that keeps
+   printing longer than ``program_timeout`` is killed; an empty ``list``
+   output is an error; a failed ``list`` of the volume is read as a volume
+   size of 0, so the volume is marked Error for a size mismatch instead of for
+   the failed listing; and a volume can be truncated while its chunks wait for
+   upload. Such a version refuses a device configured with ``flush_timeout``.
 
 Example
 '''''''

@@ -2,7 +2,7 @@
    BAREOS® - Backup Archiving REcovery Open Sourced
 
    Copyright (C) 2016-2017 Planets Communications B.V.
-   Copyright (C) 2017-2024 Bareos GmbH & Co. KG
+   Copyright (C) 2017-2026 Bareos GmbH & Co. KG
 
    This program is Free Software; you can redistribute it and/or
    modify it under the terms of version three of the GNU Affero General Public
@@ -72,7 +72,10 @@ class ordered_circbuf {
                 int compare(ocbuf_item*, ocbuf_item*),
                 void update(void*, void*),
                 bool use_reserved_slot = false,
-                bool no_signal = false);
+                bool no_signal = false,
+                const struct timespec* full_wait_until = nullptr,
+                bool* was_full = nullptr,
+                bool ignore_full = false);
   void* dequeue(bool reserve_slot = false,
                 bool requeued = false,
                 struct timespec* ts = NULL,
@@ -82,7 +85,7 @@ class ordered_circbuf {
              int callback(void* item1, void* item2));
   int unreserve_slot();
   int flush();
-  bool full() { return size_ == (capacity_ - reserved_); }
+  bool full() { return size_ >= (capacity_ - reserved_); }
   bool empty() { return size_ == 0; }
   bool empty_with_no_reserve() { return size_ + reserved_ == 0; }
   bool IsFlushing() { return flush_; }

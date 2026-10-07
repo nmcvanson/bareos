@@ -25,6 +25,7 @@
 #include "chunked_device.h"
 #include <gsl/span>
 #include <map>
+#include <optional>
 #include "crud_storage.h"
 #include <tl/expected.hpp>
 
@@ -42,7 +43,7 @@ class DropletCompatibleDevice : public ChunkedDevice {
   bool CheckRemoteConnection() override;
   bool FlushRemoteChunk(chunk_io_request* request) override;
   bool ReadRemoteChunk(chunk_io_request* request) override;
-  ssize_t RemoteVolumeSize() override;
+  std::optional<ssize_t> RemoteVolumeSize() override;
   bool TruncateRemoteVolume(DeviceControlRecord* dcr) override;
 
  public:

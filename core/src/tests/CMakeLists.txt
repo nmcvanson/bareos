@@ -530,6 +530,21 @@ if(NOT client-only)
   )
 endif()
 
+if(NOT client-only AND NOT HAVE_WIN32)
+  bareos_add_test(
+    chunked_device_flush LINK_LIBRARIES chunked-device Bareos::LibSD
+                                        Bareos::Lib GTest::gtest_main
+  )
+  bareos_add_test(
+    dplcompat_crud_storage LINK_LIBRARIES crud-storage Bareos::LibSD
+                                          Bareos::Lib GTest::gtest_main
+  )
+  bareos_add_test(dplcompat_device_options LINK_LIBRARIES ${LINK_LIBRARIES})
+  if(HAVE_DYNAMIC_SD_BACKENDS)
+    add_dependencies(dplcompat_device_options bareossd-dplcompat)
+  endif()
+endif()
+
 add_executable(env_tester env_tester.cc)
 target_link_libraries(env_tester PRIVATE Bareos::Lib)
 bareos_add_test(bpipe_env_test LINK_LIBRARIES GTest::gtest_main Bareos::Lib)

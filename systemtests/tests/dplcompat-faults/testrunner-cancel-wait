@@ -1,0 +1,112 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# A job waiting for its uploads at the end is canceled: the cancel command
+# returns and the job ends canceled within 30 s, long before flush_timeout.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+start_test
+setup_data
+faults_clear
+
+log="$tmp/cancel-wait.out"
+rm -f "$log"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=CancelWait-0001 storage=dplcompat pool=CancelWait
+quit
+END_OF_DATA
+run_bconsole
+
+fault_fail_uploads
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-cancel-wait yes
+quit
+END_OF_DATA
+run_bconsole
+jobid=$(queued_jobid "$log")
+
+# The job's last chunk is queued once the job waits for its uploads.
+waited=0
+until grep -q "/CancelWait-0001/0000" \
+  <<<"$(console_output "status storage=dplcompat")"; do
+  if ((waited >= 25)); then
+    set_error "job ${jobid} never reached its flush wait"
+    break
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+
+start=${SECONDS}
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+cancel jobid=${jobid}
+quit
+END_OF_DATA
+run_bconsole
+cancel_elapsed=$((SECONDS - start))
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+wait jobid=${jobid}
+messages
+quit
+END_OF_DATA
+run_bconsole
+elapsed=$((SECONDS - start))
+
+expect_termination "${jobid}" "Backup Canceled"
+# The Director drops the SD's messages of a canceled job: read the SD's log.
+expect_grep "JobId ${jobid}: .*Upload of volume CancelWait-0001 on device .* not finished: job canceled" \
+  "${logdir}/bareos-sd.log" \
+  "the SD log does not show that the release wait ended on the cancel"
+if ((cancel_elapsed > 30)); then
+  set_error "the cancel command took ${cancel_elapsed} s to return"
+fi
+if ((elapsed > 30)); then
+  set_error "job ${jobid} took ${elapsed} s to end after the cancel"
+fi
+
+uploads_before=$(upload_log_lines)
+faults_clear
+wait_uploaded dplcompat CancelWait-0001 0000 "${uploads_before}" 60
+
+end_test

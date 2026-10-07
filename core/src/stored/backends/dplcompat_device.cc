@@ -23,6 +23,7 @@
 #include "include/bareos.h"
 
 #include "stored/stored.h"
+#include "stored/device_control_record.h"
 #include "stored/sd_backends.h"
 #include "chunked_device.h"
 #include "lib/edit.h"
@@ -42,9 +43,7 @@ static constexpr int debug_info = 100;
 static constexpr int debug_trace = 120;
 
 std::string get_chunk_name(storagedaemon::chunk_io_request* request)
-{
-  return fmt::format(FMT_STRING("{:04d}"), request->chunk);
-}
+{ return fmt::format(FMT_STRING("{:04d}"), request->chunk); }
 bool is_chunk_name(const std::string& name)
 {
   if (name.length() != 4) { return false; }
@@ -55,9 +54,13 @@ bool is_chunk_name(const std::string& name)
 }
 
 static const utl::options option_defaults{
-    {"chunksize", "10 MB"}, {"iothreads", "0"},       {"ioslots", "10"},
-    {"retries", "0"},       {"program_timeout", "0"},  // default in
-                                                       // crud_storage
+    {"chunksize", "10 MB"},
+    {"iothreads", "0"},
+    {"ioslots", "10"},
+    {"retries", "0"},
+    {"program_timeout", "0"},  // default in
+                               // crud_storage
+    {"flush_timeout", "1800"},
 };
 
 void throw_if_junk(const std::string& str, size_t pos = 0)
@@ -92,32 +95,22 @@ template <typename T> void convert_value(T&, const std::string&) = delete;
 template <>
 [[maybe_unused]] void convert_value<>(unsigned long long& to,
                                       const std::string& from)
-{
-  to = stoull_notrailing(from);
-}
+{ to = stoull_notrailing(from); }
 
 template <>
 [[maybe_unused]] void convert_value<>(unsigned long& to,
                                       const std::string& from)
-{
-  to = stoul_notrailing(from);
-}
+{ to = stoul_notrailing(from); }
 
 template <> void convert_value<>(uint8_t& to, const std::string& from)
-{
-  to = gsl::narrow<uint8_t>(stoul_notrailing(from));
-}
+{ to = gsl::narrow<uint8_t>(stoul_notrailing(from)); }
 
 template <> void convert_value<>(uint32_t& to, const std::string& from)
-{
-  to = gsl::narrow<uint32_t>(stoul_notrailing(from));
-}
+{ to = gsl::narrow<uint32_t>(stoul_notrailing(from)); }
 
 
 template <> void convert_value<>(std::string& to, const std::string& from)
-{
-  to = from;
-}
+{ to = from; }
 
 void convert_size(uint64_t& to, const std::string& from)
 {
@@ -224,13 +217,18 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
             .and_then(get_value_converter("retries", retries_))
             .and_then(get_size_converter("chunksize", chunk_size_))
             .and_then(get_value_converter("program", program))
-            .and_then(get_value_converter("program_timeout", program_timeout));
+            .and_then(get_value_converter("program_timeout", program_timeout))
+            .and_then(get_value_converter("flush_timeout", flush_timeout_));
       !conversion_result) {
     return tl::unexpected(conversion_result.error());
   }
 
   if (program.empty()) {
     return tl::unexpected("Option 'program' is required\n"s);
+  }
+
+  if (flush_timeout_ == 0) {
+    return tl::unexpected("Option 'flush_timeout' must be at least 1\n"s);
   }
 
   utl::Dfmt(debug_trace, FMT_STRING("configured chunksize in bytes: {}"),
@@ -383,13 +381,13 @@ bool DropletCompatibleDevice::TruncateRemoteVolume(DeviceControlRecord*)
   return true;
 }
 
-ssize_t DropletCompatibleDevice::RemoteVolumeSize()
+std::optional<ssize_t> DropletCompatibleDevice::RemoteVolumeSize()
 {
   const auto chunk_map = m_storage.list(getVolCatName());
   if (!chunk_map) {
     PmStrcpy(errmsg, chunk_map.error().c_str());
     dev_errno = EIO;
-    return false;
+    return std::nullopt;
   }
   if (chunk_map->empty()) { return -1; }
   ssize_t total_size{0};
@@ -400,9 +398,17 @@ ssize_t DropletCompatibleDevice::RemoteVolumeSize()
 }
 
 
-bool DropletCompatibleDevice::d_flush(DeviceControlRecord*)
+// Waits for the uploads; a failure is reported in the job's log.
+bool DropletCompatibleDevice::d_flush(DeviceControlRecord* dcr)
 {
-  return WaitUntilChunksWritten();
+  JobControlRecord* jcr = dcr ? dcr->jcr : nullptr;
+  std::string reason;
+  if (WaitUntilChunksWritten(
+          [jcr] { return jcr != nullptr && jcr->IsJobCanceled(); }, reason)) {
+    return true;
+  }
+  Jmsg(jcr, M_ERROR, 0, "%s", reason.c_str());
+  return false;
 };
 
 int DropletCompatibleDevice::d_open(const char* pathname, int flags, int mode)
@@ -415,16 +421,12 @@ int DropletCompatibleDevice::d_open(const char* pathname, int flags, int mode)
 }
 
 ssize_t DropletCompatibleDevice::d_read(int t_fd, void* buffer, size_t count)
-{
-  return ReadChunked(t_fd, buffer, count);
-}
+{ return ReadChunked(t_fd, buffer, count); }
 
 ssize_t DropletCompatibleDevice::d_write(int t_fd,
                                          const void* buffer,
                                          size_t count)
-{
-  return WriteChunked(t_fd, buffer, count);
-}
+{ return WriteChunked(t_fd, buffer, count); }
 
 int DropletCompatibleDevice::d_close(int) { return CloseChunk(); }
 
@@ -465,9 +467,7 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
 }
 
 bool DropletCompatibleDevice::d_truncate(DeviceControlRecord* dcr)
-{
-  return TruncateChunkedVolume(dcr);
-}
+{ return TruncateChunkedVolume(dcr); }
 
 REGISTER_SD_BACKEND(dplcompat, DropletCompatibleDevice)
 

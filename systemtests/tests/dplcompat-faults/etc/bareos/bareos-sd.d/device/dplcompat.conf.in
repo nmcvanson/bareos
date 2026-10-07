@@ -1,0 +1,96 @@
+Device {
+  Name = dplcompat
+  Media Type = dplcompat
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=2"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}
+
+Device {
+  Name = dplcompat-retry
+  Media Type = dplcompat-retry
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=2"
+                   ",retries=2"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}
+
+Device {
+  Name = dplcompat-slot
+  Media Type = dplcompat-slot
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=2"
+                   ",ioslots=1"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}
+
+Device {
+  Name = dplcompat-sync
+  Media Type = dplcompat-sync
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=0"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}
+
+Device {
+  Name = dplcompat-syncmcj
+  Media Type = dplcompat-syncmcj
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=0"
+                   ",flush_timeout=20"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 2
+}

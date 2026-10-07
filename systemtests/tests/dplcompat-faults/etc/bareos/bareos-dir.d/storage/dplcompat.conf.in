@@ -1,0 +1,45 @@
+Storage {
+  Name = dplcompat
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat
+  Media Type = dplcompat
+  Port = "@sd_port@"
+}
+
+Storage {
+  Name = dplcompat-retry
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-retry
+  Media Type = dplcompat-retry
+  Port = "@sd_port@"
+}
+
+Storage {
+  Name = dplcompat-slot
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-slot
+  Media Type = dplcompat-slot
+  Port = "@sd_port@"
+}
+
+Storage {
+  Name = dplcompat-sync
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-sync
+  Media Type = dplcompat-sync
+  Port = "@sd_port@"
+}
+
+Storage {
+  Name = dplcompat-syncmcj
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-syncmcj
+  Media Type = dplcompat-syncmcj
+  Port = "@sd_port@"
+  Maximum Concurrent Jobs = 2
+}

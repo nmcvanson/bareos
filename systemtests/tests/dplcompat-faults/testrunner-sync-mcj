@@ -1,0 +1,178 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# Blocking uploads (iothreads=0) with two concurrent jobs on one device whose
+# blocks share the first chunk. A job never ends OK unless the store holds
+# every byte of its volumes; OK jobs restore byte-identical. After a long
+# outage both jobs fail, and the next job's open uploads the kept chunk.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+start_test
+setup_bigdata
+setup_smalldata
+faults_clear
+
+log="$tmp/sync-mcj.out"
+rm -f "$log"
+rm -rf "$RestoreDirectory"
+
+# Runs the small and the big job at the same time and waits for both.
+run_both()
+{
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-syncmcj-small yes
+run job=backup-syncmcj-big yes
+wait
+messages
+quit
+END_OF_DATA
+  run_bconsole
+  small_jobid=$(grep 'Job queued. JobId=' "$log" | tail -n 2 | head -n 1 \
+    | sed -n -e 's/^.*JobId=//p')
+  big_jobid=$(queued_jobid "$log")
+}
+
+job_ok()
+{
+  grep -q "Termination:.*Backup OK" <<<"$(console_output "list joblog jobid=$1")"
+}
+
+# An OK job has every volume fully stored and restores byte-identical.
+check_ok_job()
+{
+  local jobid="$1" source="$2" volume
+  for volume in $(job_volumes "${jobid}"); do
+    expect_volume_stored "${volume}" "${max_block_size}"
+  done
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+restore jobid=${jobid} client=bareos-fd where=$RestoreDirectory/${jobid} all done yes
+wait
+messages
+quit
+END_OF_DATA
+  run_bconsole
+  check_restore_diff "${source}" "$RestoreDirectory/${jobid}"
+}
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=SyncMcj-0001 storage=dplcompat-syncmcj pool=SyncMcj
+quit
+END_OF_DATA
+run_bconsole
+
+# 1. One upload fails once while both jobs write into the first chunk.
+fault_fail_upload_once
+run_both
+faults_clear
+if ! grep -q "^SyncMcj-0001.0000 failed " "${fault_dir}/upload.log"; then
+  set_error "the injected failure did not hit the shared first chunk"
+fi
+ok_jobs=0
+if job_ok "${small_jobid}"; then
+  check_ok_job "${small_jobid}" "${tmp}/smalldata"
+  ok_jobs=$((ok_jobs + 1))
+fi
+if job_ok "${big_jobid}"; then
+  check_ok_job "${big_jobid}" "${bigdata_dir}"
+  ok_jobs=$((ok_jobs + 1))
+fi
+echo "short outage: ${ok_jobs} of 2 jobs ended OK" >>"$log"
+
+# 2. Uploads fail for longer than flush_timeout: both jobs fail.
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+label volume=SyncMcj-0002 storage=dplcompat-syncmcj pool=SyncMcj
+update volume=SyncMcj-0001 volstatus=Used
+quit
+END_OF_DATA
+run_bconsole
+uploads_before=$(upload_log_lines)
+fault_fail_uploads
+run_both
+if job_ok "${small_jobid}"; then
+  set_error "job ${small_jobid} ended OK although no upload succeeded"
+fi
+if job_ok "${big_jobid}"; then
+  set_error "job ${big_jobid} ended OK although no upload succeeded"
+fi
+volbytes_before=$(volume_bytes SyncMcj-0002)
+status_before=$(volume_status SyncMcj-0002)
+expect_volume_stored SyncMcj-0002
+
+# 3. After the outage the next job's open uploads the kept chunk and the job
+# ends OK. The catalog does not count the bytes of jobs that failed in their
+# end flush, so the store may hold up to the kept chunks (2 x 10 MiB) more.
+faults_clear
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-syncmcj-small yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+next_jobid=$(queued_jobid "$log")
+expect_termination "${next_jobid}" "Backup OK"
+if ! tail -n +"$((uploads_before + 1))" "${fault_dir}/upload.log" \
+  | grep -q "^SyncMcj-0002.0000 ok "; then
+  set_error "the kept chunk of SyncMcj-0002 was not uploaded"
+fi
+echo "SyncMcj-0002 ${status_before} VolBytes before ${volbytes_before}," \
+  "after $(volume_bytes SyncMcj-0002)" >>"$log"
+if job_volumes "${next_jobid}" | grep -q "^SyncMcj-0002$"; then
+  if [ "${status_before}" = "Full" ]; then
+    set_error "job ${next_jobid} appended to the full volume SyncMcj-0002"
+  fi
+  # The append corrects the catalog to the stored size first.
+  next_joblog=$(console_output "list joblog jobid=${next_jobid}")
+  if ! grep -q "sizes do not match" <<<"${next_joblog}" \
+    || ! grep -q "Correcting Catalog" <<<"${next_joblog}"; then
+    set_error "job ${next_jobid} appended without correcting the catalog size"
+  fi
+  if (($(bucket_bytes SyncMcj-0002) != $(volume_bytes SyncMcj-0002))); then
+    set_error "SyncMcj-0002: store and catalog sizes differ after the append"
+  fi
+else
+  expect_volume_stored SyncMcj-0002 $((2 * 10485760 + 1))
+fi
+check_ok_job "${next_jobid}" "${tmp}/smalldata"
+
+end_test

@@ -40,15 +40,21 @@ add_library(backend-utils STATIC)
 target_sources(backend-utils PRIVATE util.cc)
 target_link_libraries(backend-utils PUBLIC Bareos::Lib fmt::fmt)
 
-add_sd_backend(bareossd-dplcompat)
-target_sources(bareossd-dplcompat PRIVATE dplcompat_device.cc crud_storage.cc)
+add_library(crud-storage STATIC)
+target_sources(crud-storage PRIVATE crud_storage.cc)
 target_link_libraries(
-  bareossd-dplcompat PRIVATE Microsoft.GSL::GSL fmt::fmt tl::expected
-                             chunked-device backend-utils
+  crud-storage PUBLIC Microsoft.GSL::GSL fmt::fmt tl::expected backend-utils
 )
 if(HAVE_WIN32)
-  target_link_libraries(bareossd-dplcompat PRIVATE shlwapi)
+  target_link_libraries(crud-storage PRIVATE shlwapi)
 endif()
+
+add_sd_backend(bareossd-dplcompat)
+target_sources(bareossd-dplcompat PRIVATE dplcompat_device.cc)
+target_link_libraries(
+  bareossd-dplcompat PRIVATE Microsoft.GSL::GSL fmt::fmt tl::expected
+                             chunked-device crud-storage backend-utils
+)
 
 add_sd_backend(bareossd-file)
 add_sd_backend(bareossd-fifo)

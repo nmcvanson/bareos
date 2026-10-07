@@ -1,0 +1,110 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# The "list" at the start of an append fails: the volume is marked Error and
+# the job goes on with a new volume; it never writes from offset 0 of the old
+# one, whose earlier job still restores byte-identical.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+# Sum of the sizes of a volume's objects in the store.
+stored_bytes()
+{
+  local total=0
+  for f in "${archivedir}/$1".*; do
+    total=$((total + $(get_file_size "$f")))
+  done
+  echo "${total}"
+}
+
+start_test
+setup_data
+faults_clear
+
+log="$tmp/list-open.out"
+rm -f "$log"
+rm -rf "$RestoreDirectory"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=ListOpen-0001 storage=dplcompat pool=ListOpen
+run job=backup-list-open yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+first_jobid=$(queued_jobid "$log")
+expect_termination "${first_jobid}" "Backup OK"
+bytes_before=$(stored_bytes ListOpen-0001)
+
+fault_fail_list_once
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-list-open yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+second_jobid=$(queued_jobid "$log")
+faults_clear
+
+expect_grep "Unable to position to end of data" "$log" \
+  "the failed listing did not stop the append to the volume"
+volumes=$(console_output "list volumes pool=ListOpen")
+if ! grep -qE "ListOpen-0001\s*\|\s*Error\s*\|" <<<"${volumes}"; then
+  set_error "ListOpen-0001 is not marked Error after the failed listing"
+fi
+if [ "$(stored_bytes ListOpen-0001)" != "${bytes_before}" ]; then
+  set_error "ListOpen-0001 changed after the failed listing"
+fi
+expect_termination "${second_jobid}" "Backup OK"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+restore jobid=${first_jobid} client=bareos-fd where=$RestoreDirectory all done yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+
+expect_grep "Termination:.*Restore OK" "$log" "the restore did not end OK"
+check_restore_diff "${BackupDirectory}"
+
+end_test
