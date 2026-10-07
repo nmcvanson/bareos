@@ -25,8 +25,10 @@
 #include "chunked_device.h"
 #include <gsl/span>
 #include <map>
+#include <memory>
 #include <optional>
 #include "crud_storage.h"
+#include "object_store.h"
 #include <tl/expected.hpp>
 
 namespace storagedaemon {
@@ -35,7 +37,8 @@ class DropletCompatibleDevice : public ChunkedDevice {
  private:
   /* maximum number of chunks in a volume (0000 to 9999) */
   static constexpr int max_chunks_ = 10000;
-  CrudStorage m_storage;
+  // The transport chosen by option "transport"; set up by setup_impl().
+  std::unique_ptr<ObjectStore> m_storage{std::make_unique<CrudStorage>()};
   bool m_setup_succeeded{false};
   tl::expected<void, std::string> setup_impl();
 

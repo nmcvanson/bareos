@@ -57,6 +57,7 @@ bool path_is_relative(const std::string& path)
 
 class BPipeHandle {
   Bpipe* bpipe{nullptr};
+  bool killed{false};
 
  public:
   BPipeHandle(const char* prog,
@@ -70,11 +71,16 @@ class BPipeHandle {
   BPipeHandle(const BPipeHandle&) = delete;
   BPipeHandle& operator=(const BPipeHandle&) = delete;
 
-  BPipeHandle(BPipeHandle&& other) { std::swap(bpipe, other.bpipe); }
+  BPipeHandle(BPipeHandle&& other)
+  {
+    std::swap(bpipe, other.bpipe);
+    std::swap(killed, other.killed);
+  }
 
   BPipeHandle& operator=(BPipeHandle&& other)
   {
     std::swap(bpipe, other.bpipe);
+    std::swap(killed, other.killed);
     return *this;
   }
 
@@ -125,7 +131,9 @@ class BPipeHandle {
   {
     if (bpipe->timer_id) { TimerKeepalive(*bpipe->timer_id); }
   }
-  bool timed_out() { return bpipe->timer_id && bpipe->timer_id->killed; }
+  // True when the watchdog killed the program; still valid after close().
+  bool timed_out()
+  { return killed || (bpipe && bpipe->timer_id && bpipe->timer_id->killed); }
   void close_write()
   {
     ASSERT(bpipe);
@@ -134,6 +142,7 @@ class BPipeHandle {
   int close()
   {
     ASSERT(bpipe);
+    killed = timed_out();
     int ret = CloseBpipe(bpipe) & ~b_errno_exit;
 
     if (ret & b_errno_signal) {
@@ -145,6 +154,14 @@ class BPipeHandle {
     return ret;
   }
 };
+
+// A failed run of the program: a timeout when the watchdog killed it.
+StoreError ProgramFailure(BPipeHandle& bph, std::string message)
+{
+  return StoreError{
+      bph.timed_out() ? StoreErrc::kTimeout : StoreErrc::kTransient,
+      std::move(message)};
+}
 
 // std::isalnum is locale-sensitive but we need ASCII-only
 bool is_ascii_alnum(char c)
@@ -192,12 +209,14 @@ tl::expected<void, std::string> CrudStorage::set_program(
 void CrudStorage::set_program_timeout(std::chrono::seconds timeout)
 { m_program_timeout = timeout; }
 
-tl::expected<BStringList, std::string> CrudStorage::get_supported_options()
+tl::expected<BStringList, StoreError> CrudStorage::get_supported_options()
 {
   Dmsg0(debug_trace, "options called\n");
   std::string cmdline = fmt::format(FMT_STRING("\"{}\" options"), m_program);
   auto bph{BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r")};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto output = bph->getOutput();
   auto ret = bph->close();
   utl::Dfmt(debug_trace,
@@ -207,27 +226,30 @@ tl::expected<BStringList, std::string> CrudStorage::get_supported_options()
                        "============"),
             ret, output.value_or(""));
   if (ret != 0) {
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+    return tl::unexpected(ProgramFailure(
+        *bph,
+        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
   BStringList options{*output, '\n'};
   if (!options.empty() && options.back().empty()) { options.pop_back(); }
   return options;
 }
 
-tl::expected<void, std::string> CrudStorage::set_option(
-    const std::string& name,
-    const std::string& value)
+tl::expected<void, StoreError> CrudStorage::set_option(const std::string& name,
+                                                       const std::string& value)
 {
   if (!is_valid_env_name(name)) {
-    return tl::unexpected(fmt::format(
-        FMT_STRING("Name \"{}\" is not usable as environment variable\n"),
-        name));
+    return tl::unexpected(StoreError{
+        StoreErrc::kConfig,
+        fmt::format(
+            FMT_STRING("Name \"{}\" is not usable as environment variable\n"),
+            name)});
   }
   utl::Dfmt(debug_trace,
             FMT_STRING("program environment variable '{}' set to '{}'"), name,
@@ -236,14 +258,16 @@ tl::expected<void, std::string> CrudStorage::set_option(
   return {};
 }
 
-tl::expected<void, std::string> CrudStorage::test_connection()
+tl::expected<void, StoreError> CrudStorage::test_connection()
 {
   Dmsg0(debug_trace, "test_connection called\n");
   std::string cmdline
       = fmt::format(FMT_STRING("\"{}\" testconnection"), m_program);
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto output = bph->getOutput();
   auto ret = bph->close();
   utl::Dfmt(debug_trace,
@@ -253,26 +277,31 @@ tl::expected<void, std::string> CrudStorage::test_connection()
                        "============"),
             ret, output.value_or(""));
   if (ret != 0) {
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+    return tl::unexpected(ProgramFailure(
+        *bph,
+        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
   return {};
 }
 
-auto CrudStorage::stat(std::string_view obj_name, std::string_view obj_part)
-    -> tl::expected<Stat, std::string>
+tl::expected<ObjectStat, StoreError> CrudStorage::stat(
+    std::string_view obj_name,
+    std::string_view obj_part)
 {
   utl::Dfmt(debug_trace, FMT_STRING("stat {}/{} called"), obj_name, obj_part);
   std::string cmdline = fmt::format(FMT_STRING("\"{}\" stat \"{}\" \"{}\""),
                                     m_program, obj_name, obj_part);
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto output = bph->getOutput();
   auto ret = bph->close();
   utl::Dfmt(debug_trace,
@@ -283,66 +312,78 @@ auto CrudStorage::stat(std::string_view obj_name, std::string_view obj_part)
             ret, output.value_or(""));
   if (ret != 0) {
     utl::Dfmt(debug_info, FMT_STRING("stat returned {}"), ret);
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+    return tl::unexpected(ProgramFailure(
+        *bph,
+        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
 
-  Stat stat;
+  ObjectStat stat;
   if (int n = sscanf(output->c_str(), "%zu\n", &stat.size); n != 1) {
-    return tl::unexpected(fmt::format(
-        FMT_STRING("could not parse data returned by {}\n"), cmdline));
+    // The wrapper prints no size for an object that does not exist.
+    const bool blank
+        = output->find_first_not_of(" \t\r\n") == std::string::npos;
+    return tl::unexpected(StoreError{
+        blank ? StoreErrc::kNotFound : StoreErrc::kTransient,
+        fmt::format(FMT_STRING("could not parse data returned by {}\n"),
+                    cmdline)});
   }
   utl::Dfmt(debug_trace, FMT_STRING("stat returns {}"), stat.size);
   return stat;
 }
 
 auto CrudStorage::list(std::string_view obj_name)
-    -> tl::expected<std::map<std::string, Stat>, std::string>
+    -> tl::expected<ObjectList, StoreError>
 {
   utl::Dfmt(debug_trace, FMT_STRING("list {} called"), obj_name);
   std::string cmdline
       = fmt::format(FMT_STRING("\"{}\" list \"{}\""), m_program, obj_name);
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto output = bph->getOutput();
 
   if (auto ret = bph->close(); ret != 0) {
     utl::Dfmt(debug_info, FMT_STRING("list returned {}"), ret);
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+    return tl::unexpected(ProgramFailure(
+        *bph,
+        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
 
   auto result = parse_list_output(*output);
   if (!result) {
     utl::Dfmt(debug_info, FMT_STRING("list output not parsable: {}"),
               result.error());
-    return tl::unexpected(
+    return tl::unexpected(StoreError{
+        StoreErrc::kTransient,
         fmt::format(FMT_STRING("could not parse data returned by {}: {}\n"),
-                    cmdline, result.error()));
+                    cmdline, result.error())});
   }
   for (const auto& [obj_part, stat] : *result) {
     utl::Dfmt(debug_trace, FMT_STRING("volume={} part={} size={}"), obj_name,
               obj_part, stat.size);
   }
-  return result;
+  return std::move(*result);
 }
 
 auto CrudStorage::parse_list_output(std::string_view output)
-    -> tl::expected<std::map<std::string, Stat>, std::string>
+    -> tl::expected<ObjectList, std::string>
 {
   constexpr std::string_view blanks{" \t\r"};
-  std::map<std::string, Stat> result;
+  ObjectList result;
   size_t line_number{0};
 
   while (!output.empty()) {
@@ -371,7 +412,7 @@ auto CrudStorage::parse_list_output(std::string_view output)
     const std::string_view size_text = line.substr(
         size_start, size_end == std::string_view::npos ? std::string_view::npos
                                                        : size_end - size_start);
-    Stat stat;
+    ObjectStat stat;
     const auto [ptr, ec] = std::from_chars(
         size_text.data(), size_text.data() + size_text.size(), stat.size);
     if (ec != std::errc{} || ptr != size_text.data() + size_text.size()) {
@@ -383,9 +424,9 @@ auto CrudStorage::parse_list_output(std::string_view output)
   return result;
 }
 
-tl::expected<void, std::string> CrudStorage::upload(std::string_view obj_name,
-                                                    std::string_view obj_part,
-                                                    gsl::span<char> obj_data)
+tl::expected<void, StoreError> CrudStorage::upload(std::string_view obj_name,
+                                                   std::string_view obj_part,
+                                                   gsl::span<char> obj_data)
 {
   utl::Dfmt(debug_trace, FMT_STRING("upload {}/{} called"), obj_name, obj_part);
   std::string cmdline = fmt::format(FMT_STRING("\"{}\" upload \"{}\" \"{}\""),
@@ -393,7 +434,9 @@ tl::expected<void, std::string> CrudStorage::upload(std::string_view obj_name,
 
   auto bph{BPipeHandle::create(cmdline.c_str(), m_program_timeout, "rw",
                                m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto wfh = bph->getWriteFd();
 
   constexpr size_t max_write_size{256 * 1024};
@@ -409,15 +452,17 @@ tl::expected<void, std::string> CrudStorage::upload(std::string_view obj_name,
         clearerr(wfh);
         continue;
       } else if (errno == EPIPE) {
-        return tl::unexpected(
+        return tl::unexpected(ProgramFailure(
+            *bph,
             fmt::format(FMT_STRING("Broken pipe after writing {} of {} bytes "
                                    "at offset {} into {}/{}\n"),
-                        has_written, write_size, offset, obj_name, obj_part));
+                        has_written, write_size, offset, obj_name, obj_part)));
       } else {
-        return tl::unexpected(fmt::format(
-            FMT_STRING("Got errno={} after writing {} of {} bytes at offset {} "
-                       "into {}/{}\n"),
-            errno, has_written, write_size, offset, obj_name, obj_part));
+        return tl::unexpected(ProgramFailure(
+            *bph, fmt::format(FMT_STRING("Got errno={} after writing {} of {} "
+                                         "bytes at offset {} into {}/{}\n"),
+                              errno, has_written, write_size, offset, obj_name,
+                              obj_part)));
       }
     }
     bph->reset_timeout();
@@ -432,23 +477,34 @@ tl::expected<void, std::string> CrudStorage::upload(std::string_view obj_name,
                        "============"),
             ret, output.value_or(""));
   if (ret != 0) {
-    return tl::unexpected(fmt::format(
-        FMT_STRING("Upload failed with returncode={} after data was sent\n"),
-        ret));
+    return tl::unexpected(ProgramFailure(
+        *bph, fmt::format(
+                  FMT_STRING(
+                      "Upload failed with returncode={} after data was sent\n"),
+                  ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
   return {};
 }
 
-tl::expected<gsl::span<char>, std::string> CrudStorage::download(
+tl::expected<gsl::span<char>, StoreError> CrudStorage::download(
     std::string_view obj_name,
     std::string_view obj_part,
-    gsl::span<char> buffer)
+    gsl::span<char> buffer,
+    std::optional<ByteRange> range)
 {
+  if (range) {
+    return tl::unexpected(StoreError{
+        StoreErrc::kConfig,
+        fmt::format(FMT_STRING("the program transport cannot download a byte "
+                               "range of {}/{}\n"),
+                    obj_name, obj_part)});
+  }
   utl::Dfmt(debug_trace, FMT_STRING("download {}/{} called"), obj_name,
             obj_part);
   // download data from somewhere
@@ -457,7 +513,9 @@ tl::expected<gsl::span<char>, std::string> CrudStorage::download(
 
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto rfh = bph->getReadFd();
   size_t total_read{0};
   constexpr size_t max_read_size{256 * 1024};
@@ -470,48 +528,53 @@ tl::expected<gsl::span<char>, std::string> CrudStorage::download(
     total_read += bytes_read;
     if (bytes_read < read_size) {
       if (feof(rfh)) {
-        return tl::unexpected(
+        return tl::unexpected(ProgramFailure(
+            *bph,
             fmt::format(FMT_STRING("unexpected EOF after reading {} of {} "
                                    "bytes while downloading {}/{}"),
-                        total_read, buffer.size_bytes(), obj_name, obj_part));
+                        total_read, buffer.size_bytes(), obj_name, obj_part)));
       } else if (ferror(rfh)) {
         if (errno == EINTR) {
           ASSERT(bytes_read == 0);
           clearerr(rfh);
           continue;
         }
-        return tl::unexpected(
+        return tl::unexpected(ProgramFailure(
+            *bph,
             fmt::format(FMT_STRING("stream error after reading {} of {} bytes "
                                    "while downloading {}/{}"),
-                        total_read, buffer.size_bytes(), obj_name, obj_part));
+                        total_read, buffer.size_bytes(), obj_name, obj_part)));
       }
     }
   } while (total_read < buffer.size_bytes());
   if (fgetc(rfh) != EOF) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("additional data after expected end of stream "
                                "while downloading {}/{}"),
-                    obj_name, obj_part));
+                    obj_name, obj_part)));
   }
   if (auto ret = bph->close(); ret != 0) {
-    return tl::unexpected(fmt::format(
-        FMT_STRING(
-            "Download failed with returncode={} after data was received\n"),
-        ret));
+    return tl::unexpected(ProgramFailure(
+        *bph, fmt::format(FMT_STRING("Download failed with returncode={} "
+                                     "after data was received\n"),
+                          ret)));
   }
   utl::Dfmt(debug_trace, FMT_STRING("read {} bytes"), total_read);
   return buffer;
 }
 
-tl::expected<void, std::string> CrudStorage::remove(std::string_view obj_name,
-                                                    std::string_view obj_part)
+tl::expected<void, StoreError> CrudStorage::remove(std::string_view obj_name,
+                                                   std::string_view obj_part)
 {
   utl::Dfmt(debug_trace, FMT_STRING("remove {}/{} called"), obj_name, obj_part);
   std::string cmdline = fmt::format(FMT_STRING("\"{}\" remove \"{}\" \"{}\""),
                                     m_program, obj_name, obj_part);
   auto bph{
       BPipeHandle::create(cmdline.c_str(), m_program_timeout, "r", m_env_vars)};
-  if (!bph) { return tl::unexpected(bph.error()); }
+  if (!bph) {
+    return tl::unexpected(StoreError{StoreErrc::kTransient, bph.error()});
+  }
   auto output = bph->getOutput();
   auto ret = bph->close();
 
@@ -522,13 +585,15 @@ tl::expected<void, std::string> CrudStorage::remove(std::string_view obj_name,
                        "============"),
             ret, output.value_or(""));
   if (ret != 0) {
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret));
+    return tl::unexpected(ProgramFailure(
+        *bph,
+        fmt::format(FMT_STRING("Running \"{}\" returned {}\n"), cmdline, ret)));
   }
   if (!output) {
-    return tl::unexpected(
+    return tl::unexpected(ProgramFailure(
+        *bph,
         fmt::format(FMT_STRING("Reading the output of \"{}\" failed: {}\n"),
-                    cmdline, output.error()));
+                    cmdline, output.error())));
   }
   return {};
 }

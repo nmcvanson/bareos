@@ -540,9 +540,15 @@ if(NOT client-only AND NOT HAVE_WIN32)
     dplcompat_crud_storage LINK_LIBRARIES crud-storage Bareos::LibSD
                                           Bareos::Lib GTest::gtest_main
   )
+  bareos_add_test(
+    dplcompat_object_store LINK_LIBRARIES crud-storage Bareos::LibSD
+                                          Bareos::Lib GTest::gtest_main
+  )
   bareos_add_test(dplcompat_device_options LINK_LIBRARIES ${LINK_LIBRARIES})
+  bareos_add_test(dplcompat_transport_option LINK_LIBRARIES ${LINK_LIBRARIES})
   if(HAVE_DYNAMIC_SD_BACKENDS)
     add_dependencies(dplcompat_device_options bareossd-dplcompat)
+    add_dependencies(dplcompat_transport_option bareossd-dplcompat)
   endif()
 endif()
 

@@ -65,6 +65,11 @@ flush_timeout
    job canceled while it waits for its uploads ends within a few seconds; a
    job that only reads from the device does not wait for them.
 
+transport
+   How the device reaches the object storage. The only value is ``program``
+   (default): every operation runs the wrapper program. Other values are
+   refused.
+
 program
    The wrapper program to use. Either an absolute path or the name of a program
    in :config:option:`sd/storage/ScriptsDirectory`.

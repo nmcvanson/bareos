@@ -61,6 +61,7 @@ static const utl::options option_defaults{
     {"program_timeout", "0"},  // default in
                                // crud_storage
     {"flush_timeout", "1800"},
+    {"transport", "program"},
 };
 
 void throw_if_junk(const std::string& str, size_t pos = 0)
@@ -208,6 +209,7 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
     utl::Dfmt(debug_trace, FMT_STRING("'{}' = '{}'"), key, value);
   }
   std::string program;
+  std::string transport;
   uint32_t program_timeout{0};
 
   if (auto conversion_result
@@ -218,9 +220,18 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
             .and_then(get_size_converter("chunksize", chunk_size_))
             .and_then(get_value_converter("program", program))
             .and_then(get_value_converter("program_timeout", program_timeout))
-            .and_then(get_value_converter("flush_timeout", flush_timeout_));
+            .and_then(get_value_converter("flush_timeout", flush_timeout_))
+            .and_then(get_value_converter("transport", transport));
       !conversion_result) {
     return tl::unexpected(conversion_result.error());
+  }
+
+  if (transport != "program") {
+    return tl::unexpected(fmt::format(
+        FMT_STRING(
+            "invalid argument '{}' for option 'transport': only 'program' is "
+            "available\n"),
+        transport));
   }
 
   if (program.empty()) {
@@ -234,16 +245,17 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
   utl::Dfmt(debug_trace, FMT_STRING("configured chunksize in bytes: {}"),
             chunk_size_);
 
-  if (auto result = m_storage.set_program(program); !result) { return result; }
+  auto storage = std::make_unique<CrudStorage>();
+  if (auto result = storage->set_program(program); !result) { return result; }
 
   if (program_timeout > 0) {
-    m_storage.set_program_timeout(std::chrono::seconds{program_timeout});
+    storage->set_program_timeout(std::chrono::seconds{program_timeout});
   }
 
-  if (auto supported_options = m_storage.get_supported_options()) {
+  if (auto supported_options = storage->get_supported_options()) {
     for (const auto& option_name : *supported_options) {
       if (auto value = fetch_value(options, option_name);
-          value && !m_storage.set_option(option_name, *value)) {
+          value && !storage->set_option(option_name, *value)) {
         return tl::unexpected(
             fmt::format(FMT_STRING("Error setting option '{}' to '{}'\n"),
                         option_name, *value));
@@ -252,7 +264,7 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
   } else {
     return tl::unexpected(
         fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
-                    supported_options.error()));
+                    supported_options.error().message));
   }
 
   // OptionConsumer should have consumed all options at this point
@@ -263,13 +275,14 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
         fmt::format(FMT_STRING("Unknown options encountered: {}\n"),
                     option_names.Join(", ")));
   }
+  m_storage = std::move(storage);
   return {};
 }
 
 bool DropletCompatibleDevice::CheckRemoteConnection()
 {
   Dmsg0(debug_trace, "CheckRemoteConnection called\n");
-  return setup() && m_storage.test_connection();
+  return setup() && m_storage->test_connection();
 }
 
 bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
@@ -302,7 +315,7 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
    * chunk is reused in a next backup job. We only want the chunk with
    * the biggest amount of valid data to persist as we only append to
    * chunks. */
-  auto obj_stat = m_storage.stat(obj_name, obj_chunk);
+  auto obj_stat = m_storage->stat(obj_name, obj_chunk);
 
   if (obj_stat && obj_stat->size > request->wbuflen) {
     utl::Dfmt(
@@ -316,10 +329,10 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   auto obj_data = gsl::span{request->buffer, request->wbuflen};
   utl::Dfmt(debug_info, FMT_STRING("Uploading {} bytes of data"),
             request->wbuflen);
-  if (auto result = m_storage.upload(obj_name, obj_chunk, obj_data)) {
+  if (auto result = m_storage->upload(obj_name, obj_chunk, obj_data)) {
     return true;
   } else {
-    PmStrcpy(errmsg, result.error().c_str());
+    PmStrcpy(errmsg, result.error().message.c_str());
     dev_errno = EIO;
     return false;
   }
@@ -334,9 +347,9 @@ bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
             obj_chunk.data());
 
   // check object metadata
-  auto obj_stat = m_storage.stat(obj_name, obj_chunk);
+  auto obj_stat = m_storage->stat(obj_name, obj_chunk);
   if (!obj_stat) {
-    PmStrcpy(errmsg, obj_stat.error().c_str());
+    PmStrcpy(errmsg, obj_stat.error().message.c_str());
     Dmsg1(debug_info, "%s", errmsg);
     dev_errno = EIO;
     return false;
@@ -350,12 +363,13 @@ bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
     return false;
   }
 
-  if (auto obj_data = m_storage.download(obj_name, obj_chunk,
-                                         {request->buffer, obj_stat->size})) {
+  if (auto obj_data
+      = m_storage->download(obj_name, obj_chunk,
+                            {request->buffer, obj_stat->size}, std::nullopt)) {
     *request->rbuflen = obj_data->size_bytes();
     return true;
   } else {
-    PmStrcpy(errmsg, obj_data.error().c_str());
+    PmStrcpy(errmsg, obj_data.error().message.c_str());
     Dmsg1(debug_info, "%s", errmsg);
     dev_errno = EIO;
     return false;
@@ -365,16 +379,16 @@ bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
 bool DropletCompatibleDevice::TruncateRemoteVolume(DeviceControlRecord*)
 {
   const char* vol_name = getVolCatName();
-  const auto chunk_map = m_storage.list(vol_name);
+  const auto chunk_map = m_storage->list(vol_name);
   if (!chunk_map) {
-    PmStrcpy(errmsg, chunk_map.error().c_str());
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
     dev_errno = EIO;
     return false;
   }
   for (const auto& [chunk_name, stat] : *chunk_map) {
     if (is_chunk_name(chunk_name)) {
-      if (auto res = m_storage.remove(vol_name, chunk_name); !res) {
-        PmStrcpy(errmsg, res.error().c_str());
+      if (auto res = m_storage->remove(vol_name, chunk_name); !res) {
+        PmStrcpy(errmsg, res.error().message.c_str());
         dev_errno = EIO;
         return false;
       }
@@ -385,9 +399,9 @@ bool DropletCompatibleDevice::TruncateRemoteVolume(DeviceControlRecord*)
 
 std::optional<ssize_t> DropletCompatibleDevice::RemoteVolumeSize()
 {
-  const auto chunk_map = m_storage.list(getVolCatName());
+  const auto chunk_map = m_storage->list(getVolCatName());
   if (!chunk_map) {
-    PmStrcpy(errmsg, chunk_map.error().c_str());
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
     dev_errno = EIO;
     return std::nullopt;
   }
