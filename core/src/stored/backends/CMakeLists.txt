@@ -49,6 +49,12 @@ if(HAVE_WIN32)
   target_link_libraries(crud-storage PRIVATE shlwapi)
 endif()
 
+if(NOT HAVE_WIN32)
+  add_library(s3-helpers STATIC)
+  target_sources(s3-helpers PRIVATE s3_sigv4.cc s3_xml.cc s3cfg_reader.cc)
+  target_link_libraries(s3-helpers PUBLIC OpenSSL::Crypto tl::expected)
+endif()
+
 add_sd_backend(bareossd-dplcompat)
 target_sources(bareossd-dplcompat PRIVATE dplcompat_device.cc)
 target_link_libraries(

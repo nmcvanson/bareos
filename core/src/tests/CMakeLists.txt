@@ -544,6 +544,9 @@ if(NOT client-only AND NOT HAVE_WIN32)
     dplcompat_object_store LINK_LIBRARIES crud-storage Bareos::LibSD
                                           Bareos::Lib GTest::gtest_main
   )
+  bareos_add_test(s3_sigv4_test LINK_LIBRARIES s3-helpers GTest::gtest_main)
+  bareos_add_test(s3_xml_test LINK_LIBRARIES s3-helpers GTest::gtest_main)
+  bareos_add_test(s3cfg_reader_test LINK_LIBRARIES s3-helpers GTest::gtest_main)
   bareos_add_test(dplcompat_device_options LINK_LIBRARIES ${LINK_LIBRARIES})
   bareos_add_test(dplcompat_transport_option LINK_LIBRARIES ${LINK_LIBRARIES})
   if(HAVE_DYNAMIC_SD_BACKENDS)
