@@ -49,10 +49,30 @@ if(HAVE_WIN32)
   target_link_libraries(crud-storage PRIVATE shlwapi)
 endif()
 
+# The native S3 transport needs libcurl, which is optional: without it (or on
+# Windows) dplcompat is built with the program transport only.
+set(DPLCOMPAT_NATIVE_BUILT
+    OFF
+    CACHE INTERNAL "dplcompat is built with the native S3 transport"
+)
 if(NOT HAVE_WIN32)
   add_library(s3-helpers STATIC)
   target_sources(s3-helpers PRIVATE s3_sigv4.cc s3_xml.cc s3cfg_reader.cc)
   target_link_libraries(s3-helpers PUBLIC OpenSSL::Crypto tl::expected)
+
+  find_package(CURL)
+  if(CURL_FOUND)
+    add_library(s3-native STATIC)
+    target_sources(s3-native PRIVATE s3_native_store.cc)
+    target_link_libraries(
+      s3-native PUBLIC s3-helpers backend-utils tl::expected Microsoft.GSL::GSL
+                       fmt::fmt CURL::libcurl Threads::Threads
+    )
+    set(DPLCOMPAT_NATIVE_BUILT
+        ON
+        CACHE INTERNAL "dplcompat is built with the native S3 transport"
+    )
+  endif()
 endif()
 
 add_sd_backend(bareossd-dplcompat)
@@ -61,6 +81,10 @@ target_link_libraries(
   bareossd-dplcompat PRIVATE Microsoft.GSL::GSL fmt::fmt tl::expected
                              chunked-device crud-storage backend-utils
 )
+if(DPLCOMPAT_NATIVE_BUILT)
+  target_link_libraries(bareossd-dplcompat PRIVATE s3-native)
+  target_compile_definitions(bareossd-dplcompat PRIVATE HAVE_DPLCOMPAT_NATIVE)
+endif()
 
 add_sd_backend(bareossd-file)
 add_sd_backend(bareossd-fifo)

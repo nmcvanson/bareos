@@ -34,6 +34,9 @@
 #include <fmt/format.h>
 #include <gsl/gsl>
 #include "util.h"
+#ifdef HAVE_DPLCOMPAT_NATIVE
+#  include "s3_native_store.h"
+#endif
 
 namespace utl = backends::util;
 using namespace std::literals::string_literals;
@@ -176,6 +179,92 @@ template <typename T> auto get_size_converter(const std::string& key, T& target)
   };
 }
 
+// Transport "program": options program and program_timeout, then the options
+// the wrapper program says it supports.
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeProgramStore(
+    utl::options& options)
+{
+  std::string program;
+  uint32_t program_timeout{0};
+
+  if (auto conversion_result
+      = tl::expected<utl::options*, std::string>{&options}
+            .and_then(get_value_converter("program", program))
+            .and_then(get_value_converter("program_timeout", program_timeout));
+      !conversion_result) {
+    return tl::unexpected(conversion_result.error());
+  }
+
+  if (program.empty()) {
+    return tl::unexpected("Option 'program' is required\n"s);
+  }
+
+  auto storage = std::make_unique<CrudStorage>();
+  if (auto result = storage->set_program(program); !result) {
+    return tl::unexpected(result.error());
+  }
+
+  if (program_timeout > 0) {
+    storage->set_program_timeout(std::chrono::seconds{program_timeout});
+  }
+
+  if (auto supported_options = storage->get_supported_options()) {
+    for (const auto& option_name : *supported_options) {
+      if (auto value = fetch_value(options, option_name);
+          value && !storage->set_option(option_name, *value)) {
+        return tl::unexpected(
+            fmt::format(FMT_STRING("Error setting option '{}' to '{}'\n"),
+                        option_name, *value));
+      }
+    }
+  } else {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
+                    supported_options.error().message));
+  }
+  return std::unique_ptr<ObjectStore>(std::move(storage));
+}
+
+#ifdef HAVE_DPLCOMPAT_NATIVE
+// Transport "native": the options named by the store, set one by one; the S3
+// credentials come only from the s3cfg file the store reads itself.
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeNativeStore(
+    utl::options& options)
+{
+  for (const char* required : {"s3cfg", "bucket"}) {
+    if (options.count(required) == 0) {
+      return tl::unexpected(fmt::format(
+          FMT_STRING("Option '{}' is required for transport 'native'\n"),
+          required));
+    }
+  }
+
+  auto storage = std::make_unique<S3NativeStore>();
+  auto supported_options = storage->get_supported_options();
+  if (!supported_options) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
+                    supported_options.error().message));
+  }
+  for (const auto& option_name : *supported_options) {
+    if (auto value = fetch_value(options, option_name); value) {
+      if (auto result = storage->set_option(option_name, *value); !result) {
+        return tl::unexpected(
+            fmt::format(FMT_STRING("Error setting option '{}' to '{}': {}\n"),
+                        option_name, *value, result.error().message));
+      }
+    }
+  }
+  return std::unique_ptr<ObjectStore>(std::move(storage));
+}
+#else
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeNativeStore(
+    utl::options&)
+{
+  return tl::unexpected(
+      "dplcompat was built without the native S3 transport\n"s);
+}
+#endif
 
 }  // namespace
 
@@ -201,6 +290,9 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
                                       std::get<utl::error>(res)));
   }
   auto options = std::get<utl::options>(res);
+  // The program options are meaningless for the native transport.
+  const bool program_option_given
+      = options.count("program") > 0 || options.count("program_timeout") > 0;
 
   // apply default values
   options.merge(utl::options(option_defaults));
@@ -208,34 +300,18 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
   for (const auto& [key, value] : options) {
     utl::Dfmt(debug_trace, FMT_STRING("'{}' = '{}'"), key, value);
   }
-  std::string program;
   std::string transport;
-  uint32_t program_timeout{0};
 
   if (auto conversion_result
       = tl::expected<utl::options*, std::string>{&options}
+            .and_then(get_value_converter("transport", transport))
             .and_then(get_value_converter("iothreads", io_threads_))
             .and_then(get_value_converter("ioslots", io_slots_))
             .and_then(get_value_converter("retries", retries_))
             .and_then(get_size_converter("chunksize", chunk_size_))
-            .and_then(get_value_converter("program", program))
-            .and_then(get_value_converter("program_timeout", program_timeout))
-            .and_then(get_value_converter("flush_timeout", flush_timeout_))
-            .and_then(get_value_converter("transport", transport));
+            .and_then(get_value_converter("flush_timeout", flush_timeout_));
       !conversion_result) {
     return tl::unexpected(conversion_result.error());
-  }
-
-  if (transport != "program") {
-    return tl::unexpected(fmt::format(
-        FMT_STRING(
-            "invalid argument '{}' for option 'transport': only 'program' is "
-            "available\n"),
-        transport));
-  }
-
-  if (program.empty()) {
-    return tl::unexpected("Option 'program' is required\n"s);
   }
 
   if (flush_timeout_ == 0) {
@@ -245,27 +321,25 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
   utl::Dfmt(debug_trace, FMT_STRING("configured chunksize in bytes: {}"),
             chunk_size_);
 
-  auto storage = std::make_unique<CrudStorage>();
-  if (auto result = storage->set_program(program); !result) { return result; }
-
-  if (program_timeout > 0) {
-    storage->set_program_timeout(std::chrono::seconds{program_timeout});
-  }
-
-  if (auto supported_options = storage->get_supported_options()) {
-    for (const auto& option_name : *supported_options) {
-      if (auto value = fetch_value(options, option_name);
-          value && !storage->set_option(option_name, *value)) {
-        return tl::unexpected(
-            fmt::format(FMT_STRING("Error setting option '{}' to '{}'\n"),
-                        option_name, *value));
-      }
+  tl::expected<std::unique_ptr<ObjectStore>, std::string> storage;
+  if (transport == "program") {
+    storage = MakeProgramStore(options);
+  } else if (transport == "native") {
+    if (program_option_given) {
+      return tl::unexpected(
+          "Options 'program' and 'program_timeout' cannot be used with "
+          "transport 'native'\n"s);
     }
+    // Only the default is left of it here.
+    options.erase("program_timeout");
+    storage = MakeNativeStore(options);
   } else {
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
-                    supported_options.error().message));
+    return tl::unexpected(fmt::format(
+        FMT_STRING("invalid argument '{}' for option 'transport': use "
+                   "'program' or 'native'\n"),
+        transport));
   }
+  if (!storage) { return tl::unexpected(storage.error()); }
 
   // OptionConsumer should have consumed all options at this point
   if (!options.empty()) {
@@ -275,7 +349,7 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
         fmt::format(FMT_STRING("Unknown options encountered: {}\n"),
                     option_names.Join(", ")));
   }
-  m_storage = std::move(storage);
+  m_storage = std::move(*storage);
   return {};
 }
 

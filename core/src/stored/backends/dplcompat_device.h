@@ -34,6 +34,8 @@
 namespace storagedaemon {
 
 class DropletCompatibleDevice : public ChunkedDevice {
+  friend class DplcompatLeaseTest;  // unit test of the lease conflict path
+
  private:
   /* maximum number of chunks in a volume (0000 to 9999) */
   static constexpr int max_chunks_ = 10000;

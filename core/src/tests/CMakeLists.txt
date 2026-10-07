@@ -548,7 +548,40 @@ if(NOT client-only AND NOT HAVE_WIN32)
   bareos_add_test(s3_xml_test LINK_LIBRARIES s3-helpers GTest::gtest_main)
   bareos_add_test(s3cfg_reader_test LINK_LIBRARIES s3-helpers GTest::gtest_main)
   bareos_add_test(dplcompat_device_options LINK_LIBRARIES ${LINK_LIBRARIES})
-  bareos_add_test(dplcompat_transport_option LINK_LIBRARIES ${LINK_LIBRARIES})
+  set(dplcompat_native_definitions "")
+  if(DPLCOMPAT_NATIVE_BUILT)
+    set(dplcompat_native_definitions HAVE_DPLCOMPAT_NATIVE)
+    bareos_add_test(
+      s3_native_store_test
+      LINK_LIBRARIES s3-native Bareos::LibSD Bareos::Lib GTest::gtest_main
+                     OpenSSL::SSL OpenSSL::Crypto
+    )
+  endif()
+  set(dplcompat_native_libraries "")
+  if(DPLCOMPAT_NATIVE_BUILT)
+    set(dplcompat_native_libraries s3-native)
+  endif()
+  bareos_add_test(
+    dplcompat_lease_conflict
+    ADDITIONAL_SOURCES ../stored/backends/dplcompat_device.cc
+    LINK_LIBRARIES
+      chunked-device
+      crud-storage
+      backend-utils
+      Microsoft.GSL::GSL
+      fmt::fmt
+      tl::expected
+      ${dplcompat_native_libraries}
+      Bareos::LibSD
+      Bareos::Lib
+      GTest::gtest_main
+    COMPILE_DEFINITIONS ${dplcompat_native_definitions}
+  )
+  bareos_add_test(
+    dplcompat_transport_option
+    LINK_LIBRARIES ${LINK_LIBRARIES}
+    COMPILE_DEFINITIONS ${dplcompat_native_definitions}
+  )
   if(HAVE_DYNAMIC_SD_BACKENDS)
     add_dependencies(dplcompat_device_options bareossd-dplcompat)
     add_dependencies(dplcompat_transport_option bareossd-dplcompat)

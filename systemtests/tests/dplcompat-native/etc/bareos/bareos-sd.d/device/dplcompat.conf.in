@@ -1,0 +1,38 @@
+Device {
+  Name = dplcompat
+  Media Type = dplcompat
+  Archive Device = S3 Object Storage
+  Device Options = "transport=native"
+                   ",s3cfg=@tmpdir@/s3cfg"
+                   ",bucket=testbucket"
+                   ",iothreads=2"
+                   ",request_retries=3"
+                   ",flush_timeout=120"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}
+
+# Reads and writes the files the stub responder keeps, through the program
+# transport, to prove both transports use the same object layout.
+Device {
+  Name = dplcompat-program
+  Media Type = dplcompat
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=2"
+                   ",program=@confdir@/localfile-wrapper.sh"
+                   ",storage_path=@archivedir@"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}

@@ -1,0 +1,8 @@
+Storage {
+  Name = dplcompat-program
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-program
+  Media Type = dplcompat
+  Port = "@sd_port@"
+}

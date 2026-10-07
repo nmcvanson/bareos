@@ -66,9 +66,9 @@ flush_timeout
    job that only reads from the device does not wait for them.
 
 transport
-   How the device reaches the object storage. The only value is ``program``
-   (default): every operation runs the wrapper program. Other values are
-   refused.
+   How the device reaches the object storage: ``program`` (default) runs the
+   wrapper program for every operation, ``native`` talks to the S3 service
+   itself (see `Native S3 transport`_). Other values are refused.
 
 program
    The wrapper program to use. Either an absolute path or the name of a program
@@ -109,8 +109,11 @@ program_timeout
    job ends OK only after every kept chunk of the device is uploaded. At most
    two chunks are kept per device (a warning names more); they are lost only
    if the storage daemon stops, which it then logs. Canceling a job that
-   retries kept chunks takes up to two times ``program_timeout`` plus one
-   second when the backend hangs instead of failing. With ``Maximum
+   retries kept chunks takes up to ``program_timeout`` plus one second when
+   the backend hangs instead of failing; with ``transport=native`` a request
+   in progress is not interrupted, so it can take up to ``request_retries``
+   plus one times ``stall_timeout`` plus the retry pauses (about 750 seconds
+   with the defaults); lower ``stall_timeout`` to shorten it. With ``Maximum
    Concurrent Jobs`` above 1 on the device, a job may fail and the device
    refuse writes while another job uploads the same chunk at its end; no data
    is lost. Use ``iothreads`` of 1 or more for concurrent jobs on one device.
@@ -204,6 +207,97 @@ We want to configure a device **ObjectStore**:
    split into multiple lines.
    This is still a single value containing a comma-separated list of key-value
    pairs.
+
+Native S3 transport
+^^^^^^^^^^^^^^^^^^^
+With ``transport=native`` the Storage Daemon talks to the S3 service itself
+(HTTP and TLS through libcurl, signature version 4, connections kept open
+between requests) instead of starting a wrapper program for every operation.
+The object layout is the same as for the wrapper, so Volumes written with one
+transport can be read with the other. The native transport is only available
+when dplcompat was built with libcurl and not on Windows; otherwise a device
+configured with it is refused at start with "dplcompat was built without the
+native S3 transport". The options ``program`` and ``program_timeout`` cannot be
+used with it.
+
+s3cfg
+   Path of an ``s3cmd`` configuration file (required). Its ``access_key``,
+   ``secret_key``, ``host_base``, ``host_bucket``, ``use_https``,
+   ``bucket_location``, ``ca_certs_file`` and ``check_ssl_certificate`` are
+   used. The keys come only from this file: no device option, environment
+   variable or command line carries a key, and the Storage Daemon never
+   writes a key or a request signature to a log. The file should be readable
+   only by the user of the Storage Daemon; a file readable by others produces
+   a warning. Indented continuation lines are not supported.
+
+bucket
+   Name of the bucket (required).
+
+prefix
+   Text put in front of every object name, ``<prefix>/<Volume>/<chunk>``
+   (default: none).
+
+storage_class
+   Storage class of the uploaded objects (default: the service's default).
+
+endpoint
+   ``host[:port]`` of the service, overriding ``host_base`` of the file.
+
+region
+   Region used for signing, overriding ``bucket_location`` of the file.
+
+path_style
+   ``yes`` puts the bucket in the path, ``no`` in the host name, ``auto``
+   (default) uses the host name only if ``host_bucket`` of the file contains
+   ``%(bucket)s``.
+
+ca_file
+   File with the CA certificates that verify the service, overriding
+   ``ca_certs_file`` of the file (default: the system's certificates).
+
+connect_timeout
+   Seconds allowed for connecting (default: 10, 1 to 600).
+
+stall_timeout
+   Seconds without a single byte moving after which a request is given up
+   (default: 120, 1 to 3600).
+
+request_retries
+   Number of times a request that failed with a server error (5xx, 429), a
+   timeout or a connection error is repeated after a pause that doubles from
+   one second, up to 60 seconds (default: 5, 0 to 20). Errors that cannot
+   change, such as access denied, are not repeated.
+
+content_md5
+   ``yes`` (default) sends the MD5 sum of every uploaded chunk, so the service
+   refuses a chunk that arrived damaged.
+
+Example
+'''''''
+A device that writes to a Ceph RGW service with path style addressing:
+
+.. code-block:: bareosconfig
+   :caption: bareos-sd.d/device/RgwStorage.conf
+
+   Device {
+     Name = RgwStorage
+     Media Type = S3
+     Archive Device = Object Storage # currently unused, but required
+     Device Options = "transport=native"
+                      ",s3cfg=/etc/bareos/s3cfg"
+                      ",bucket=bareos"
+                      ",region=us-east-1"
+                      ",path_style=yes"
+                      ",iothreads=2"
+                      ",ioslots=2"
+                      ",chunksize=67108864"
+     Device Type = dplcompat
+     LabelMedia = yes
+     Random Access = yes
+     AutomaticMount = yes
+     RemovableMedia = no
+     AlwaysOpen = no
+   }
 
 Director
 ^^^^^^^^
