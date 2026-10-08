@@ -76,6 +76,11 @@ StorageGroupPolicyType StorageGroupPolicyFromName(const char* name);
  * caller reports to the user. */
 int ApplyStorageGroupPolicy(JobControlRecord* jcr);
 
+/* Charge one write-storage slot. A native LeastUsed group is reconsidered
+ * before charging; the selected member leads its fallback list. Other jobs
+ * keep the normal IncWriteStore behavior. Does not reserve a device. */
+bool TryAcquireWriteStorageSlot(JobControlRecord* jcr);
+
 } /* namespace directordaemon */
 
 #endif  // BAREOS_DIRD_STORAGE_GROUP_POLICY_H_
