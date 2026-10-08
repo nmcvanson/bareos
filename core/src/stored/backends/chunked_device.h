@@ -151,6 +151,7 @@ struct UploadState {
 };
 
 class ChunkedDevice : public Device {
+  friend class ChunkStateProbe;  // unit test of the chunk state
   class InflightLease {
     ChunkedDevice* m_device;
     chunk_io_request* m_request;
@@ -203,13 +204,13 @@ class ChunkedDevice : public Device {
   // Requests per volume that are queued or held by an io-thread.
   std::map<std::string, int> pending_requests_;
 
-  /* Guards current_chunk_; the release flush runs without the device lock.
-   * Lock order: device lock, chunk_mutex_, kept_mutex_, upload_mutex_. */
-  std::recursive_mutex chunk_mutex_;
   // Chunks of blocking uploads still to be uploaded; guarded by kept_mutex_.
   std::mutex kept_mutex_;
   std::list<KeptChunk> kept_chunks_;
   std::atomic<size_t> kept_count_{};
+  // Set when a refused seek dropped the current chunk: reads and writes fail
+  // until a seek loads a chunk or the device is opened again.
+  std::atomic<bool> chunk_dropped_{};
 
   // Private Methods
   char* allocate_chunkbuffer();
@@ -237,6 +238,9 @@ class ChunkedDevice : public Device {
 
  protected:
   // Protected Members
+  /* Guards current_chunk_; the release flush runs without the device lock.
+   * Lock order: device lock, chunk_mutex_, kept_mutex_, upload_mutex_. */
+  std::recursive_mutex chunk_mutex_;
   uint8_t io_threads_{};
   uint8_t io_slots_{};
   uint8_t retries_{};
@@ -258,6 +262,11 @@ class ChunkedDevice : public Device {
   bool TruncateChunkedVolume(DeviceControlRecord* dcr);
   ssize_t ChunkedVolumeSize();
   bool LoadChunk();
+  void InvalidateCurrentChunk();
+  bool CurrentChunkNeedsFlushing();
+  bool StartEmptyChunkAfterLast(const std::map<int, size_t>& chunk_sizes);
+  bool WaitForPendingChunks(const std::function<bool()>& is_canceled,
+                            std::string& reason);
   bool WaitUntilChunksWritten(const std::function<bool()>& is_canceled,
                               std::string& reason);
   std::vector<std::pair<std::string, uint16_t>> ChunksNotUploaded();

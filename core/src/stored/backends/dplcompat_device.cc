@@ -30,8 +30,10 @@
 #include "lib/thread_specific_data.h"
 #include "dplcompat_device.h"
 
-#include <string>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <fmt/format.h>
 #include <gsl/gsl>
 #include "util.h"
@@ -539,10 +541,42 @@ int DropletCompatibleDevice::d_close(int) { return CloseChunk(); }
 
 int DropletCompatibleDevice::d_ioctl(int, ioctl_req_t, char*) { return -1; }
 
+// Number and size of every chunk of the volume in a fresh listing.
+std::optional<std::map<int, size_t>> DropletCompatibleDevice::ListChunkSizes()
+{
+  const auto chunk_map = m_storage->list(getVolCatName());
+  if (!chunk_map) {
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
+    dev_errno = EIO;
+    return std::nullopt;
+  }
+  std::map<int, size_t> sizes;
+  for (const auto& [name, stat] : *chunk_map) {
+    if (is_chunk_name(name)) { sizes[std::stoi(name)] = stat.size; }
+  }
+  return sizes;
+}
+
 boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
                                            boffset_t offset,
                                            int whence)
 {
+  // The end of the volume is decided under the chunk lock, so that no other
+  // thread of this daemon adds a chunk in between.
+  std::unique_lock<std::recursive_mutex> chunk_lock(chunk_mutex_,
+                                                    std::defer_lock);
+  if (whence == SEEK_END) { chunk_lock.lock(); }
+
+  // A refused seek keeps the position and drops the chunk, so that nothing
+  // trusts a failed load.
+  const boffset_t saved_offset = offset_;
+  auto refuse = [this, saved_offset](int error) {
+    offset_ = saved_offset;
+    InvalidateCurrentChunk();
+    errno = error;
+    return -1;
+  };
+
   switch (whence) {
     case SEEK_SET:
       offset_ = offset;
@@ -560,15 +594,37 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
       if (volumesize >= 0) {
         offset_ = volumesize + offset;
       } else {
-        return -1;
+        return refuse(EIO);
       }
+      // The chunk with unflushed data holds the end; LoadChunk would drop it.
+      if (offset == 0 && CurrentChunkNeedsFlushing()) { return offset_; }
       break;
     }
     default:
-      return -1;
+      return refuse(EINVAL);
   }
 
-  if (!LoadChunk()) { return -1; }
+  if (!LoadChunk()) {
+    // A volume that ends after a full chunk has no chunk at its end yet.
+    if (whence != SEEK_END || offset != 0) { return refuse(EIO); }
+    // Chunks of this daemon that are still being uploaded are not listed yet.
+    std::string reason;
+    if (!WaitForPendingChunks([] { return CallingJobCanceled(); }, reason)) {
+      PmStrcpy(errmsg, reason.c_str());
+      return refuse(EIO);
+    }
+    // A chunk in transit was missing from the size: size again, load the end.
+    const ssize_t waited_size = ChunkedVolumeSize();
+    if (waited_size < 0) { return refuse(EIO); }
+    const bool moved = waited_size != offset_;
+    offset_ = waited_size;
+    // The failed load left the chunk position on the old end: load afresh.
+    if (moved) { InvalidateCurrentChunk(); }
+    if (!(moved && LoadChunk())) {
+      const auto sizes = ListChunkSizes();
+      if (!sizes || !StartEmptyChunkAfterLast(*sizes)) { return refuse(EIO); }
+    }
+  }
 
   return offset_;
 }

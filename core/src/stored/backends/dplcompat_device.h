@@ -51,6 +51,7 @@ class DropletCompatibleDevice : public ChunkedDevice {
   bool FlushRemoteChunk(chunk_io_request* request) override;
   bool ReadRemoteChunk(chunk_io_request* request) override;
   std::optional<ssize_t> RemoteVolumeSize() override;
+  std::optional<std::map<int, size_t>> ListChunkSizes();
   bool TruncateRemoteVolume(DeviceControlRecord* dcr) override;
 
  public:

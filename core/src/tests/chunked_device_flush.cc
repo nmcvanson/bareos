@@ -31,6 +31,7 @@
 #include "lib/messages_resource.h"
 #include "lib/thread_specific_data.h"
 #include "stored/backends/chunked_device.h"
+#include "chunk_state_probe.h"
 #include "stored/backends/flush_wait.h"
 #include "stored/backends/ordered_cbuf.h"
 
@@ -204,11 +205,19 @@ class FakeChunkedDevice : public ChunkedDevice {
 
   using ChunkedDevice::ChunkedVolumeSize;
   using ChunkedDevice::ChunksNotUploaded;
+  using ChunkedDevice::ClearInflightChunk;
   using ChunkedDevice::CloseChunk;
+  using ChunkedDevice::InvalidateCurrentChunk;
+  using ChunkedDevice::LoadChunk;
   using ChunkedDevice::ReadChunked;
+  using ChunkedDevice::SetInflightChunk;
   using ChunkedDevice::SetupChunk;
+  using ChunkedDevice::StartEmptyChunkAfterLast;
   using ChunkedDevice::TruncateChunkedVolume;
+  using ChunkedDevice::WaitForPendingChunks;
   using ChunkedDevice::WriteChunked;
+
+  void SetOffset(boffset_t offset) { offset_ = offset; }
 
   // Runs the flush wait and keeps the reason of a failure.
   bool Wait(const std::function<bool()>& is_canceled = [] { return false; })
@@ -1261,4 +1270,300 @@ TEST(chunked_device_flush, CanceledTryOfAKeptChunkKeepsItsRetryPause)
   EXPECT_TRUE(dev.Wait()) << dev.reason;
   EXPECT_LT(SteadyClock::now() - start, 5s);
   EXPECT_EQ(dev.Stored(0), std::string(data.data(), kChunk));
+}
+
+// A refused start changes nothing of the current chunk.
+void ExpectRefused(FakeChunkedDevice& dev, const std::map<int, size_t>& sizes)
+{
+  const ChunkState before = ChunkStateProbe::Capture(dev);
+  EXPECT_FALSE(dev.StartEmptyChunkAfterLast(sizes));
+  EXPECT_TRUE(before == ChunkStateProbe::Capture(dev));
+}
+
+/* A volume whose last chunk is full ends at the start of a chunk that does
+ * not exist yet: that chunk is started empty, but only for a writer that has
+ * nothing of the volume pending, with the full chunks 0..N-1 and no others. */
+TEST(chunked_device_flush, EmptyChunkAfterTheLastIsStartedUnderTheRules)
+{
+  const std::map<int, size_t> one_full{{0, kChunk}};
+  const auto data = Pattern(kChunk);
+
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    dev.SetOffset(kChunk);
+    ASSERT_TRUE(dev.StartEmptyChunkAfterLast(one_full));
+    // The state is that of a chunk freshly created for writing.
+    const ChunkState started = ChunkStateProbe::Capture(dev);
+    EXPECT_EQ(started.chunk_number, 1);
+    EXPECT_EQ(started.start_offset, static_cast<boffset_t>(kChunk));
+    EXPECT_EQ(started.end_offset, static_cast<boffset_t>(2 * kChunk - 1));
+    EXPECT_EQ(started.offset, static_cast<boffset_t>(kChunk));
+    EXPECT_EQ(started.buflen, 0u);
+    EXPECT_TRUE(started.writing);
+    EXPECT_TRUE(started.opened);
+    EXPECT_FALSE(started.need_flushing);
+    const std::string bytes = "new chunk";
+    ASSERT_EQ(dev.WriteChunked(0, bytes.data(), bytes.size()),
+              static_cast<ssize_t>(bytes.size()));
+    EXPECT_EQ(dev.CloseChunk(), 0);
+    EXPECT_EQ(dev.Stored(1), bytes);
+    EXPECT_EQ(dev.Stored(0), std::string(data.data(), data.size()));
+  }
+
+  // A reader never starts a chunk.
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDONLY, 0), 0);
+    dev.SetOffset(kChunk);
+    ExpectRefused(dev, one_full);
+  }
+
+  // The listing must be 0..N-1 of full chunks, and the offset its end.
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    dev.SetOffset(kChunk);
+    ExpectRefused(dev, {});
+    ExpectRefused(dev, {{0, kChunk - 1}});
+    ExpectRefused(dev, {{1, kChunk}});
+    ExpectRefused(dev, {{0, kChunk}, {2, kChunk}});
+    ExpectRefused(dev,
+                  {{0, kChunk}, {1, kChunk}});  // the offset is one chunk in
+    dev.SetOffset(kChunk + 1);
+    ExpectRefused(dev, one_full);
+    dev.SetOffset(kChunk);
+    // The refusals changed nothing: the start still gives the new chunk.
+    ASSERT_TRUE(dev.StartEmptyChunkAfterLast(one_full));
+    ASSERT_EQ(dev.WriteChunked(0, "ok", 2), 2);
+    EXPECT_EQ(dev.CloseChunk(), 0);
+    EXPECT_EQ(dev.Stored(1), "ok");
+    EXPECT_EQ(dev.Stored(0), std::string(data.data(), data.size()));
+  }
+
+  // Data written to the current chunk and not flushed yet is never dropped.
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    ASSERT_EQ(dev.WriteChunked(0, "x", 1), 1);
+    dev.SetOffset(kChunk);
+    ExpectRefused(dev, one_full);
+  }
+}
+
+TEST(chunked_device_flush, EmptyChunkAfterTheLastWaitsForPendingChunks)
+{
+  const std::map<int, size_t> one_full{{0, kChunk}};
+
+  // A kept chunk of the volume: the volume does not end where it looks.
+  FakeChunkedDevice dev{0, 0, 60};
+  FailFirstBlockingChunk(dev, Pattern(2 * kChunk));
+  dev.SetOffset(kChunk);
+  ExpectRefused(dev, one_full);
+  dev.fail_uploads = false;
+  EXPECT_TRUE(dev.Wait()) << dev.reason;
+  EXPECT_TRUE(dev.StartEmptyChunkAfterLast(one_full));
+}
+
+TEST(chunked_device_flush, EmptyChunkAfterTheLastWaitsForAnInflightUpload)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  dev.SelectVolume("TestVolume", kChunk);
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+  dev.SetOffset(kChunk);
+
+  chunk_io_request holder{};
+  holder.volname = "TestVolume";
+  holder.chunk = 1;
+  ASSERT_TRUE(dev.SetInflightChunk(&holder));
+  ExpectRefused(dev, {{0, kChunk}});
+  dev.ClearInflightChunk(&holder);
+  EXPECT_TRUE(dev.StartEmptyChunkAfterLast({{0, kChunk}}));
+}
+
+/* A dropped chunk is loaded again by the next access; one with unflushed data
+ * is kept. */
+TEST(chunked_device_flush, InvalidatedChunkIsLoadedAgainAndADirtyOneIsKept)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  dev.SelectVolume("TestVolume", kChunk);
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+
+  const ChunkState loaded = ChunkStateProbe::Capture(dev);
+  EXPECT_EQ(loaded.buflen, kChunk);
+  dev.InvalidateCurrentChunk();
+  const ChunkState dropped = ChunkStateProbe::Capture(dev);
+  EXPECT_EQ(dropped.start_offset, -1);
+  EXPECT_EQ(dropped.end_offset, -1);
+  EXPECT_EQ(dropped.buflen, 0u);
+  EXPECT_FALSE(dropped.chunk_setup);
+  EXPECT_EQ(dropped.writing, loaded.writing);
+  EXPECT_EQ(dropped.opened, loaded.opened);
+
+  // A load of the chunk reads it from the store again.
+  std::vector<char> buffer(4096);
+  dev.SetOffset(0);
+  ASSERT_TRUE(dev.LoadChunk());
+  ASSERT_EQ(dev.ReadChunked(0, buffer.data(), buffer.size()),
+            static_cast<ssize_t>(buffer.size()));
+  EXPECT_EQ(std::string(buffer.data(), buffer.size()),
+            std::string(data.data(), buffer.size()));
+
+  // Unflushed data is never dropped.
+  ASSERT_EQ(dev.WriteChunked(0, "x", 1), 1);
+  const ChunkState dirty = ChunkStateProbe::Capture(dev);
+  ASSERT_TRUE(dirty.need_flushing);
+  dev.InvalidateCurrentChunk();
+  EXPECT_TRUE(dirty == ChunkStateProbe::Capture(dev));
+}
+
+/* After a refused seek reads and writes fail and upload nothing, until a seek
+ * loads a chunk, the device is opened again or the helper starts a chunk. */
+TEST(chunked_device_flush, DroppedChunkRefusesReadsAndWritesUntilALoadSucceeds)
+{
+  const auto data = Pattern(kChunk);
+  FakeChunkedDevice dev{0, 0, 60};
+  dev.Seed("TestVolume", 0, data);
+  dev.SelectVolume("TestVolume", kChunk);
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+  std::vector<char> buffer(16);
+
+  dev.InvalidateCurrentChunk();
+  errno = 0;
+  EXPECT_EQ(dev.WriteChunked(0, "x", 1), -1);
+  EXPECT_EQ(errno, EIO);
+  errno = 0;
+  EXPECT_EQ(dev.ReadChunked(0, buffer.data(), buffer.size()), -1);
+  EXPECT_EQ(errno, EIO);
+  EXPECT_EQ(dev.Attempts().size(), 0u);
+  EXPECT_EQ(dev.Stored(0), std::string(data.data(), data.size()));
+
+  // A load that fails does not end it.
+  dev.SetOffset(kChunk);  // chunk 1 does not exist
+  EXPECT_FALSE(dev.LoadChunk());
+  EXPECT_EQ(dev.WriteChunked(0, "x", 1), -1);
+
+  // A load that works does.
+  dev.SetOffset(0);
+  ASSERT_TRUE(dev.LoadChunk());
+  EXPECT_EQ(dev.ReadChunked(0, buffer.data(), buffer.size()),
+            static_cast<ssize_t>(buffer.size()));
+  EXPECT_EQ(std::string(buffer.data(), buffer.size()),
+            std::string(data.data(), buffer.size()));
+}
+
+TEST(chunked_device_flush, ReopenAndStartedChunkEndTheDroppedState)
+{
+  const auto data = Pattern(kChunk);
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    dev.InvalidateCurrentChunk();
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    EXPECT_EQ(dev.WriteChunked(0, "x", 1), 1);
+  }
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    dev.InvalidateCurrentChunk();
+    dev.SetOffset(kChunk);
+    ASSERT_TRUE(dev.StartEmptyChunkAfterLast({{0, kChunk}}));
+    EXPECT_EQ(dev.WriteChunked(0, "x", 1), 1);
+  }
+  {
+    // A new volume has no chunk 0, so no load of the open clears the flag.
+    FakeChunkedDevice dev{0, 0, 60};
+    dev.Seed("TestVolume", 0, data);
+    dev.SelectVolume("TestVolume", kChunk);
+    ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDWR, 0640), 0);
+    dev.InvalidateCurrentChunk();
+    dev.SelectVolume("NewVolume", 0);
+    ASSERT_EQ(dev.SetupChunk("NewVolume", O_CREAT | O_RDWR, 0640), 0);
+    EXPECT_EQ(dev.WriteChunked(0, "x", 1), 1);
+  }
+}
+
+// The wait for the pending chunks of the volume.
+TEST(chunked_device_flush, WaitForPendingChunksEndsWhenTheQueueIsEmpty)
+{
+  FakeChunkedDevice dev{1, 0, 60};
+  const auto data = Pattern(kChunk + 1000);
+  dev.hold_uploads = true;
+  WriteVolume(dev, data);
+  EXPECT_EQ(dev.CloseChunk(), 0);
+
+  std::atomic<bool> ended{false};
+  bool result = false;
+  std::string reason;
+  std::thread waiter([&] {
+    result = dev.WaitForPendingChunks([] { return false; }, reason);
+    ended = true;
+  });
+  std::this_thread::sleep_for(500ms);
+  EXPECT_FALSE(ended.load());
+  dev.hold_uploads = false;
+  waiter.join();
+  EXPECT_TRUE(result) << reason;
+  EXPECT_EQ(dev.Stored(1), std::string(data.data() + kChunk, 1000));
+}
+
+TEST(chunked_device_flush, WaitForPendingChunksGivesUpWhenTheUploadsStall)
+{
+  FakeChunkedDevice dev{1, 0, 2};
+  dev.hold_uploads = true;
+  WriteVolume(dev, Pattern(kChunk + 1000));
+  EXPECT_EQ(dev.CloseChunk(), 0);
+  std::string reason;
+  const auto start = SteadyClock::now();
+  EXPECT_FALSE(dev.WaitForPendingChunks([] { return false; }, reason));
+  EXPECT_GE(SteadyClock::now() - start, 1500ms);
+  EXPECT_LT(SteadyClock::now() - start, 8s);
+  EXPECT_TRUE(Contains(reason, "no progress")) << reason;
+  dev.hold_uploads = false;
+  // The uploads end before the device goes away.
+  EXPECT_TRUE(WaitStored(dev, 1, 1000));
+}
+
+TEST(chunked_device_flush, WaitForPendingChunksStopsOnACancelAndOnAKeptChunk)
+{
+  {
+    FakeChunkedDevice dev{1, 0, 60};
+    dev.hold_uploads = true;
+    WriteVolume(dev, Pattern(kChunk + 1000));
+    EXPECT_EQ(dev.CloseChunk(), 0);
+    std::string reason;
+    EXPECT_FALSE(dev.WaitForPendingChunks([] { return true; }, reason));
+    EXPECT_TRUE(Contains(reason, "canceled")) << reason;
+    dev.hold_uploads = false;
+    EXPECT_TRUE(WaitStored(dev, 1, 1000));
+  }
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    FailFirstBlockingChunk(dev, Pattern(2 * kChunk));  // a kept chunk
+    std::string reason;
+    EXPECT_FALSE(dev.WaitForPendingChunks([] { return false; }, reason));
+    EXPECT_TRUE(Contains(reason, "refuses writes")) << reason;
+    dev.fail_uploads = false;
+  }
+  {
+    FakeChunkedDevice dev{0, 0, 60};
+    std::string reason;
+    EXPECT_TRUE(dev.WaitForPendingChunks([] { return false; }, reason));
+  }
 }
