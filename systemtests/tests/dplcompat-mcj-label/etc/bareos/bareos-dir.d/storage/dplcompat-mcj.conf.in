@@ -1,0 +1,19 @@
+Storage {
+  Name = dplcompat-mcj
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-mcj
+  Media Type = dplcompat-mcj
+  Port = "@sd_port@"
+  Maximum Concurrent Jobs = 2
+}
+
+Storage {
+  Name = dplcompat-mcj-io
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-mcj-io
+  Media Type = dplcompat-mcj
+  Port = "@sd_port@"
+  Maximum Concurrent Jobs = 2
+}

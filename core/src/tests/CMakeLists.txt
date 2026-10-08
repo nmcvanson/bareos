@@ -578,6 +578,22 @@ if(NOT client-only AND NOT HAVE_WIN32)
     COMPILE_DEFINITIONS ${dplcompat_native_definitions}
   )
   bareos_add_test(
+    chunked_device_mcj_label_read
+    ADDITIONAL_SOURCES ../stored/backends/dplcompat_device.cc
+    LINK_LIBRARIES
+      chunked-device
+      crud-storage
+      backend-utils
+      Microsoft.GSL::GSL
+      fmt::fmt
+      tl::expected
+      ${dplcompat_native_libraries}
+      Bareos::LibSD
+      Bareos::Lib
+      GTest::gtest_main
+    COMPILE_DEFINITIONS ${dplcompat_native_definitions}
+  )
+  bareos_add_test(
     dplcompat_transport_option
     LINK_LIBRARIES ${LINK_LIBRARIES}
     COMPILE_DEFINITIONS ${dplcompat_native_definitions}

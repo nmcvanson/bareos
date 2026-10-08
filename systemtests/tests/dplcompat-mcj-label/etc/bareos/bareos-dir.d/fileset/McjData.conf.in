@@ -1,0 +1,19 @@
+FileSet {
+  Name = "McjData"
+  Include {
+    Options {
+      Signature = XXH128
+    }
+    File = "@tmpdir@/mcjdata"
+  }
+}
+
+FileSet {
+  Name = "McjCal"
+  Include {
+    Options {
+      Signature = XXH128
+    }
+    File = "@tmpdir@/mcjcal"
+  }
+}

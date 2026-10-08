@@ -1,0 +1,6 @@
+Messages {
+  Name = Standard
+  Director = bareos-dir = all
+  # Kept also when the Director has dropped a canceled job's messages.
+  append = "@logdir@/bareos-sd.log" = all, !skipped, !saved, !audit
+}
