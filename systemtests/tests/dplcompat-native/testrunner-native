@@ -226,6 +226,66 @@ if (($(count_requests 'continuation-token') < 1)); then
   set_error "no listing used a continuation token"
 fi
 
+# 6b. With iothreads=0 a cancel ends an upload the server accepted and then
+# left silent (the first chunk is uploaded on the job's own thread).
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $tmp/label-sync.log
+label volume=SyncVolume001 storage=dplcompat-sync pool=Full
+quit
+END_OF_DATA
+run_bconsole
+rm -f "${control_dir}/put-stalled"
+echo 300 >"${control_dir}/put-stall"
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $tmp/cancel-run.log
+run job=$JobName level=Full storage=dplcompat-sync yes
+quit
+END_OF_DATA
+run_bconsole
+cancel_jobid=$(queued_jobid "$tmp/cancel-run.log")
+# The cancel must meet an upload of the volume that is in flight.
+waited=0
+while [ ! -s "${control_dir}/put-stalled" ]; do
+  sleep 0.5
+  waited=$((waited + 1))
+  if ((waited > 60)); then
+    set_error "the upload of SyncVolume001 never started"
+    break
+  fi
+done
+if ! grep -q SyncVolume001 "${control_dir}/put-stalled" 2>/dev/null; then
+  set_error "the stalled upload is not of SyncVolume001"
+fi
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $tmp/cancel.log
+cancel jobid=${cancel_jobid} yes
+quit
+END_OF_DATA
+cancel_start=${SECONDS}
+run_bconsole
+# The SD job (not only the Director's) must end soon: the Director ends a
+# canceled job by itself, while the SD thread waits for the silent upload.
+sd_idle=""
+while ((SECONDS - cancel_start <= 30)); do
+  sd_status=$(console_output "status storage=dplcompat-sync")
+  if grep -q "No Jobs running" <<<"${sd_status}"; then
+    sd_idle=yes
+    break
+  fi
+  sleep 1
+done
+rm -f "${control_dir}/put-stall"
+if [ -z "${sd_idle}" ]; then
+  set_error "the SD job was still running 30 s after the cancel"
+fi
+# The chunk of the canceled upload stays kept.
+if ! grep -q "Kept chunks waiting for upload" <<<"${sd_status}" \
+  || ! grep -q "/SyncVolume001/0000" <<<"${sd_status}"; then
+  set_error "the canceled chunk is not listed as kept"
+fi
+console_output "wait jobid=${cancel_jobid}" >/dev/null
+expect_termination "${cancel_jobid}" "Canceled"
+
 # 7. Neither key appears in the SD trace, the daemon logs or the job logs.
 trace_files=$(find "${working}" -name '*.trace' -type f)
 if [ -z "${trace_files}" ] \

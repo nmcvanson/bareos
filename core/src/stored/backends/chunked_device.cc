@@ -784,8 +784,9 @@ bool ChunkedDevice::UploadKeptChunk(std::list<KeptChunk>::iterator entry)
       FreeChunkbuffer(entry->buffer);
       kept_chunks_.erase(entry);
       if (--kept_count_ == 0) { ClearKeptReadonly(); }
-    } else if (busy) {
-      // Another copy of the chunk is being uploaded: try again in a second.
+    } else if (busy || request.canceled) {
+      // Another copy is being uploaded, or the job was canceled: the chunk
+      // stays kept, with its tries and read-only reason unchanged.
       entry->retry_at_ms = SteadyMilliseconds() + 1000;
       entry->uploading = false;
     } else {

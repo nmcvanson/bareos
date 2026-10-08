@@ -1350,6 +1350,227 @@ TEST_F(s3_native, SilentServerEndsAsTimeoutAfterTheRetries)
   EXPECT_EQ(store->requests_sent(), 2u);
 }
 
+// Sets the flag after delay and returns the thread that does it.
+static std::thread CancelAfter(std::atomic<bool>& flag,
+                               std::chrono::milliseconds delay)
+{
+  return std::thread([&flag, delay] {
+    std::this_thread::sleep_for(delay);
+    flag = true;
+  });
+}
+
+TEST_F(s3_native, CancelEndsAnUploadThatWentSilentAfterTheBodyAndIsNotRetried)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.stall_before_ms = 60000;
+    return r;
+  });
+  auto store = Store(server, false,
+                     {{"request_retries", "5"}, {"stall_timeout", "120"}});
+  store->set_abort_reply_grace(3s);
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  auto data = Bytes("chunk");
+  auto canceler = CancelAfter(canceled, 1s);
+  auto start = std::chrono::steady_clock::now();
+  auto r = store->upload("V", "0", data);
+  auto took = std::chrono::steady_clock::now() - start;
+  canceler.join();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  EXPECT_EQ(r.error().message, "canceled");
+  // The body is sent at once: the reply grace of 3 s counts from there.
+  EXPECT_GE(took, 2900ms);
+  EXPECT_LT(took, 5500ms);
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, CancelOnTheLastAttemptStillEndsAsCanceled)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.stall_before_ms = 60000;
+    return r;
+  });
+  auto store = Store(server, false,
+                     {{"request_retries", "0"}, {"stall_timeout", "120"}});
+  store->set_abort_reply_grace(2s);
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  auto data = Bytes("chunk");
+  auto canceler = CancelAfter(canceled, 500ms);
+  auto r = store->upload("V", "0", data);
+  canceler.join();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  EXPECT_EQ(r.error().message, "canceled");
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, DefaultReplyGraceEndsASilentUploadInAboutTenSeconds)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.stall_before_ms = 60000;
+    return r;
+  });
+  auto store = Store(server, false,
+                     {{"request_retries", "0"}, {"stall_timeout", "120"}});
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  auto data = Bytes("chunk");
+  auto canceler = CancelAfter(canceled, 100ms);
+  auto start = std::chrono::steady_clock::now();
+  auto r = store->upload("V", "0", data);
+  auto took = std::chrono::steady_clock::now() - start;
+  canceler.join();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  // The shipped grace of 10 s counts from the sent body, well inside the 30 s
+  // a cancel may take.
+  EXPECT_GE(took, 9500ms);
+  EXPECT_LT(took, 12500ms);
+}
+
+TEST_F(s3_native, CancelEndsAnUploadWhoseBodyIsStuckInAboutASecond)
+{
+  StubServer server;
+  server.SetBodyReadPause(60000);  // reads one block, then nothing
+  auto store = Store(server, false,
+                     {{"request_retries", "5"}, {"stall_timeout", "120"}});
+  store->set_abort_reply_grace(5s);
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  // More than the socket buffers hold, so the count stops short of the end.
+  std::vector<char> data(64 * 1024 * 1024, 'u');
+  auto canceler = CancelAfter(canceled, 1s);
+  auto start = std::chrono::steady_clock::now();
+  auto r = store->upload("V", "0", data);
+  auto took = std::chrono::steady_clock::now() - start;
+  canceler.join();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  EXPECT_GE(took, 900ms);
+  EXPECT_LT(took, 3500ms);
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, CancelDoesNotAbortAReplyThatComesWithinTheGrace)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.stall_before_ms = 2000;  // the grace of 3 s minus 1 s
+    return r;
+  });
+  auto store = Store(server, false,
+                     {{"request_retries", "0"}, {"stall_timeout", "120"}});
+  store->set_abort_reply_grace(3s);
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  auto data = Bytes("chunk");
+  auto canceler = CancelAfter(canceled, 200ms);
+  auto r = store->upload("V", "0", data);
+  canceler.join();
+  ASSERT_TRUE(r.has_value()) << r.error().message;
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, CancelEndsTheRetryPause)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) { return StubReply(500); });
+  auto store = Store(server, false, {{"request_retries", "3"}});
+  store->set_retry_base(30s);
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  auto data = Bytes("chunk");
+  auto canceler = CancelAfter(canceled, 1s);
+  auto start = std::chrono::steady_clock::now();
+  auto r = store->upload("V", "0", data);
+  auto took = std::chrono::steady_clock::now() - start;
+  canceler.join();
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  EXPECT_LT(took, 2500ms);
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, AlreadyCanceledSendsNoRequest)
+{
+  StubServer server;
+  auto store = Store(server);
+  store->set_abort_check([] { return true; });
+  auto r = store->stat("V", "0");
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
+  EXPECT_EQ(store->requests_sent(), 0u);
+  EXPECT_TRUE(server.Requests().empty());
+}
+
+TEST_F(s3_native, AbortCheckThatSaysNoChangesNothing)
+{
+  StubServer server;
+  auto store = Store(server);
+  std::atomic<int> polls{0};
+  store->set_abort_check([&polls] {
+    ++polls;
+    return false;
+  });
+  auto data = Bytes("chunk");
+  ASSERT_TRUE(store->upload("V", "0", data).has_value());
+  EXPECT_GE(polls.load(), 1);
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, CancelDoesNotStopAnUploadThatIsStillMoving)
+{
+  StubServer server;
+  server.SetBodyReadPause(8);  // about 8 s for the 24 MiB
+  auto store = Store(server, false,
+                     {{"request_retries", "0"}, {"stall_timeout", "3"}});
+  std::atomic<bool> canceled{false};
+  store->set_abort_check([&canceled] { return canceled.load(); });
+  std::vector<char> data(24 * 1024 * 1024, 'u');
+  auto canceler = CancelAfter(canceled, 1s);
+  auto up = store->upload("V", "0", data);
+  canceler.join();
+  ASSERT_TRUE(up.has_value()) << up.error().message;
+  EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+TEST_F(s3_native, StallStillEndsAsTimeoutWhenTheAbortCheckSaysNo)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.stall_before_ms = 6000;
+    return r;
+  });
+  auto store = Store(server, false, {{"request_retries", "0"}});
+  store->set_abort_check([] { return false; });
+  auto body = Bytes("x");
+  auto r = store->upload("V", "0", body);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, StoreErrc::kTimeout);
+}
+
+TEST_F(s3_native, AbortCheckSetAfterTheFirstOperationIsIgnored)
+{
+  StubServer server;
+  auto store = Store(server);
+  (void)store->stat("V", "0");  // the first operation freezes the options
+  store->set_abort_check([] { return true; });
+  auto body = Bytes("x");
+  auto r = store->upload("V", "0", body);
+  EXPECT_TRUE(r.has_value());
+}
+
 TEST_F(s3_native, UnreachableServerIsTransientAndBounded)
 {
   int port;

@@ -51,6 +51,10 @@ constexpr size_t kMaxTextBody = 16 * 1024 * 1024;
 constexpr size_t kMaxErrorBody = 64 * 1024;
 constexpr size_t kMaxIdleHandles = 64;
 constexpr std::chrono::seconds kMaxRetryPause{60};
+constexpr std::chrono::milliseconds kPauseSlice{100};
+// A canceled job ends a request with no byte moving after this long (an
+// upload that is fully sent gets m_abort_reply_grace instead).
+constexpr std::chrono::seconds kAbortIdleGrace{1};
 constexpr char kEmptySha256[]
     = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
@@ -202,6 +206,7 @@ struct S3NativeStore::Reply {
   curl_off_t content_length{-1};
   bool overflow{false};
   bool stalled{false};
+  bool canceled{false};
 };
 
 namespace {
@@ -266,6 +271,11 @@ struct ProgressState {
   curl_off_t last_bytes{-1};
   std::chrono::seconds limit;
   bool stalled{false};
+  // Ends the transfer when it returns true (the job was canceled).
+  const std::function<bool()>* abort_check{nullptr};
+  curl_off_t upload_size{0};
+  std::chrono::milliseconds reply_grace{0};
+  bool canceled{false};
 };
 
 int ProgressCallback(void* userdata,
@@ -277,10 +287,25 @@ int ProgressCallback(void* userdata,
   auto* ps = static_cast<ProgressState*>(userdata);
   auto now = std::chrono::steady_clock::now();
   curl_off_t moved = downloaded + uploaded;
-  if (moved != ps->last_bytes) {
+  const bool idle = moved == ps->last_bytes;
+  if (!idle) {
     ps->last_bytes = moved;
     ps->last_change = now;
-  } else if (now - ps->last_change >= ps->limit) {
+  }
+  // A canceled job ends a request that has moved no byte for a moment; a
+  // transfer that is still moving finishes. After the whole upload is sent
+  // the drain of the socket and the server's reply get the reply grace.
+  const bool body_sent = ps->upload_size > 0 && uploaded >= ps->upload_size;
+  const std::chrono::milliseconds grace
+      = body_sent ? ps->reply_grace
+                  : std::chrono::duration_cast<std::chrono::milliseconds>(
+                        kAbortIdleGrace);
+  if (idle && now - ps->last_change >= grace && ps->abort_check
+      && *ps->abort_check && (*ps->abort_check)()) {
+    ps->canceled = true;
+    return 1;
+  }
+  if (idle && now - ps->last_change >= ps->limit) {
     ps->stalled = true;
     return 1;
   }
@@ -529,6 +554,11 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::PerformOnce(
   ReadState read_state{request.upload_data, request.upload_size};
   ProgressState progress_state;
   progress_state.limit = m_options.stall_timeout;
+  progress_state.abort_check = &m_abort_check;
+  progress_state.upload_size
+      = request.upload ? static_cast<curl_off_t>(request.upload_size) : 0;
+  progress_state.reply_grace = std::min<std::chrono::milliseconds>(
+      m_abort_reply_grace, m_options.stall_timeout);
 
   curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
   curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
@@ -580,6 +610,7 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::PerformOnce(
   reply.received = write_state.used;
   reply.overflow = write_state.overflow;
   reply.stalled = progress_state.stalled;
+  reply.canceled = progress_state.canceled;
   m_pool->Release(handle, reply.curl_code == CURLE_OK);
 
   utl::Dfmt(debug_trace, FMT_STRING("{} {} -> status {} curl {}"),
@@ -595,6 +626,10 @@ template <typename ReplyType>
 Outcome Classify(const ReplyType& reply, StoreError& err)
 {
   if (reply.curl_code != CURLE_OK) {
+    if (reply.canceled) {
+      err = {StoreErrc::kCanceled, "canceled"};
+      return Outcome::kFail;
+    }
     if (reply.overflow) {
       err = {StoreErrc::kPermanent, "the response is larger than allowed"};
       return Outcome::kFail;
@@ -661,11 +696,20 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::Execute(
 {
   StoreError last{StoreErrc::kTransient, "no attempt made"};
   const int attempts = m_options.request_retries + 1;
+  auto canceled = [this] { return m_abort_check && m_abort_check(); };
   for (int attempt = 0; attempt < attempts; ++attempt) {
     if (attempt > 0) {
-      auto pause = m_retry_base * (1LL << std::min(attempt - 1, 20));
-      std::this_thread::sleep_for(
-          std::min<std::chrono::milliseconds>(pause, kMaxRetryPause));
+      // The pause is taken in short slices so that a cancel ends it early.
+      auto pause = std::min<std::chrono::milliseconds>(
+          m_retry_base * (1LL << std::min(attempt - 1, 20)), kMaxRetryPause);
+      while (pause > std::chrono::milliseconds::zero() && !canceled()) {
+        auto slice = std::min(pause, kPauseSlice);
+        std::this_thread::sleep_for(slice);
+        pause -= slice;
+      }
+    }
+    if (canceled()) {
+      return tl::unexpected(StoreError{StoreErrc::kCanceled, "canceled"});
     }
     auto reply = PerformOnce(request);
     if (!reply) { return tl::unexpected(reply.error()); }

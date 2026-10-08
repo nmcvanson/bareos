@@ -32,6 +32,8 @@ The port is chosen by the system and written to <control_dir>/port.
 Switches (files in <control_dir>, consumed as noted):
   put500        number of PUT requests still answered with 500
   put-badmd5    number of PUT requests still answered with 400 BadDigest
+  put-stall     seconds every PUT waits before it is stored and answered
+                (writes the key into the file put-stalled when a PUT starts to wait)
   get-stall     seconds every GET waits before it answers
   deny          while the file exists every request gets 403 AccessDenied
 Log: <control_dir>/requests.log, one line per request:
@@ -233,6 +235,11 @@ class Handler(BaseHTTPRequestHandler):
         if file is None:
             self.reply(400, xml_error("InvalidRequest", "bad key"), sig=sig)
             return
+        stall = switch_value("put-stall")
+        if stall:
+            with open(os.path.join(CONTROL_DIR, "put-stalled"), "w") as f:
+                f.write(path)
+            time.sleep(float(stall))
         if take_switch("put500"):
             self.reply(500, xml_error("InternalError", "injected"), sig=sig)
             return

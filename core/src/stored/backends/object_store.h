@@ -23,6 +23,7 @@
 #define BAREOS_STORED_BACKENDS_OBJECT_STORE_H_
 
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <optional>
 #include <ostream>
@@ -40,6 +41,7 @@ enum class StoreErrc
   kPermanent,  // will fail again, e.g. access denied
   kTimeout,    // the operation was stopped for taking too long
   kConfig,     // the transport is set up wrongly or lacks the feature
+  kCanceled,   // the caller's abort check said stop; never retried
 };
 
 struct StoreError {
@@ -96,6 +98,11 @@ class ObjectStore {
                                                 std::string_view obj_part) = 0;
 
   virtual bool supports_range_download() const { return false; }
+
+  /* Check polled by a transport that can stop a request in flight; when it
+   * returns true the request ends as kCanceled. Set before the first
+   * operation, it may be called from any thread. */
+  virtual void set_abort_check(std::function<bool()>) {}
 };
 
 #endif  // BAREOS_STORED_BACKENDS_OBJECT_STORE_H_

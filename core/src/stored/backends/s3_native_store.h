@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,13 +62,25 @@ class S3NativeStore final : public ObjectStore {
   tl::expected<void, StoreError> remove(std::string_view obj_name,
                                         std::string_view obj_part) override;
   bool supports_range_download() const override { return true; }
+  // Ignored once the first operation has run, so readers need no lock.
+  void set_abort_check(std::function<bool()> check) override
+  {
+    std::lock_guard lock(m_mutex);
+    if (!m_options_frozen) { m_abort_check = std::move(check); }
+  }
 
   // HTTP requests sent so far, retries included.
   uint64_t requests_sent() const { return m_requests_sent; }
   // Pause before the first retry, doubled for each further one (for tests).
   void set_retry_base(std::chrono::milliseconds base) { m_retry_base = base; }
+  // How long a canceled job waits for the reply of a fully sent upload.
+  void set_abort_reply_grace(std::chrono::milliseconds grace)
+  { m_abort_reply_grace = grace; }
 
  private:
+  // Longest wait of a canceled job for the reply of a fully sent upload.
+  static constexpr std::chrono::milliseconds kAbortReplyGrace{10000};
+
   struct Options {
     std::string s3cfg;
     std::string bucket;
@@ -105,7 +118,9 @@ class S3NativeStore final : public ObjectStore {
   std::string m_ca_file;
   std::string m_key_prefix;
 
+  std::function<bool()> m_abort_check;
   std::chrono::milliseconds m_retry_base{1000};
+  std::chrono::milliseconds m_abort_reply_grace{kAbortReplyGrace};
   std::atomic<uint64_t> m_requests_sent{0};
   std::unique_ptr<HandlePool> m_pool;
 };

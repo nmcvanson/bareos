@@ -105,6 +105,7 @@ struct chunk_io_request {
   bool release;  /* Should we release the data to which the buffer points ? */
   int64_t retry_at_ms; /* Steady clock time (ms) before which no retry */
   bool lease_conflict; /* Set by FlushRemoteChunk: chunk is being uploaded */
+  bool canceled;       /* Set by FlushRemoteChunk: the job was canceled */
 };
 
 struct chunk_descriptor {

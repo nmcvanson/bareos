@@ -43,6 +43,8 @@ class DropletCompatibleDevice : public ChunkedDevice {
   std::unique_ptr<ObjectStore> m_storage{std::make_unique<CrudStorage>()};
   bool m_setup_succeeded{false};
   tl::expected<void, std::string> setup_impl();
+  void InstallStore(std::unique_ptr<ObjectStore> store);
+  static bool CallingJobCanceled();
 
   // Interface from ChunkedDevice
   bool CheckRemoteConnection() override;

@@ -36,3 +36,23 @@ Device {
   Maximum File Size = 20000000
   Maximum Concurrent Jobs = 1
 }
+
+# Uploads on the job's own thread: a cancel has to end the request in flight.
+Device {
+  Name = dplcompat-sync
+  Media Type = dplcompat-sync
+  Archive Device = S3 Object Storage
+  Device Options = "transport=native"
+                   ",s3cfg=@tmpdir@/s3cfg"
+                   ",bucket=testbucket"
+                   ",iothreads=0"
+                   ",flush_timeout=120"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}

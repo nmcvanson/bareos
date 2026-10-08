@@ -27,6 +27,7 @@
 #include "stored/sd_backends.h"
 #include "chunked_device.h"
 #include "lib/edit.h"
+#include "lib/thread_specific_data.h"
 #include "dplcompat_device.h"
 
 #include <string>
@@ -349,8 +350,23 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
         fmt::format(FMT_STRING("Unknown options encountered: {}\n"),
                     option_names.Join(", ")));
   }
-  m_storage = std::move(*storage);
+  InstallStore(std::move(*storage));
   return {};
+}
+
+// True when the calling thread runs a job that was canceled; a failed job and
+// an io-thread (no job) are not.
+bool DropletCompatibleDevice::CallingJobCanceled()
+{
+  JobControlRecord* jcr = GetJcrFromThreadSpecificData();
+  return jcr != nullptr && jcr->getJobStatus() == JS_Canceled;
+}
+
+// Takes over the transport and lets it stop a request when the job is canceled.
+void DropletCompatibleDevice::InstallStore(std::unique_ptr<ObjectStore> store)
+{
+  m_storage = std::move(store);
+  m_storage->set_abort_check([] { return CallingJobCanceled(); });
 }
 
 bool DropletCompatibleDevice::CheckRemoteConnection()
@@ -408,6 +424,7 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   } else {
     PmStrcpy(errmsg, result.error().message.c_str());
     dev_errno = EIO;
+    request->canceled = result.error().code == StoreErrc::kCanceled;
     return false;
   }
 }

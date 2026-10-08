@@ -167,6 +167,7 @@ class FakeChunkedDevice : public ChunkedDevice {
   std::atomic<int> upload_delay_ms{0};
   std::atomic<int> fail_next_uploads{0};
   std::atomic<int> conflict_next_uploads{0};  // report a lease conflict
+  std::atomic<int> cancel_next_uploads{0};    // report a canceled job
   std::atomic<int> uploads_started{0};
   std::atomic<int> truncates{0};
   std::string reason;
@@ -275,6 +276,13 @@ class FakeChunkedDevice : public ChunkedDevice {
         && conflict_next_uploads.compare_exchange_strong(left, left - 1)) {
       PmStrcpy(errmsg, "stale message of another job\n");
       request->lease_conflict = true;
+      return false;
+    }
+    left = cancel_next_uploads.load();
+    if (left > 0
+        && cancel_next_uploads.compare_exchange_strong(left, left - 1)) {
+      PmStrcpy(errmsg, "canceled\n");
+      request->canceled = true;
       return false;
     }
     auto inflight_lease = getInflightLease(request);
@@ -1233,4 +1241,24 @@ TEST(chunked_device_flush, ChunksNotUploadedNameQueuedAndKeptChunks)
     EXPECT_EQ(chunks[0].first, "TestVolume");
     EXPECT_EQ(chunks[0].second, 0);
   }
+}
+
+/* An upload try of a kept chunk that a canceled job ends does not count as a
+ * failure: the next try comes after a second, not after a longer pause. */
+TEST(chunked_device_flush, CanceledTryOfAKeptChunkKeepsItsRetryPause)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(2 * kChunk);
+  FailFirstBlockingChunk(dev, data);
+
+  dev.cancel_next_uploads = 1;
+  dev.SetupChunk("TestVolume", O_RDONLY, 0);  // one try of every kept chunk
+  EXPECT_EQ(dev.cancel_next_uploads.load(), 0);
+  ASSERT_EQ(dev.ChunksNotUploaded().size(), 1u);
+
+  dev.fail_uploads = false;
+  const auto start = SteadyClock::now();
+  EXPECT_TRUE(dev.Wait()) << dev.reason;
+  EXPECT_LT(SteadyClock::now() - start, 5s);
+  EXPECT_EQ(dev.Stored(0), std::string(data.data(), kChunk));
 }
