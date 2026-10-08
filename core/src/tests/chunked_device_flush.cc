@@ -27,6 +27,7 @@
 #include "include/fcntl_def.h"
 #include "include/bareos.h"
 #include "stored/stored.h"
+#include "stored/device_status_information.h"
 #include "stored/stored_globals.h"
 #include "lib/messages_resource.h"
 #include "lib/thread_specific_data.h"
@@ -171,6 +172,8 @@ class FakeChunkedDevice : public ChunkedDevice {
   std::atomic<int> cancel_next_uploads{0};    // report a canceled job
   std::atomic<int> uploads_started{0};
   std::atomic<int> truncates{0};
+  std::atomic<int> probe_ms{0};  // CheckRemoteConnection takes this long
+  std::atomic<int> probes{0};
   std::string reason;
 
   FakeChunkedDevice(uint8_t io_threads,
@@ -272,7 +275,12 @@ class FakeChunkedDevice : public ChunkedDevice {
   bool d_truncate(DeviceControlRecord*) override { return true; }
 
  protected:
-  bool CheckRemoteConnection() override { return true; }
+  bool CheckRemoteConnection() override
+  {
+    ++probes;
+    std::this_thread::sleep_for(std::chrono::milliseconds{probe_ms});
+    return true;
+  }
   bool WriterCanceled() override { return writer_canceled; }
   bool StartIoThreads() override
   { return !fail_thread_start && ChunkedDevice::StartIoThreads(); }
@@ -1566,4 +1574,95 @@ TEST(chunked_device_flush, WaitForPendingChunksStopsOnACancelAndOnAKeptChunk)
     std::string reason;
     EXPECT_TRUE(dev.WaitForPendingChunks([] { return false; }, reason));
   }
+}
+
+// The device status text.
+std::string StatusOf(FakeChunkedDevice& dev)
+{
+  DeviceStatusInformation dst;
+  dst.status = GetPoolMemory(PM_MESSAGE);
+  dst.status_length = 0;
+  dev.DeviceStatus(&dst);
+  std::string text(dst.status);
+  FreePoolMemory(dst.status);
+  return text;
+}
+
+// Waits until the status text has the part (the last upload ends a moment
+// before the device clears its read-only state).
+bool WaitStatus(FakeChunkedDevice& dev, const char* part)
+{
+  for (int i = 0; i < 100; ++i) {
+    if (Contains(StatusOf(dev), part)) { return true; }
+    std::this_thread::sleep_for(100ms);
+  }
+  return false;
+}
+
+// A backend that does not answer must not hold the status.
+TEST(chunked_device_flush, DeviceStatusDoesNotProbeTheBackend)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  dev.probe_ms = 10000;
+  const auto start = SteadyClock::now();
+  const std::string text = StatusOf(dev);
+  EXPECT_LT(SteadyClock::now() - start, 1s);
+  EXPECT_EQ(dev.probes.load(), 0);
+  EXPECT_TRUE(Contains(text, "No upload since the daemon started")) << text;
+  EXPECT_TRUE(Contains(text, "No pending IO flush requests")) << text;
+  EXPECT_FALSE(Contains(text, "Backend connection")) << text;
+}
+
+TEST(chunked_device_flush, DeviceStatusReportsTheLastUploadOutcome)
+{
+  // No io-threads: an upload that fails keeps the chunk and refuses writes.
+  FakeChunkedDevice dev{0, 0, 5};
+  const auto data = Pattern(2 * kChunk);
+  EXPECT_TRUE(Contains(StatusOf(dev), "No upload since the daemon started"));
+
+  FailFirstBlockingChunk(dev, data);  // opens the device: one probe
+  dev.probe_ms = 10000;
+  auto start = SteadyClock::now();
+  std::string text = StatusOf(dev);
+  EXPECT_LT(SteadyClock::now() - start, 1s);
+  EXPECT_TRUE(Contains(text, "Last upload failed")) << text;
+  EXPECT_TRUE(Contains(text, "injected upload failure")) << text;
+  EXPECT_TRUE(Contains(text, "Device refuses writes")) << text;
+  EXPECT_TRUE(Contains(text, "Kept chunks waiting for upload")) << text;
+  EXPECT_FALSE(Contains(text, "Last upload succeeded")) << text;
+
+  // The store is back: the kept chunk is uploaded and the status says so.
+  dev.fail_uploads = false;
+  EXPECT_TRUE(dev.Wait()) << dev.reason;
+  EXPECT_TRUE(WaitStatus(dev, "Last upload succeeded"));
+  text = StatusOf(dev);
+  EXPECT_FALSE(Contains(text, "Last upload failed")) << text;
+  EXPECT_FALSE(Contains(text, "Device refuses writes")) << text;
+  EXPECT_FALSE(Contains(text, "Kept chunks waiting for upload")) << text;
+  EXPECT_EQ(dev.probes.load(), 1);  // only the open probed
+}
+
+TEST(chunked_device_flush, DeviceStatusWithIoThreadsFollowsTheUploads)
+{
+  FakeChunkedDevice dev{1, 1, 30};
+  dev.fail_uploads = true;
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_CREAT | O_RDWR, 0640), 0);
+  dev.probe_ms = 10000;
+  const auto data = Pattern(2 * kChunk);
+  int write_errno = 0;
+  WriteUntilRefused(dev, data, 30s, write_errno);
+
+  EXPECT_TRUE(WaitStatus(dev, "Last upload failed"));
+  const auto start = SteadyClock::now();
+  std::string text = StatusOf(dev);
+  EXPECT_LT(SteadyClock::now() - start, 1s);
+  EXPECT_TRUE(Contains(text, "Device refuses writes")) << text;
+  EXPECT_TRUE(Contains(text, "Pending IO flush requests")) << text;
+
+  dev.fail_uploads = false;
+  EXPECT_TRUE(WaitStored(dev, 0, kChunk));
+  EXPECT_TRUE(WaitStatus(dev, "Last upload succeeded"));
+  EXPECT_TRUE(WaitWritable(dev, data));
+  text = StatusOf(dev);
+  EXPECT_FALSE(Contains(text, "Device refuses writes")) << text;
 }

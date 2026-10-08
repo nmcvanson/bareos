@@ -630,6 +630,9 @@ void ChunkedDevice::NotifyUploadEvent(bool uploaded, const std::string& error)
     } else {
       upload_state_.last_error = error;
     }
+    upload_state_.outcome_ms = SteadyMilliseconds();
+    upload_state_.outcome_ok = uploaded;
+    upload_state_.outcome_error = uploaded ? std::string{} : error;
   }
   upload_cv_.notify_all();
 }
@@ -1999,13 +2002,33 @@ bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
   int inflight_chunks = 0;
   PoolMem inflights(PM_MESSAGE);
 
-  dst->status_length = 0;
-  if (CheckRemoteConnection()) {
+  /* The status does not probe the endpoint, which can block for minutes when
+   * it is unreachable; it reports the last upload outcome and the state. */
+  const UploadState uploads = GetUploadState();
+  if (uploads.outcome_ms == 0) {
     dst->status_length
-        = PmStrcpy(dst->status, T_("Backend connection is working.\n"));
+        = PmStrcpy(dst->status, T_("No upload since the daemon started.\n"));
   } else {
-    dst->status_length
-        = PmStrcpy(dst->status, T_("Backend connection is not working.\n"));
+    const long long seconds
+        = (SteadyMilliseconds() - uploads.outcome_ms) / 1000;
+    std::string error = uploads.outcome_error;
+    while (!error.empty() && (error.back() == '\n' || error.back() == '\r')) {
+      error.pop_back();
+    }
+    PoolMem outcome(PM_MESSAGE);
+    if (uploads.outcome_ok) {
+      outcome.bsprintf(T_("Last upload succeeded %lld s ago.\n"), seconds);
+    } else {
+      outcome.bsprintf(T_("Last upload failed %lld s ago: %s\n"), seconds,
+                       error.c_str());
+    }
+    dst->status_length = PmStrcpy(dst->status, outcome.c_str());
+  }
+  if (readonly_) {
+    PoolMem refuses(PM_MESSAGE);
+    refuses.bsprintf(T_("Device refuses writes: %s\n"),
+                     uploads.readonly_reason.c_str());
+    dst->status_length = PmStrcat(dst->status, refuses.c_str());
   }
   /* See if we are using io-threads or not and the ordered CircularBuffer is
    * created and not empty. */

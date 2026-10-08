@@ -148,6 +148,9 @@ struct UploadState {
   uint64_t done{};         // successful uploads
   std::string last_error;  // of an upload or a size check
   std::string readonly_reason;
+  int64_t outcome_ms{};       // steady clock of the last finished try, 0 = none
+  bool outcome_ok{};          // whether that try uploaded
+  std::string outcome_error;  // why it failed
 };
 
 class ChunkedDevice : public Device {
