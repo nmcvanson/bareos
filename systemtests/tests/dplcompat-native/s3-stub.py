@@ -31,6 +31,8 @@ The port is chosen by the system and written to <control_dir>/port.
 
 Switches (files in <control_dir>, consumed as noted):
   put500        number of PUT requests still answered with 500
+  list503       number of LIST requests still answered with 503
+  head503       number of bucket HEAD requests still answered with 503
   put-badmd5    number of PUT requests still answered with 400 BadDigest
   put-stall     seconds every PUT waits before it is stored and answered
                 (writes the key into the file put-stalled when a PUT starts to wait)
@@ -213,7 +215,14 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(split.path)
         query = dict(parse_qsl(split.query, keep_blank_values=True))
         if self.command == "HEAD" and path.strip("/") == BUCKET:
-            self.reply(200, sig=sig)
+            if take_switch("head503"):
+                self.reply(
+                    503,
+                    xml_error("ServiceUnavailable", "temporary access outage"),
+                    sig=sig,
+                )
+            else:
+                self.reply(200, sig=sig)
         elif self.command == "GET" and path.strip("/") == BUCKET:
             self.list_objects(query, sig)
         elif self.command == "PUT":
@@ -289,6 +298,13 @@ class Handler(BaseHTTPRequestHandler):
         self.log_request_line(200, sig)
 
     def list_objects(self, query, sig):
+        if take_switch("list503"):
+            self.reply(
+                503,
+                xml_error("ServiceUnavailable", "temporary listing outage"),
+                sig=sig,
+            )
+            return
         prefix = query.get("prefix", "")
         token = query.get("continuation-token", "")
         keys = []

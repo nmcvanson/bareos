@@ -8,3 +8,9 @@ Director {
   address = localhost
   Password = "@dir_password@"
 }
+
+Console {
+  Name = @basename@-console
+  Password = "@dir_password@"
+  HistoryFile = "@working_dir@/bconsole.history"
+}

@@ -258,7 +258,6 @@ class ChunkedDevice : public Device {
   void SetReadonly(const std::string& reason);
   void ClearReadonlyIfDrained();
   UploadState GetUploadState();
-  void FailWriter(const char* message);
   void CountPendingRequest(const char* volname, int change);
   int PendingChunksOfVolume(const char* volname);
   void KeepCurrentChunk(bool failed, const std::string& error);
@@ -280,6 +279,7 @@ class ChunkedDevice : public Device {
   bool use_mmap_{};
 
   // Protected Methods
+  void FailWriter(const char* message);
   std::optional<InflightLease> getInflightLease(chunk_io_request* request);
   bool SetInflightChunk(chunk_io_request* request);
   void ClearInflightChunk(chunk_io_request* request);

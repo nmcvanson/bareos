@@ -146,6 +146,47 @@ count_requests()
   grep -cE "$1" "${requests_log}" || :
 }
 
+# Exhausted backend retries fail the job without changing its healthy volume.
+backend_open_failure()
+{
+  local switch="$1" reason="$2" pattern="$3" before after failed_jobid joblog
+  before=$(console_output "list volumes pool=Full" | grep -cE '^[[:space:]]*\|[[:space:]]*[0-9,]+[[:space:]]*\|')
+  local uploads_before
+  uploads_before=$(count_requests '^PUT ')
+  echo 6 >"${control_dir}/${switch}"
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $tmp/backend-${switch}.log
+run job=$JobName level=Full storage=dplcompat yes
+wait
+messages
+quit
+END_OF_DATA
+  run_bconsole
+  failed_jobid=$(queued_jobid "$tmp/backend-${switch}.log")
+  expect_termination "${failed_jobid}" "Backup Error"
+  joblog=$(console_output "list joblog jobid=${failed_jobid}")
+  if ! grep -q "${reason}" <<<"${joblog}" \
+    || ! grep -q 'HTTP 503' <<<"${joblog}"; then
+    set_error "the failed job does not report its current backend error"
+  fi
+  if (($(count_requests "${pattern}") != 6)); then
+    set_error "the backend failure did not exhaust the default request retries"
+  fi
+  local volumes
+  volumes=$(console_output "list volumes pool=Full")
+  after=$(grep -cE '^[[:space:]]*\|[[:space:]]*[0-9,]+[[:space:]]*\|' <<<"${volumes}")
+  if [ "${before}" != "${after}" ] \
+    || ! grep -qE 'TestVolume001[[:space:]]*\|[[:space:]]*Append' <<<"${volumes}"; then
+    set_error "the backend failure changed the healthy volume or created another"
+  fi
+  if (($(count_requests '^PUT ') != uploads_before)); then
+    set_error "the failed append wrote an object"
+  fi
+  backup_to dplcompat
+  restore_from "${backup_jobid}" dplcompat
+  restore_from "${first_jobid}" dplcompat
+}
+
 setup_data
 # More than two chunks of incompressible data, so that a listing needs pages.
 dd if=/dev/urandom of="${BackupDirectory}/random.bin" bs=1M count=25 2>/dev/null
@@ -170,7 +211,7 @@ quit
 END_OF_DATA
 run_bconsole
 
-# The SD traces every request at this level; step 8 looks for the keys in it.
+# The SD traces every request at this level; step 9 looks for the keys in it.
 cat <<END_OF_DATA >"$tmp/bconcmds"
 @$out $tmp/setdebug.log
 setdebug level=200 trace=1 storage=dplcompat
@@ -311,7 +352,11 @@ if ! grep -q "is short: chunk 1 is missing" <<<"${missing_joblog}"; then
 fi
 mv "${tmp}/TestVolume001.0001.saved" "${missing_chunk}"
 
-# 8. Neither key appears in the SD trace, the daemon logs or the job logs.
+# 8. Exhausted LIST/HEAD retries preserve the volume, then recovery appends.
+backend_open_failure list503 'Cannot list volume TestVolume001' '^GET /testbucket\?.* 503 '
+backend_open_failure head503 'Cannot access backend' '^HEAD /testbucket 503 '
+
+# 9. Neither key appears in the SD trace, the daemon logs or the job logs.
 trace_files=$(find "${working}" -name '*.trace' -type f)
 if [ -z "${trace_files}" ] \
   || ! grep -qE '(PUT|GET|HEAD) .* -> status' ${trace_files}; then

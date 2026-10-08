@@ -374,7 +374,17 @@ void DropletCompatibleDevice::InstallStore(std::unique_ptr<ObjectStore> store)
 bool DropletCompatibleDevice::CheckRemoteConnection()
 {
   Dmsg0(debug_trace, "CheckRemoteConnection called\n");
-  return setup() && m_storage->test_connection();
+  if (!setup()) { return false; }
+  const auto result = m_storage->test_connection();
+  if (!result) {
+    Mmsg(errmsg, T_("Cannot access backend on device %s: %s\n"), print_name(),
+         result.error().message.c_str());
+    dev_errno = EIO;
+    errno = EIO;
+    FailWriter(errmsg);
+    return false;
+  }
+  return true;
 }
 
 bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
@@ -596,6 +606,7 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
     case SEEK_END: {
       ssize_t volumesize;
 
+      dev_errno = 0;
       volumesize = ChunkedVolumeSize();
 
       utl::Dfmt(debug_info, FMT_STRING("Current volumesize: {}"), volumesize);
@@ -603,6 +614,12 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
       if (volumesize >= 0) {
         offset_ = volumesize + offset;
       } else {
+        if (dev_errno == EIO) {
+          PoolMem message(PM_MESSAGE);
+          Mmsg(message, T_("Cannot list volume %s on device %s: %s\n"),
+               getVolCatName(), print_name(), errmsg);
+          FailWriter(message.c_str());
+        }
         return refuse(EIO);
       }
       // The chunk with unflushed data holds the end; LoadChunk would drop it.

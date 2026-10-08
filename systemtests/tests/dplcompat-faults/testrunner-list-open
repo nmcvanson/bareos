@@ -19,9 +19,8 @@
 #   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 #   02110-1301, USA.
 
-# The "list" at the start of an append fails: the volume is marked Error and
-# the job goes on with a new volume; it never writes from offset 0 of the old
-# one, whose earlier job still restores byte-identical.
+# A failed append listing fails the job, keeps the healthy volume Append,
+# creates no replacement, and leaves the earlier backup restorable.
 
 set -e
 set -o pipefail
@@ -84,16 +83,19 @@ run_bconsole
 second_jobid=$(queued_jobid "$log")
 faults_clear
 
-expect_grep "Unable to position to end of data" "$log" \
+expect_grep "Cannot list volume ListOpen-0001" "$log" \
   "the failed listing did not stop the append to the volume"
 volumes=$(console_output "list volumes pool=ListOpen")
-if ! grep -qE "ListOpen-0001\s*\|\s*Error\s*\|" <<<"${volumes}"; then
-  set_error "ListOpen-0001 is not marked Error after the failed listing"
+if ! grep -qE "ListOpen-0001\s*\|\s*Append\s*\|" <<<"${volumes}"; then
+  set_error "the failed listing changed ListOpen-0001 from Append"
+fi
+if grep -q 'ListOpen-0002' <<<"${volumes}"; then
+  set_error "the failed listing created a replacement volume"
 fi
 if [ "$(stored_bytes ListOpen-0001)" != "${bytes_before}" ]; then
   set_error "ListOpen-0001 changed after the failed listing"
 fi
-expect_termination "${second_jobid}" "Backup OK"
+expect_termination "${second_jobid}" "Backup Error"
 
 cat <<END_OF_DATA >"$tmp/bconcmds"
 @$out $log

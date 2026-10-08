@@ -6,7 +6,6 @@ Device {
                    ",s3cfg=@tmpdir@/s3cfg"
                    ",bucket=testbucket"
                    ",iothreads=2"
-                   ",request_retries=3"
                    ",flush_timeout=120"
   Device Type = dplcompat
   LabelMedia = yes

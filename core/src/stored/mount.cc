@@ -229,10 +229,12 @@ mount_next_vol:
 
   // Try autolabel if enabled
   if (!dev->open(dcr, mode)) {
+    if (jcr->IsJobCanceled()) { goto bail_out; }
     TryAutolabel(false); /* try to create a new volume label */
   }
 
   while (!dev->open(dcr, mode)) {
+    if (jcr->IsJobCanceled()) { goto bail_out; }
     Dmsg1(150, "OpenDevice failed: ERR=%s\n", dev->bstrerror());
     if (dev->IsRemovable()) {
       Dmsg0(150, "call ScanForVolume\n");
@@ -316,6 +318,7 @@ read_volume:
          VolumeName);
 
     if (!dev->eod(dcr)) {
+      if (jcr->IsJobCanceled()) { goto bail_out; }
       Dmsg2(050, "Unable to position to end of data on device %s: ERR=%s\n",
             dev->print_name(), dev->bstrerror());
       Jmsg(jcr, M_ERROR, 0,

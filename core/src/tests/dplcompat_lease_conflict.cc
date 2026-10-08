@@ -69,6 +69,7 @@ class DplcompatLeaseTest : public ::testing::Test {
  protected:
   void SetUp() override
   {
+    previous_jcr_ = GetJcrFromThreadSpecificData();
     dir_ = std::filesystem::temp_directory_path()
            / ("dplcompat_lease." + std::to_string(getpid()));
     std::filesystem::create_directories(dir_);
@@ -78,6 +79,8 @@ class DplcompatLeaseTest : public ::testing::Test {
   }
   void TearDown() override
   {
+    SetJcrInThreadSpecificData(previous_jcr_);
+    job_.reset();
     me = nullptr;
     storage_.working_directory = nullptr;
     std::filesystem::remove_all(dir_);
@@ -106,9 +109,19 @@ class DplcompatLeaseTest : public ::testing::Test {
                         int whence)
   { return dev.d_lseek(nullptr, offset, whence); }
 
+  JobControlRecord& NewJob()
+  {
+    job_ = std::make_unique<JobControlRecord>();
+    job_->setJobStatusWithPriorityCheck(JS_Running);
+    SetJcrInThreadSpecificData(job_.get());
+    return *job_;
+  }
+
   std::filesystem::path dir_;
   std::string path_;
   StorageResource storage_;
+  JobControlRecord* previous_jcr_{};
+  std::unique_ptr<JobControlRecord> job_;
 };
 
 TEST_F(DplcompatLeaseTest, HeldLeaseIsReportedOnTheRequestOnly)
@@ -260,6 +273,7 @@ class MemoryStore : public ObjectStore {
   int list_calls{0};
   int downloads{0};
   bool fail_downloads{false};
+  bool fail_connection{false};
   int fail_list_from{0};  // the list call with this number (1-based) fails
   StoreErrc list_error{StoreErrc::kTransient};
 
@@ -268,7 +282,14 @@ class MemoryStore : public ObjectStore {
   tl::expected<void, StoreError> set_option(const std::string&,
                                             const std::string&) override
   { return {}; }
-  tl::expected<void, StoreError> test_connection() override { return {}; }
+  tl::expected<void, StoreError> test_connection() override
+  {
+    if (fail_connection) {
+      return tl::unexpected(
+          StoreError{StoreErrc::kTransient, "connection unavailable"});
+    }
+    return {};
+  }
   tl::expected<ObjectStat, StoreError> stat(std::string_view,
                                             std::string_view part) override
   {
@@ -356,6 +377,52 @@ class EodDevice {
   DropletCompatibleDevice dev;
   MemoryStore* store;
 };
+
+TEST_F(DplcompatLeaseTest, BackendConnectionFailureFailsTheCallingJob)
+{
+  EodDevice d;
+  UseIoThreads(d.dev);
+  auto& job = NewJob();
+  d.store->fail_connection = true;
+  errno = 0;
+  EXPECT_EQ(Open(d.dev, O_RDWR), -1);
+  EXPECT_EQ(errno, EIO);
+  EXPECT_EQ(d.dev.dev_errno, EIO);
+  EXPECT_EQ(job.getJobStatus(), JS_FatalError);
+  EXPECT_NE(std::string(d.dev.errmsg).find("connection unavailable"),
+            std::string::npos);
+}
+
+TEST_F(DplcompatLeaseTest, AppendListingFailureFailsTheCallingJob)
+{
+  EodDevice d;
+  UseIoThreads(d.dev);
+  auto& job = NewJob();
+  d.store->chunks["0000"] = Chunk('a');
+  ASSERT_EQ(Open(d.dev, O_RDWR), 0);
+  d.store->fail_list_from = 1;
+  errno = 0;
+  EXPECT_EQ(Seek(d.dev, 0, SEEK_END), -1);
+  EXPECT_EQ(errno, EIO);
+  EXPECT_EQ(d.dev.dev_errno, EIO);
+  EXPECT_EQ(job.getJobStatus(), JS_FatalError);
+  EXPECT_EQ(d.store->chunks.at("0000"), Chunk('a'));
+  EXPECT_EQ(d.store->uploads, 0);
+}
+
+TEST_F(DplcompatLeaseTest, EmptyAppendListingDoesNotReuseAnOldBackendError)
+{
+  EodDevice d;
+  UseIoThreads(d.dev);
+  auto& job = NewJob();
+  d.store->chunks["0000"] = "";
+  ASSERT_EQ(Open(d.dev, O_RDWR), 0);
+  d.store->chunks.clear();
+  d.dev.dev_errno = EIO;
+  EXPECT_EQ(Seek(d.dev, 0, SEEK_END), -1);
+  EXPECT_EQ(job.getJobStatus(), JS_Running);
+  EXPECT_EQ(d.store->list_calls, 1);
+}
 
 // A refused seek says EIO, keeps the position and drops the chunk: reads and
 // writes fail and upload nothing until a seek loads a chunk again.
