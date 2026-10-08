@@ -44,6 +44,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <unistd.h>
 
 namespace storagedaemon {
@@ -766,6 +767,66 @@ TEST_F(DplcompatLeaseTest, EndWithAPartialChunkInTransitIsLoadedAfterTheWait)
   const size_t part = kChunkBytes / 2;
   ExpectEndWithAChunkInTransit(part, static_cast<boffset_t>(kChunkBytes + part),
                                "0001", Chunk('b', part) + "tail");
+}
+
+/* A restore that reaches a chunk missing from the listing ends the volume only
+ * at the catalog size; below it, with a failed listing or with a chunk that is
+ * listed but unreadable, the read fails. */
+TEST_F(DplcompatLeaseTest, ReadOfAMissingChunkEndsTheVolumeOnlyAtTheCatalogSize)
+{
+  struct Case {
+    uint64_t catalog_bytes;
+    bool fail_list;
+    bool chunk_one_listed;
+    ssize_t result;
+    const char* text;
+  };
+  const Case cases[]
+      = {{kChunkBytes, false, false, 0, ""},
+         {2 * kChunkBytes, false, false, -1, "is short: chunk 1 is missing"},
+         {kChunkBytes, true, false, -1, "listing failed"},
+         {kChunkBytes, false, true, -1, "Reading chunk 1 of volume Vol"}};
+  for (const Case& c : cases) {
+    EodDevice d;
+    d.store->chunks["0000"] = Chunk('a');
+    if (c.chunk_one_listed) { d.store->chunks["0001"] = Chunk('b'); }
+    d.dev.VolCatInfo.VolCatBytes = c.catalog_bytes;
+    ASSERT_EQ(Open(d.dev, O_RDONLY), 0);
+    d.store->fail_downloads = c.chunk_one_listed;
+    if (c.fail_list) { d.store->fail_list_from = 1; }
+
+    std::vector<char> block(1024 * 1024);
+    size_t got = 0;
+    ssize_t last = 0;
+    while ((last = d.dev.d_read(0, block.data(), block.size())) > 0) {
+      got += last;
+    }
+    EXPECT_EQ(last, c.result) << c.text;
+    EXPECT_EQ(got, kChunkBytes) << c.text;
+    EXPECT_NE(std::string(d.dev.errmsg).find(c.text), std::string::npos)
+        << c.text << ": " << d.dev.errmsg;
+    EXPECT_EQ(d.store->list_calls, 1);
+    if (c.result < 0) {
+      char bytes[16];
+      std::memset(bytes, 'z', sizeof(bytes));
+      errno = 0;
+      EXPECT_EQ(d.dev.d_read(0, bytes, sizeof(bytes)), -1);
+      EXPECT_EQ(errno, EIO);
+      EXPECT_EQ(std::string(bytes, sizeof(bytes)), std::string(16, 'z'));
+      EXPECT_EQ(d.store->list_calls, 1);
+
+      d.store->chunks["0001"] = Chunk('b');
+      d.store->fail_downloads = false;
+      d.store->fail_list_from = 0;
+      const int downloads = d.store->downloads;
+      ASSERT_EQ(d.dev.d_lseek(nullptr, kChunkBytes, SEEK_SET),
+                static_cast<boffset_t>(kChunkBytes));
+      EXPECT_EQ(d.store->downloads, downloads + 1);
+      EXPECT_EQ(d.dev.d_read(0, bytes, sizeof(bytes)),
+                static_cast<ssize_t>(sizeof(bytes)));
+      EXPECT_EQ(std::string(bytes, sizeof(bytes)), std::string(16, 'b'));
+    }
+  }
 }
 
 TEST_F(DplcompatLeaseTest, EndAfterAFullUnflushedChunkIsItsOwnEnd)

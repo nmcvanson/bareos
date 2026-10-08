@@ -557,6 +557,15 @@ std::optional<std::map<int, size_t>> DropletCompatibleDevice::ListChunkSizes()
   return sizes;
 }
 
+// Whether the chunk is in a fresh listing of the volume.
+ChunkPresence DropletCompatibleDevice::RemoteChunkPresence(int chunk)
+{
+  const auto sizes = ListChunkSizes();
+  if (!sizes) { return ChunkPresence::kUnknown; }
+  return sizes->count(chunk) > 0 ? ChunkPresence::kPresent
+                                 : ChunkPresence::kAbsent;
+}
+
 boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
                                            boffset_t offset,
                                            int whence)

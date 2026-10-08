@@ -164,6 +164,7 @@ class FakeChunkedDevice : public ChunkedDevice {
   std::atomic<bool> stale_busy{false};  // failed uploads leave EBUSY behind
   std::atomic<bool> hold_uploads{false};
   std::atomic<bool> fail_list{false};
+  std::atomic<bool> fail_reads{false};  // chunks in the store cannot be read
   std::atomic<bool> writer_canceled{false};
   std::atomic<bool> fail_thread_start{false};
   std::atomic<int> upload_delay_ms{0};
@@ -174,6 +175,7 @@ class FakeChunkedDevice : public ChunkedDevice {
   std::atomic<int> truncates{0};
   std::atomic<int> probe_ms{0};  // CheckRemoteConnection takes this long
   std::atomic<int> probes{0};
+  std::atomic<int> read_listings{0};
   std::string reason;
 
   FakeChunkedDevice(uint8_t io_threads,
@@ -341,9 +343,27 @@ class FakeChunkedDevice : public ChunkedDevice {
       dev_errno = EIO;
       return false;
     }
+    if (fail_reads) {
+      PmStrcpy(errmsg, "injected read failure\n");
+      dev_errno = EIO;
+      return false;
+    }
     memcpy(request->buffer, it->second.data(), it->second.size());
     *request->rbuflen = it->second.size();
     return true;
+  }
+
+  ChunkPresence RemoteChunkPresence(int chunk) override
+  {
+    ++read_listings;
+    if (fail_list) {
+      PmStrcpy(errmsg, "injected list failure\n");
+      return ChunkPresence::kUnknown;
+    }
+    std::lock_guard<std::mutex> lock(store_mutex_);
+    return stored_.count({VolCatInfo.VolCatName, static_cast<uint16_t>(chunk)})
+               ? ChunkPresence::kPresent
+               : ChunkPresence::kAbsent;
   }
 
   std::optional<ssize_t> RemoteVolumeSize() override
@@ -1665,4 +1685,145 @@ TEST(chunked_device_flush, DeviceStatusWithIoThreadsFollowsTheUploads)
   EXPECT_TRUE(WaitWritable(dev, data));
   text = StatusOf(dev);
   EXPECT_FALSE(Contains(text, "Device refuses writes")) << text;
+}
+
+// A failed read ends the volume only for a chunk that is absent at or after
+// the catalog size.
+static_assert(DecideReadEnd(ChunkPresence::kAbsent, 2 * kChunk, 2 * kChunk)
+              == ReadEnd::kEndOfVolume);
+static_assert(DecideReadEnd(ChunkPresence::kAbsent, 3 * kChunk, 2 * kChunk)
+              == ReadEnd::kEndOfVolume);
+static_assert(DecideReadEnd(ChunkPresence::kAbsent, kChunk, 2 * kChunk)
+              == ReadEnd::kShortVolume);
+static_assert(DecideReadEnd(ChunkPresence::kAbsent, 2 * kChunk - 1, 2 * kChunk)
+              == ReadEnd::kShortVolume);
+static_assert(DecideReadEnd(ChunkPresence::kPresent, 3 * kChunk, 2 * kChunk)
+              == ReadEnd::kReadError);
+static_assert(DecideReadEnd(ChunkPresence::kPresent, kChunk, 2 * kChunk)
+              == ReadEnd::kReadError);
+static_assert(DecideReadEnd(ChunkPresence::kUnknown, 3 * kChunk, 2 * kChunk)
+              == ReadEnd::kReadError);
+static_assert(DecideReadEnd(ChunkPresence::kUnknown, kChunk, 2 * kChunk)
+              == ReadEnd::kReadError);
+
+// Reads in 1 MiB blocks until a read returns 0 or fails; returns that result.
+ssize_t ReadBlocks(FakeChunkedDevice& dev, std::string& data)
+{
+  std::vector<char> block(1024 * 1024);
+  while (true) {
+    const ssize_t got = dev.ReadChunked(0, block.data(), block.size());
+    if (got <= 0) { return got; }
+    data.append(block.data(), got);
+  }
+}
+
+// Opens the volume for reading with the catalog size.
+void OpenForRead(FakeChunkedDevice& dev, uint64_t catalog_bytes)
+{
+  dev.SelectVolume("TestVolume", catalog_bytes);
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_RDONLY, 0), 0);
+}
+
+TEST(chunked_device_flush, ReadEndsAtTheCatalogSize)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  dev.Seed("TestVolume", 1, data);
+  OpenForRead(dev, 2 * kChunk);
+  std::string got;
+  EXPECT_EQ(ReadBlocks(dev, got), 0);
+  ASSERT_EQ(got.size(), 2 * kChunk);
+  EXPECT_EQ(got.substr(kChunk), std::string(data.data(), data.size()));
+  EXPECT_EQ(ChunkStateProbe::Capture(dev).start_offset, -1);
+  std::vector<char> block(4096);
+  EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()), 0);
+}
+
+TEST(chunked_device_flush, HealthyReadsDoNotListAndEndListsOnlyOnce)
+{
+  FakeChunkedDevice dev{2, 0, 60};
+  const auto first = Pattern(kChunk);
+  const std::vector<char> second(kChunk, 'b');
+  dev.Seed("TestVolume", 0, first);
+  dev.Seed("TestVolume", 1, second);
+  OpenForRead(dev, 2 * kChunk);
+  ASSERT_EQ(dev.read_listings, 0);
+
+  std::vector<char> block(kChunk + kChunk / 2);
+  ASSERT_EQ(dev.ReadChunked(0, block.data(), block.size()),
+            static_cast<ssize_t>(block.size()));
+  EXPECT_EQ(std::string(block.data(), block.size()),
+            std::string(first.data(), first.size())
+                + std::string(second.data(), kChunk / 2));
+  EXPECT_EQ(dev.read_listings, 0);
+
+  block.resize(kChunk / 2);
+  ASSERT_EQ(dev.ReadChunked(0, block.data(), block.size()),
+            static_cast<ssize_t>(block.size()));
+  EXPECT_EQ(block, std::vector<char>(kChunk / 2, 'b'));
+  EXPECT_EQ(dev.read_listings, 0);
+
+  EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()), 0);
+  EXPECT_EQ(dev.read_listings, 1);
+  EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()), 0);
+  EXPECT_EQ(dev.read_listings, 1);
+}
+
+TEST(chunked_device_flush, ReadOfAChunkMissingBelowTheCatalogSizeIsAnError)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  OpenForRead(dev, 2 * kChunk);
+  std::string got;
+  errno = 0;
+  EXPECT_EQ(ReadBlocks(dev, got), -1);
+  EXPECT_EQ(errno, EIO);
+  EXPECT_EQ(got.size(), kChunk);  // the bytes before the gap were delivered
+  EXPECT_TRUE(Contains(dev.errmsg,
+                       "is short: chunk 1 is missing, the catalog has "
+                       "20971520 bytes"))
+      << dev.errmsg;
+
+  // The error stays until a seek loads a chunk; no read yields stale bytes.
+  std::vector<char> block(4096);
+  errno = 0;
+  EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()), -1);
+  EXPECT_EQ(errno, EIO);
+  dev.SetOffset(0);
+  ASSERT_TRUE(dev.LoadChunk());
+  EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()),
+            static_cast<ssize_t>(block.size()));
+  EXPECT_EQ(std::string(block.data(), block.size()),
+            std::string(data.data(), block.size()));
+}
+
+TEST(chunked_device_flush, ReadOfAChunkThatExistsButFailsIsAnError)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  dev.Seed("TestVolume", 1, data);
+  OpenForRead(dev, kChunk);  // even at the catalog size: the chunk is there
+  dev.fail_reads = true;
+  std::string got;
+  EXPECT_EQ(ReadBlocks(dev, got), -1);
+  EXPECT_EQ(got.size(), kChunk);
+  EXPECT_TRUE(Contains(dev.errmsg, "Reading chunk 1 of volume TestVolume"))
+      << dev.errmsg;
+  EXPECT_TRUE(Contains(dev.errmsg, "injected read failure")) << dev.errmsg;
+}
+
+TEST(chunked_device_flush, ReadWhenTheListingFailsIsAnError)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  dev.Seed("TestVolume", 0, Pattern(kChunk));
+  OpenForRead(dev, kChunk);  // an absent chunk would be the end here
+  dev.fail_list = true;
+  std::string got;
+  EXPECT_EQ(ReadBlocks(dev, got), -1);
+  EXPECT_TRUE(Contains(dev.errmsg, "listing failed")) << dev.errmsg;
+  EXPECT_TRUE(Contains(dev.errmsg, "Reading chunk 1 of volume TestVolume"))
+      << dev.errmsg;
 }

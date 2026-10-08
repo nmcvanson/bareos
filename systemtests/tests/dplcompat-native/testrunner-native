@@ -170,7 +170,7 @@ quit
 END_OF_DATA
 run_bconsole
 
-# The SD traces every request at this level; step 7 looks for the keys in it.
+# The SD traces every request at this level; step 8 looks for the keys in it.
 cat <<END_OF_DATA >"$tmp/bconcmds"
 @$out $tmp/setdebug.log
 setdebug level=200 trace=1 storage=dplcompat
@@ -286,7 +286,32 @@ fi
 console_output "wait jobid=${cancel_jobid}" >/dev/null
 expect_termination "${cancel_jobid}" "Canceled"
 
-# 7. Neither key appears in the SD trace, the daemon logs or the job logs.
+# 7. A chunk missing below the catalog size of the volume ends a restore with
+# an error; it is not the end of the volume.
+missing_chunk="${archivedir}/TestVolume001.0001"
+if [ ! -f "${missing_chunk}" ]; then
+  set_error "chunk 1 of TestVolume001 does not exist"
+fi
+mv "${missing_chunk}" "${tmp}/TestVolume001.0001.saved"
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $tmp/restore-missing.log
+restore jobid=${first_jobid} client=bareos-fd storage=dplcompat where=${RestoreDirectory}/missing all done yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+missing_jobid=$(queued_jobid "$tmp/restore-missing.log")
+missing_joblog=$(console_output "list joblog jobid=${missing_jobid}")
+if grep -q "Termination:.*Restore OK" <<<"${missing_joblog}"; then
+  set_error "a restore with a missing chunk ended OK"
+fi
+if ! grep -q "is short: chunk 1 is missing" <<<"${missing_joblog}"; then
+  set_error "the job log does not say that chunk 1 is missing"
+fi
+mv "${tmp}/TestVolume001.0001.saved" "${missing_chunk}"
+
+# 8. Neither key appears in the SD trace, the daemon logs or the job logs.
 trace_files=$(find "${working}" -name '*.trace' -type f)
 if [ -z "${trace_files}" ] \
   || ! grep -qE '(PUT|GET|HEAD) .* -> status' ${trace_files}; then

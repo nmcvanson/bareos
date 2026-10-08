@@ -90,6 +90,33 @@ enum thread_wait_type
   WAIT_JOIN_THREAD    /* Perform a pthread_join() on exit. */
 };
 
+// Whether a chunk is in the volume's listing.
+enum class ChunkPresence
+{
+  kPresent,
+  kAbsent,
+  kUnknown  // the listing failed
+};
+
+// What the failed read of a chunk means for a restore.
+enum class ReadEnd
+{
+  kEndOfVolume,  // the volume ends before this chunk
+  kShortVolume,  // the catalog counts bytes the volume does not have
+  kReadError
+};
+
+/* A read that fails ends the volume only when the chunk is absent and starts
+ * at or after the catalog size of the volume; anything else is an error. */
+constexpr ReadEnd DecideReadEnd(ChunkPresence presence,
+                                uint64_t chunk_start,
+                                uint64_t volume_bytes)
+{
+  if (presence != ChunkPresence::kAbsent) { return ReadEnd::kReadError; }
+  return chunk_start >= volume_bytes ? ReadEnd::kEndOfVolume
+                                     : ReadEnd::kShortVolume;
+}
+
 struct thread_handle {
   thread_wait_type type; /* See WAIT_*_THREAD thread_wait_type enum */
   pthread_t thread_id;   /* Actual threadid */
@@ -266,6 +293,7 @@ class ChunkedDevice : public Device {
   ssize_t ChunkedVolumeSize();
   bool LoadChunk();
   void InvalidateCurrentChunk();
+  bool ReadEndsTheVolume();
   bool CurrentChunkNeedsFlushing();
   bool StartEmptyChunkAfterLast(const std::map<int, size_t>& chunk_sizes);
   bool WaitForPendingChunks(const std::function<bool()>& is_canceled,
@@ -284,6 +312,13 @@ class ChunkedDevice : public Device {
   // Volume size, -1 when it has no chunks, nullopt (errmsg set) on error.
   virtual std::optional<ssize_t> RemoteVolumeSize() = 0;
   virtual bool TruncateRemoteVolume(DeviceControlRecord* dcr) = 0;
+  // Whether the chunk is in a fresh listing; unknown ends a failed read as an
+  // error.
+  virtual ChunkPresence RemoteChunkPresence(int chunk)
+  {
+    (void)chunk;
+    return ChunkPresence::kUnknown;
+  }
 
  public:
   // Public Methods

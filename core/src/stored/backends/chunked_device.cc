@@ -1172,10 +1172,14 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
         if (!ReadChunk()) {
           switch (dev_errno) {
             case EIO:
-              /* If the are no more chunks to read we return only the bytes
-               * available. We also set end_of_media_ as we are at the end of
-               * media. */
-              end_of_media_ = true;
+              /* Only a chunk that is absent from the volume, at or after the
+               * catalog size, is the end of media: return the bytes available
+               * and set end_of_media_. Any other failure is an error. */
+              if (ReadEndsTheVolume()) {
+                end_of_media_ = true;
+              } else {
+                retval = -1;
+              }
               goto bail_out;
             default:
               retval = -1;
@@ -1885,6 +1889,49 @@ void ChunkedDevice::InvalidateCurrentChunk()
   current_chunk_->buflen = 0;
   current_chunk_->chunk_setup = false;
   chunk_dropped_ = true;
+}
+
+/* A fresh listing and catalog size distinguish EOF from a failed chunk read.
+ * EOF forgets the chunk position; an error reports the cause and invalidates
+ * the chunk until a seek reloads it. */
+bool ChunkedDevice::ReadEndsTheVolume()
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  const int chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  const uint64_t chunk_start
+      = static_cast<uint64_t>(chunk) * current_chunk_->chunk_size;
+  std::string read_error = MessageText(errmsg);
+  const ChunkPresence presence = RemoteChunkPresence(chunk);
+  const ReadEnd end
+      = DecideReadEnd(presence, chunk_start, VolCatInfo.VolCatBytes);
+
+  if (end == ReadEnd::kEndOfVolume) {
+    current_chunk_->start_offset = -1;
+    current_chunk_->end_offset = -1;
+    current_chunk_->buflen = 0;
+    return true;
+  }
+
+  PoolMem message(PM_MESSAGE);
+  if (end == ReadEnd::kShortVolume) {
+    Mmsg(message,
+         T_("Volume %s on device %s is short: chunk %d is missing, the "
+            "catalog has %" PRIu64 " bytes.\n"),
+         getVolCatName(), print_name(), chunk,
+         static_cast<uint64_t>(VolCatInfo.VolCatBytes));
+  } else {
+    if (presence == ChunkPresence::kUnknown) {
+      read_error += " (listing failed: " + MessageText(errmsg) + ")";
+    }
+    Mmsg(message, T_("Reading chunk %d of volume %s on device %s failed: %s\n"),
+         chunk, getVolCatName(), print_name(), read_error.c_str());
+  }
+  PmStrcpy(errmsg, message.c_str());
+  dev_errno = EIO;
+  errno = EIO;
+  Jmsg(GetJcrFromThreadSpecificData(), M_ERROR, 0, "%s", message.c_str());
+  InvalidateCurrentChunk();
+  return false;
 }
 
 /* Starts an empty chunk after the last full chunk of the volume (chunk_sizes
