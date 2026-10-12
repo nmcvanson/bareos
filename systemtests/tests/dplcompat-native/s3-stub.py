@@ -34,6 +34,8 @@ Switches (files in <control_dir>, consumed as noted):
   list503       number of LIST requests still answered with 503
   head503       number of bucket HEAD requests still answered with 503
   put-badmd5    number of PUT requests still answered with 400 BadDigest
+  get403        number of object GET requests still answered with 403 (HEAD
+                of the object is answered normally)
   put-stall     seconds every PUT waits before it is stored and answered
                 (writes the key into the file put-stalled when a PUT starts to wait)
   get-stall     seconds every GET waits before it answers
@@ -266,6 +268,9 @@ class Handler(BaseHTTPRequestHandler):
         file = self.object_file(path)
         if file is None or not os.path.isfile(file):
             self.reply(404, xml_error("NoSuchKey", "no such key"), sig=sig)
+            return
+        if self.command == "GET" and take_switch("get403"):
+            self.reply(403, xml_error("AccessDenied", "denied"), sig=sig)
             return
         stall = switch_value("get-stall")
         if stall and self.command == "GET":

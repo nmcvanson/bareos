@@ -449,33 +449,67 @@ bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
   utl::Dfmt(debug_trace, FMT_STRING("Reading chunk {}/{}"), obj_name.data(),
             obj_chunk.data());
 
-  // check object metadata
-  auto obj_stat = m_storage->stat(obj_name, obj_chunk);
-  if (!obj_stat) {
-    PmStrcpy(errmsg, obj_stat.error().message.c_str());
+  auto fail = [this, request](int error, const std::string& message) {
+    PmStrcpy(errmsg, message.c_str());
     Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EIO;
+    dev_errno = error;
+    // A deferred label GET must not become VOL_NO_LABEL and autolabel a
+    // healthy existing volume. The mount's failed-job guards stop that path.
+    const bool writer_open
+        = request->read_mode == ChunkReadMode::kMetadata && request->for_write;
+    if ((request->read_mode == ChunkReadMode::kRange || writer_open)
+        && error != ENOENT) {
+      FailWriter(errmsg);
+    }
     return false;
-  } else if (obj_stat->size > request->wbuflen) {
+  };
+
+  size_t object_size = request->object_size;
+  if (request->read_mode != ChunkReadMode::kRange) {
+    auto stat = m_storage->stat(obj_name, obj_chunk);
+    if (!stat) {
+      const int error = request->read_mode == ChunkReadMode::kMetadata
+                                && stat.error().code == StoreErrc::kNotFound
+                            ? ENOENT
+                            : EIO;
+      return fail(error, stat.error().message);
+    }
+    object_size = stat->size;
+  }
+  if (object_size > request->wbuflen) {
     Mmsg3(errmsg,
           T_("Failed to read %s (%zu) to big to fit in chunksize of %" PRIu32
              " bytes\n"),
-          obj_name.data(), obj_stat->size, request->wbuflen);
-    Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EINVAL;
-    return false;
+          obj_name.data(), object_size, request->wbuflen);
+    return fail(EINVAL, std::string{errmsg});
+  }
+  if (request->read_mode == ChunkReadMode::kMetadata) {
+    *request->rbuflen = object_size;
+    return true;
   }
 
-  if (auto obj_data
-      = m_storage->download(obj_name, obj_chunk,
-                            {request->buffer, obj_stat->size}, std::nullopt)) {
+  size_t begin = 0, length = object_size;
+  std::optional<ByteRange> range;
+  if (request->read_mode == ChunkReadMode::kRange) {
+    begin = request->read_offset;
+    length = request->read_length;
+    if (begin > object_size || length > object_size - begin || length == 0) {
+      return fail(EINVAL, "Invalid chunk read range");
+    }
+    range = ByteRange{begin, length};
+  }
+
+  if (auto obj_data = m_storage->download(
+          obj_name, obj_chunk, {request->buffer + begin, length}, range)) {
+    if (SupportsPartialRead() && obj_data->size_bytes() != length) {
+      return fail(EIO, "Chunk download is shorter than its metadata range");
+    }
     *request->rbuflen = obj_data->size_bytes();
     return true;
   } else {
-    PmStrcpy(errmsg, obj_data.error().message.c_str());
-    Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EIO;
-    return false;
+    // A range was requested only after successful metadata: even a GET 404
+    // is an error here, not an empty object or permission to create one.
+    return fail(EIO, obj_data.error().message);
   }
 }
 
@@ -630,7 +664,7 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
       return refuse(EINVAL);
   }
 
-  if (!LoadChunk()) {
+  if (!LoadChunk(whence == SEEK_END)) {
     // A volume that ends after a full chunk has no chunk at its end yet.
     if (whence != SEEK_END || offset != 0) { return refuse(EIO); }
     // Chunks of this daemon that are still being uploaded are not listed yet.
@@ -639,16 +673,31 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
       PmStrcpy(errmsg, reason.c_str());
       return refuse(EIO);
     }
+    // The end of a volume that cannot be read must fail the job: the mount
+    // would otherwise mark the healthy volume Error.
+    auto refuse_end = [this, &refuse] {
+      if (SupportsPartialRead()) {
+        PoolMem message(PM_MESSAGE);
+        Mmsg(message, T_("Cannot read the end of volume %s on device %s: %s\n"),
+             getVolCatName(), print_name(), errmsg);
+        FailWriter(message.c_str());
+      }
+      return refuse(EIO);
+    };
     // A chunk in transit was missing from the size: size again, load the end.
     const ssize_t waited_size = ChunkedVolumeSize();
-    if (waited_size < 0) { return refuse(EIO); }
+    if (waited_size < 0) { return refuse_end(); }
     const bool moved = waited_size != offset_;
     offset_ = waited_size;
     // The failed load left the chunk position on the old end: load afresh.
     if (moved) { InvalidateCurrentChunk(); }
-    if (!(moved && LoadChunk())) {
+    if (!(moved && LoadChunk(true))) {
       const auto sizes = ListChunkSizes();
-      if (!sizes || !StartEmptyChunkAfterLast(*sizes)) { return refuse(EIO); }
+      if (!sizes) { return refuse_end(); }
+      if (!StartEmptyChunkAfterLast(*sizes)) {
+        // A damaged layout keeps the volume-Error handling of the mount.
+        return LayoutIsHealthy(*sizes) ? refuse_end() : refuse(EIO);
+      }
     }
   }
 

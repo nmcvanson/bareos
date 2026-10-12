@@ -50,6 +50,8 @@ class DropletCompatibleDevice : public ChunkedDevice {
   bool CheckRemoteConnection() override;
   bool FlushRemoteChunk(chunk_io_request* request) override;
   bool ReadRemoteChunk(chunk_io_request* request) override;
+  bool SupportsPartialRead() const override
+  { return m_storage->supports_range_download(); }
   std::optional<ssize_t> RemoteVolumeSize() override;
   std::optional<std::map<int, size_t>> ListChunkSizes();
   ChunkPresence RemoteChunkPresence(int chunk) override;

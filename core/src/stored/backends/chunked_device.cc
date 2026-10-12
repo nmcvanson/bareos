@@ -42,7 +42,9 @@
 #include "stored/stored_globals.h"
 #include "lib/thread_specific_data.h"
 
+#include <algorithm>
 #include <chrono>
+#include <new>
 #include <vector>
 
 namespace storagedaemon {
@@ -406,8 +408,8 @@ EnqueueResult ChunkedDevice::EnqueueChunk(chunk_io_request* request,
     }
   }
 
-  new_request = (chunk_io_request*)malloc(sizeof(chunk_io_request));
-  memset(new_request, 0, sizeof(chunk_io_request));
+  // Value-initialized in malloc memory: the request is released with free().
+  new_request = new (malloc(sizeof(chunk_io_request))) chunk_io_request{};
   new_request->volname = strdup(request->volname);
   new_request->chunk = request->chunk;
   new_request->buffer = request->buffer;
@@ -915,6 +917,8 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
     current_chunk_->end_offset
         = current_chunk_->start_offset + (current_chunk_->chunk_size - 1);
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
   } else {
     // If we enqueued the data we need to allocate a new buffer.
     if (release_chunk && io_threads_) { current_chunk_->buffer = NULL; }
@@ -954,9 +958,9 @@ bool ChunkedDevice::FlushChunkCopy(std::string& refusal)
 }
 
 // Internal method for reading a chunk from the backing store.
-bool ChunkedDevice::ReadChunk()
+bool ChunkedDevice::ReadChunk(bool full)
 {
-  chunk_io_request request;
+  chunk_io_request request{};
 
   // Calculate in which chunk we are currently.
   request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
@@ -965,6 +969,12 @@ bool ChunkedDevice::ReadChunk()
   request.wbuflen = current_chunk_->chunk_size;
   request.rbuflen = &current_chunk_->buflen;
   request.release = false;
+  request.for_write = current_chunk_->writing;
+  if (!full && SupportsPartialRead()) {
+    request.read_mode = ChunkReadMode::kMetadata;
+  }
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
 
   current_chunk_->end_offset
       = current_chunk_->start_offset + (current_chunk_->chunk_size - 1);
@@ -975,6 +985,66 @@ bool ChunkedDevice::ReadChunk()
     return false;
   }
 
+  if (request.read_mode == ChunkReadMode::kFull) {
+    current_chunk_->loaded_end = current_chunk_->buflen;
+  }
+
+  return true;
+}
+
+// Only covered bytes may be copied. Sequential reading promotes a small first
+// range to the rest of the chunk once; seeking uses one replacement interval.
+bool ChunkedDevice::EnsureChunkBytes(size_t offset, size_t count, bool full)
+{
+  if (full) {
+    offset = 0;
+    count = current_chunk_->buflen;
+  }
+  if (count == 0) { return true; }
+  if (offset >= current_chunk_->buflen) {
+    dev_errno = EIO;
+    errno = EIO;
+    return false;
+  }
+  count = std::min(count, size_t{current_chunk_->buflen} - offset);
+  if (current_chunk_->loaded_begin <= offset
+      && current_chunk_->loaded_end >= offset + count) {
+    return true;
+  }
+  if (!SupportsPartialRead()) { return false; }
+
+  size_t begin = offset;
+  size_t end = std::min(
+      size_t{current_chunk_->buflen},
+      offset
+          + std::max(count, size_t{max_block_size ? max_block_size
+                                                  : DEFAULT_BLOCK_SIZE}));
+  const bool sequential = !full && current_chunk_->loaded_end > 0
+                          && offset >= current_chunk_->loaded_begin
+                          && offset <= current_chunk_->loaded_end;
+  if (sequential) {
+    begin = current_chunk_->loaded_end;
+    end = current_chunk_->buflen;
+  }
+  uint32_t received{};
+  chunk_io_request request{};
+  request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  request.volname = current_volname_;
+  request.buffer = current_chunk_->buffer;
+  request.wbuflen = current_chunk_->chunk_size;
+  request.rbuflen = &received;
+  request.read_mode = ChunkReadMode::kRange;
+  request.read_offset = begin;
+  request.read_length = end - begin;
+  request.object_size = current_chunk_->buflen;
+  if (!ReadRemoteChunk(&request) || received != end - begin) {
+    dev_errno = EIO;
+    errno = EIO;
+    InvalidateCurrentChunk();
+    return false;
+  }
+  if (!sequential) { current_chunk_->loaded_begin = begin; }
+  current_chunk_->loaded_end = end;
   return true;
 }
 
@@ -1031,6 +1101,8 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
     current_chunk_->buflen = 0;
     current_chunk_->start_offset = -1;
     current_chunk_->end_offset = -1;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
   }
 
   if (flags & O_RDWR) { current_chunk_->writing = true; }
@@ -1063,12 +1135,25 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
   if (LoadChunk()) {
     current_chunk_->opened = true;
     retval = 0;
-  } else if (flags & O_CREAT) {
+  } else if ((flags & O_CREAT)
+             && (!SupportsPartialRead() || dev_errno == ENOENT)) {
     /* create a chunk */
     if (FlushChunk(false /* release */, false /* move_to_next_chunk */)) {
       current_chunk_->opened = true;
       retval = 0;
     }
+  }
+
+  /* A failed open of a device nobody else has open leaves nothing behind:
+   * the next open loads its chunk again and a reader is not a writer. */
+  if (retval != 0 && !current_chunk_->opened) {
+    current_chunk_->writing = false;
+    current_chunk_->chunk_setup = false;
+    current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
+    current_chunk_->start_offset = -1;
+    current_chunk_->end_offset = -1;
   }
 
   return retval;
@@ -1132,6 +1217,10 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
       }
 
       if (bytes_left > 0) {
+        if (!EnsureChunkBytes(wanted_offset, bytes_left)) {
+          retval = -1;
+          goto bail_out;
+        }
         memcpy(buffer, current_chunk_->buffer + wanted_offset, bytes_left);
       }
       offset_ += bytes_left;
@@ -1153,6 +1242,10 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
                            ((ssize_t)current_chunk_->buflen - wanted_offset));
 
           if (bytes_left > 0) {
+            if (!EnsureChunkBytes(wanted_offset, bytes_left)) {
+              retval = -1;
+              goto bail_out;
+            }
             Dmsg2(
                 200,
                 "Reading %zd bytes of %zu byte read-request from end of chunk "
@@ -1167,11 +1260,18 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
           }
         }
 
-        // Read in the next chunk.
+        // A complete sequential chunk is followed by one full GET, rather
+        // than another small range and suffix. A partial/random read keeps
+        // the next chunk lazy so a short restore does not over-read it.
+        const bool full_chunk
+            = current_chunk_->loaded_begin == 0
+              && size_t{current_chunk_->loaded_end}
+                     == static_cast<size_t>(current_chunk_->chunk_size);
         current_chunk_->start_offset += current_chunk_->chunk_size;
-        if (!ReadChunk()) {
+        if (!ReadChunk(full_chunk)) {
           switch (dev_errno) {
             case EIO:
+            case ENOENT:
               /* Only a chunk that is absent from the volume, at or after the
                * catalog size, is the end of media: return the bytes available
                * and set end_of_media_. Any other failure is an error. */
@@ -1192,6 +1292,10 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
               = MIN(((ssize_t)count - offset), (ssize_t)current_chunk_->buflen);
 
           if (bytes_left > 0) {
+            if (!EnsureChunkBytes(0, bytes_left)) {
+              retval = -1;
+              goto bail_out;
+            }
             Dmsg2(200,
                   "Reading %" PRIiz " bytes of %" PRIuz
                   " byte read-request from next chunk\n",
@@ -1253,12 +1357,21 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
       current_chunk_->start_offset = 0;
       current_chunk_->end_offset = (current_chunk_->chunk_size - 1);
       current_chunk_->buflen = 0;
+      current_chunk_->loaded_begin = 0;
+      current_chunk_->loaded_end = 0;
       current_chunk_->chunk_setup = true;
 
       // See if we have to allocate a new buffer.
       if (!current_chunk_->buffer) {
         current_chunk_->buffer = allocate_chunkbuffer();
       }
+    }
+
+    // A label/seek may have loaded only part of an existing native object.
+    // Preserve all of its old bytes before the first modification.
+    if (!EnsureChunkBytes(0, current_chunk_->buflen, true)) {
+      retval = -1;
+      goto bail_out;
     }
 
     // See if we can write the whole data inside the current chunk.
@@ -1277,6 +1390,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
       if ((wanted_offset + count) > current_chunk_->buflen) {
         current_chunk_->buflen = wanted_offset + count;
       }
+      current_chunk_->loaded_begin = 0;
+      current_chunk_->loaded_end = current_chunk_->buflen;
       current_chunk_->need_flushing = true;
       retval = count;
     } else {
@@ -1311,6 +1426,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
                 > (ssize_t)current_chunk_->buflen) {
               current_chunk_->buflen = wanted_offset + bytes_left;
             }
+            current_chunk_->loaded_begin = 0;
+            current_chunk_->loaded_end = current_chunk_->buflen;
             current_chunk_->need_flushing = true;
             offset += bytes_left;
             retval += bytes_left;
@@ -1339,6 +1456,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
 
           memcpy(current_chunk_->buffer, ((char*)buffer + offset), bytes_left);
           current_chunk_->buflen = bytes_left;
+          current_chunk_->loaded_begin = 0;
+          current_chunk_->loaded_end = current_chunk_->buflen;
           current_chunk_->need_flushing = true;
           offset_ += bytes_left;
           offset += bytes_left;
@@ -1389,6 +1508,8 @@ int ChunkedDevice::CloseChunk()
     current_chunk_->opened = false;
     current_chunk_->chunk_setup = false;
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->start_offset = -1;
     current_chunk_->end_offset = -1;
   } else {
@@ -1422,6 +1543,8 @@ bool ChunkedDevice::TruncateChunkedVolume(DeviceControlRecord* dcr)
     current_chunk_->start_offset = 0;
     current_chunk_->end_offset = (current_chunk_->chunk_size - 1);
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->chunk_setup = true;
     current_chunk_->need_flushing = false;
 
@@ -1769,7 +1892,7 @@ static int CloneIoRequest(void* item1, void* item2)
 }
 
 // Make sure we have the right chunk in memory.
-bool ChunkedDevice::LoadChunk()
+bool ChunkedDevice::LoadChunk(bool full)
 {
   boffset_t start_offset;
   std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
@@ -1784,7 +1907,12 @@ bool ChunkedDevice::LoadChunk()
 
   // If the wrong chunk is loaded populate the chunk buffer with the right data.
   if (start_offset != current_chunk_->start_offset) {
+    // The switch drops the dirty data; its flag must not flush the next
+    // chunk, which may be loaded only in part.
+    current_chunk_->need_flushing = false;
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->start_offset = start_offset;
 
     /* See if we are using io-threads or not and the ordered CircularBuffer is
@@ -1792,7 +1920,7 @@ bool ChunkedDevice::LoadChunk()
      * is still inflight as then the ReadChunk() method will fail to read the
      * data as its not stored on the backing store yet. */
     if (io_threads_ > 0 && cb_) {
-      chunk_io_request request;
+      chunk_io_request request{};
 
       request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
       request.volname = current_volname_;
@@ -1812,6 +1940,7 @@ bool ChunkedDevice::LoadChunk()
               == &request) {
             current_chunk_->end_offset
                 = start_offset + (current_chunk_->chunk_size - 1);
+            current_chunk_->loaded_end = current_chunk_->buflen;
             goto bail_out;
           }
         }
@@ -1849,7 +1978,7 @@ bool ChunkedDevice::LoadChunk()
     }
 
     // Read the chunk from the backing store.
-    if (!ReadChunk()) {
+    if (!ReadChunk(full)) {
       switch (dev_errno) {
         case EIO:
           if (current_chunk_->writing) {
@@ -1865,6 +1994,9 @@ bool ChunkedDevice::LoadChunk()
   }
 
 bail_out:
+  if (full && !EnsureChunkBytes(0, current_chunk_->buflen, true)) {
+    return false;
+  }
   current_chunk_->chunk_setup = true;
   chunk_dropped_ = false;
 
@@ -1887,6 +2019,8 @@ void ChunkedDevice::InvalidateCurrentChunk()
   current_chunk_->start_offset = -1;
   current_chunk_->end_offset = -1;
   current_chunk_->buflen = 0;
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
   current_chunk_->chunk_setup = false;
   chunk_dropped_ = true;
 }
@@ -1909,6 +2043,8 @@ bool ChunkedDevice::ReadEndsTheVolume()
     current_chunk_->start_offset = -1;
     current_chunk_->end_offset = -1;
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     return true;
   }
 
@@ -1932,6 +2068,23 @@ bool ChunkedDevice::ReadEndsTheVolume()
   Jmsg(GetJcrFromThreadSpecificData(), M_ERROR, 0, "%s", message.c_str());
   InvalidateCurrentChunk();
   return false;
+}
+
+/* Whether the listing has the layout of a healthy volume: chunks 0..N in a
+ * row, every one but the last of them full. */
+bool ChunkedDevice::LayoutIsHealthy(const std::map<int, size_t>& chunk_sizes)
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  if (!current_chunk_) { return false; }
+  const size_t full = static_cast<size_t>(current_chunk_->chunk_size);
+  int expected = 0;
+  size_t seen = 0;
+  for (const auto& [number, size] : chunk_sizes) {
+    ++seen;
+    if (number != expected++ || size > full) { return false; }
+    if (seen < chunk_sizes.size() && size != full) { return false; }
+  }
+  return true;
 }
 
 /* Starts an empty chunk after the last full chunk of the volume (chunk_sizes
@@ -1968,6 +2121,8 @@ bool ChunkedDevice::StartEmptyChunkAfterLast(
   current_chunk_->start_offset = offset_;
   current_chunk_->end_offset = offset_ + (current_chunk_->chunk_size - 1);
   current_chunk_->buflen = 0;
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
   current_chunk_->chunk_setup = true;
   chunk_dropped_ = false;
   return true;

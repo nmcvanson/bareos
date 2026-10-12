@@ -40,6 +40,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -122,6 +123,14 @@ struct thread_handle {
   pthread_t thread_id;   /* Actual threadid */
 };
 
+// Upload requests are zero-initialized; their unused read mode stays Full.
+enum class ChunkReadMode
+{
+  kFull = 0,
+  kMetadata,
+  kRange
+};
+
 struct chunk_io_request {
   const char* volname; /* VolumeName */
   uint16_t chunk;      /* Chunk number */
@@ -133,12 +142,21 @@ struct chunk_io_request {
   int64_t retry_at_ms; /* Steady clock time (ms) before which no retry */
   bool lease_conflict; /* Set by FlushRemoteChunk: chunk is being uploaded */
   bool canceled;       /* Set by FlushRemoteChunk: the job was canceled */
+  ChunkReadMode read_mode{ChunkReadMode::kFull};
+  uint32_t read_offset{};
+  uint32_t read_length{};
+  uint32_t object_size{};  // known metadata size for a ranged read
+  bool for_write{};        // the device is open for writing
 };
+
+static_assert(std::is_trivially_copyable_v<chunk_io_request>);
 
 struct chunk_descriptor {
   ssize_t chunk_size;     /* Total size of the memory chunk */
   char* buffer;           /* Data */
-  uint32_t buflen;        /* Size of the actual valid data in the chunk */
+  uint32_t buflen;        /* Object size; loaded bytes may cover only a range */
+  uint32_t loaded_begin;  // valid bytes [loaded_begin, loaded_end) in buffer
+  uint32_t loaded_end;
   boffset_t start_offset; /* Start offset of the current chunk */
   boffset_t end_offset;   /* End offset of the current chunk */
   bool need_flushing; /* Data is dirty and needs flushing to backing store */
@@ -251,7 +269,8 @@ class ChunkedDevice : public Device {
   bool RequeueChunk(chunk_io_request* request);
   bool FlushChunk(bool release_chunk, bool move_to_next_chunk);
   bool FlushChunkCopy(std::string& refusal);
-  bool ReadChunk();
+  bool ReadChunk(bool full = false);
+  bool EnsureChunkBytes(size_t offset, size_t count, bool full = false);
   bool is_written();
   void NotifyUploadEvent(bool uploaded, const std::string& error);
   void SetLastError(const std::string& error);
@@ -291,11 +310,12 @@ class ChunkedDevice : public Device {
   int CloseChunk();
   bool TruncateChunkedVolume(DeviceControlRecord* dcr);
   ssize_t ChunkedVolumeSize();
-  bool LoadChunk();
+  bool LoadChunk(bool full = false);
   void InvalidateCurrentChunk();
   bool ReadEndsTheVolume();
   bool CurrentChunkNeedsFlushing();
   bool StartEmptyChunkAfterLast(const std::map<int, size_t>& chunk_sizes);
+  bool LayoutIsHealthy(const std::map<int, size_t>& chunk_sizes);
   bool WaitForPendingChunks(const std::function<bool()>& is_canceled,
                             std::string& reason);
   bool WaitUntilChunksWritten(const std::function<bool()>& is_canceled,
@@ -309,6 +329,7 @@ class ChunkedDevice : public Device {
   virtual bool CheckRemoteConnection() = 0;
   virtual bool FlushRemoteChunk(chunk_io_request* request) = 0;
   virtual bool ReadRemoteChunk(chunk_io_request* request) = 0;
+  virtual bool SupportsPartialRead() const { return false; }
   // Volume size, -1 when it has no chunks, nullopt (errmsg set) on error.
   virtual std::optional<ssize_t> RemoteVolumeSize() = 0;
   virtual bool TruncateRemoteVolume(DeviceControlRecord* dcr) = 0;
