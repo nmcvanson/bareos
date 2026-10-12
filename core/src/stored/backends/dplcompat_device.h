@@ -52,12 +52,25 @@ class DropletCompatibleDevice : public ChunkedDevice {
   bool ReadRemoteChunk(chunk_io_request* request) override;
   bool SupportsPartialRead() const override
   { return m_storage->supports_range_download(); }
+  uint64_t TransportRetries() const override
+  { return m_storage->transport_retries(); }
+  bool SupportsReadAhead() const override
+  { return m_storage->supports_range_download(); }
+  bool ReadAheadFetch(const char* volname,
+                      uint16_t chunk,
+                      char* buffer,
+                      uint32_t size,
+                      uint32_t* received,
+                      std::string* error) override;
   std::optional<ssize_t> RemoteVolumeSize() override;
   std::optional<std::map<int, size_t>> ListChunkSizes();
   ChunkPresence RemoteChunkPresence(int chunk) override;
   bool TruncateRemoteVolume(DeviceControlRecord* dcr) override;
 
  public:
+  // The read-ahead workers use the transport: they end before it is destroyed.
+  ~DropletCompatibleDevice() override { StopReadAhead(); }
+
   // Interface from Device
   bool setup() override;
   SeekMode GetSeekMode() const override { return SeekMode::BYTES; }

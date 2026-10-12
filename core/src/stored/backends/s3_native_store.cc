@@ -34,6 +34,7 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
+#include "stored/backends/hard_stop.h"
 #include "stored/backends/s3_xml.h"
 #include "stored/backends/s3cfg_reader.h"
 #include "stored/backends/util.h"
@@ -273,6 +274,8 @@ struct ProgressState {
   bool stalled{false};
   // Ends the transfer when it returns true (the job was canceled).
   const std::function<bool()>* abort_check{nullptr};
+  // Ends the transfer at once, even while bytes move (speculative reads).
+  const std::atomic<bool>* hard_stop{nullptr};
   curl_off_t upload_size{0};
   std::chrono::milliseconds reply_grace{0};
   bool canceled{false};
@@ -285,6 +288,10 @@ int ProgressCallback(void* userdata,
                      curl_off_t uploaded)
 {
   auto* ps = static_cast<ProgressState*>(userdata);
+  if (ps->hard_stop && ps->hard_stop->load()) {
+    ps->canceled = true;
+    return 1;
+  }
   auto now = std::chrono::steady_clock::now();
   curl_off_t moved = downloaded + uploaded;
   const bool idle = moved == ps->last_bytes;
@@ -555,6 +562,7 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::PerformOnce(
   ProgressState progress_state;
   progress_state.limit = m_options.stall_timeout;
   progress_state.abort_check = &m_abort_check;
+  progress_state.hard_stop = storagedaemon::tls_hard_stop;
   progress_state.upload_size
       = request.upload ? static_cast<curl_off_t>(request.upload_size) : 0;
   progress_state.reply_grace = std::min<std::chrono::milliseconds>(
@@ -696,7 +704,11 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::Execute(
 {
   StoreError last{StoreErrc::kTransient, "no attempt made"};
   const int attempts = m_options.request_retries + 1;
-  auto canceled = [this] { return m_abort_check && m_abort_check(); };
+  auto canceled = [this] {
+    return (storagedaemon::tls_hard_stop
+            && storagedaemon::tls_hard_stop->load())
+           || (m_abort_check && m_abort_check());
+  };
   for (int attempt = 0; attempt < attempts; ++attempt) {
     if (attempt > 0) {
       // The pause is taken in short slices so that a cancel ends it early.
@@ -720,6 +732,7 @@ tl::expected<S3NativeStore::Reply, StoreError> S3NativeStore::Execute(
       case Outcome::kFail:
         return tl::unexpected(std::move(err));
       case Outcome::kRetry:
+        ++m_retries;
         utl::Dfmt(debug_info, FMT_STRING("{} {} attempt {} failed: {}"),
                   request.method, request.key, attempt + 1, err.message);
         last = std::move(err);

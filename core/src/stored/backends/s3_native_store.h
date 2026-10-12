@@ -71,6 +71,7 @@ class S3NativeStore final : public ObjectStore {
 
   // HTTP requests sent so far, retries included.
   uint64_t requests_sent() const { return m_requests_sent; }
+  uint64_t transport_retries() const override { return m_retries; }
   // Pause before the first retry, doubled for each further one (for tests).
   void set_retry_base(std::chrono::milliseconds base) { m_retry_base = base; }
   // How long a canceled job waits for the reply of a fully sent upload.
@@ -122,6 +123,7 @@ class S3NativeStore final : public ObjectStore {
   std::chrono::milliseconds m_retry_base{1000};
   std::chrono::milliseconds m_abort_reply_grace{kAbortReplyGrace};
   std::atomic<uint64_t> m_requests_sent{0};
+  std::atomic<uint64_t> m_retries{0};
   std::unique_ptr<HandlePool> m_pool;
 };
 

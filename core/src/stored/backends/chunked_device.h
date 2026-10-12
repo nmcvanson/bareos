@@ -37,9 +37,11 @@
 #include <functional>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -196,6 +198,29 @@ struct UploadState {
   int64_t outcome_ms{};       // steady clock of the last finished try, 0 = none
   bool outcome_ok{};          // whether that try uploaded
   std::string outcome_error;  // why it failed
+  // Counters since the daemon started, shown by the status.
+  uint64_t received_chunks{};  // chunks handed to the upload path
+  uint64_t uploaded_chunks{};  // uploaded chunks that hold data
+  uint64_t uploaded_bytes{};   // bytes of the uploaded chunks
+  uint64_t failed_tries{};     // upload tries that failed
+  uint64_t retried_tries{};    // upload tries that were not the first
+};
+
+/* One speculative read of a chunk after the current one of a read-only volume.
+ * Its worker fills buffer and reports by value; it never touches the device. */
+struct ReadAheadSlot {
+  std::string volname;
+  uint16_t chunk{};
+  char* buffer{};
+  uint32_t size{};  // capacity of buffer
+  std::atomic<bool> stop{false};
+  std::mutex mutex;
+  std::condition_variable finished_cv;
+  bool finished{};  // guarded by mutex
+  bool ok{};
+  uint32_t received{};
+  std::string error;
+  std::thread worker;
 };
 
 class ChunkedDevice : public Device {
@@ -251,6 +276,14 @@ class ChunkedDevice : public Device {
   UploadState upload_state_;
   // Requests per volume that are queued or held by an io-thread.
   std::map<std::string, int> pending_requests_;
+  // Per pending chunk: how many requests and when the first was counted.
+  std::map<std::pair<std::string, uint16_t>, std::pair<int, int64_t>>
+      pending_since_;
+  // Whole-object and ranged GETs made by the job thread and the read-ahead
+  // workers; shown by the status.
+  std::atomic<uint64_t> download_objects_{};
+  std::atomic<uint64_t> download_bytes_{};
+  std::atomic<uint64_t> download_failures_{};
 
   // Chunks of blocking uploads still to be uploaded; guarded by kept_mutex_.
   std::mutex kept_mutex_;
@@ -260,7 +293,16 @@ class ChunkedDevice : public Device {
   // until a seek loads a chunk or the device is opened again.
   std::atomic<bool> chunk_dropped_{};
 
+  // Speculative reads ahead of a sequential restore; used by the job thread
+  // under chunk_mutex_ only. At most kReadAheadChunks buffers are in use.
+  static constexpr size_t kReadAheadChunks = 2;
+  std::vector<std::unique_ptr<ReadAheadSlot>> read_ahead_;
+
   // Private Methods
+  bool TakeReadAhead(uint16_t chunk);
+  void TopUpReadAhead();
+  std::vector<std::unique_ptr<ReadAheadSlot>>::iterator EraseReadAhead(
+      std::vector<std::unique_ptr<ReadAheadSlot>>::iterator it);
   char* allocate_chunkbuffer();
   void FreeChunkbuffer(char* buffer);
   void FreeChunkIoRequest(chunk_io_request* request);
@@ -272,12 +314,17 @@ class ChunkedDevice : public Device {
   bool ReadChunk(bool full = false);
   bool EnsureChunkBytes(size_t offset, size_t count, bool full = false);
   bool is_written();
-  void NotifyUploadEvent(bool uploaded, const std::string& error);
+  void NotifyUploadEvent(bool uploaded,
+                         const std::string& error,
+                         size_t bytes = 0,
+                         bool retry = false);
   void SetLastError(const std::string& error);
   void SetReadonly(const std::string& reason);
   void ClearReadonlyIfDrained();
   UploadState GetUploadState();
-  void CountPendingRequest(const char* volname, int change);
+  void CountPendingRequest(const char* volname, uint16_t chunk, int change);
+  void CountReceivedChunk(size_t bytes);
+  int64_t OldestPendingMs();
   int PendingChunksOfVolume(const char* volname);
   void KeepCurrentChunk(bool failed, const std::string& error);
   bool UploadKeptChunk(std::list<KeptChunk>::iterator entry);
@@ -312,6 +359,9 @@ class ChunkedDevice : public Device {
   ssize_t ChunkedVolumeSize();
   bool LoadChunk(bool full = false);
   void InvalidateCurrentChunk();
+  // Ends every speculative read and waits for its worker; also called by a
+  // derived class before the transport is destroyed.
+  void StopReadAhead();
   bool ReadEndsTheVolume();
   bool CurrentChunkNeedsFlushing();
   bool StartEmptyChunkAfterLast(const std::map<int, size_t>& chunk_sizes);
@@ -330,6 +380,27 @@ class ChunkedDevice : public Device {
   virtual bool FlushRemoteChunk(chunk_io_request* request) = 0;
   virtual bool ReadRemoteChunk(chunk_io_request* request) = 0;
   virtual bool SupportsPartialRead() const { return false; }
+  // Requests the transport retried since the daemon started, for the status.
+  virtual uint64_t TransportRetries() const { return 0; }
+  // Whether ReadAheadFetch may run on a worker thread.
+  virtual bool SupportsReadAhead() const { return false; }
+  /* Downloads the whole chunk into buffer on a worker thread; it must not
+   * touch the device state and must end when its stop flag is set. */
+  virtual bool ReadAheadFetch(const char* volname,
+                              uint16_t chunk,
+                              char* buffer,
+                              uint32_t size,
+                              uint32_t* received,
+                              std::string* error)
+  {
+    (void)volname;
+    (void)chunk;
+    (void)buffer;
+    (void)size;
+    (void)received;
+    (void)error;
+    return false;
+  }
   // Volume size, -1 when it has no chunks, nullopt (errmsg set) on error.
   virtual std::optional<ssize_t> RemoteVolumeSize() = 0;
   virtual bool TruncateRemoteVolume(DeviceControlRecord* dcr) = 0;

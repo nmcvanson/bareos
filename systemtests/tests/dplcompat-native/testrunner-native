@@ -324,6 +324,13 @@ if ! grep -q "Kept chunks waiting for upload" <<<"${sd_status}" \
   || ! grep -q "/SyncVolume001/0000" <<<"${sd_status}"; then
   set_error "the canceled chunk is not listed as kept"
 fi
+# The status counts it as pending and kept, with its age, from memory.
+printf '%s\n' "${sd_status}" >"$tmp/status-sync.log"
+if ! grep -qE 'Chunks: received [1-9][0-9]*, uploaded [0-9]+, pending 1 \(queued 0, uploading 0, kept 1\)' \
+  <<<"${sd_status}" \
+  || ! grep -q 'oldest pending' <<<"${sd_status}"; then
+  set_error "the status does not show the kept chunk as pending with an age"
+fi
 console_output "wait jobid=${cancel_jobid}" >/dev/null
 expect_termination "${cancel_jobid}" "Canceled"
 
@@ -395,6 +402,42 @@ fi
 backup_to dplcompat
 restore_from "${backup_jobid}" dplcompat
 restore_from "${first_jobid}" dplcompat
+
+# 8b. After the outages and the recovery the status of the device shows its
+# transfer counters; the devices of both transports are listed separately.
+native_status=$(console_output "status storage=dplcompat")
+printf '%s\n' "${native_status}" >"$tmp/status-native.log"
+status_number()
+{
+  local value
+  value=$(sed -n -e "s/.*$1 \([0-9][0-9]*\).*/\1/p" <<<"${native_status}" \
+    | head -n 1)
+  echo "${value:-0}"
+}
+if (($(status_number 'Upload:') < 3)); then
+  set_error "the status shows fewer than 3 uploaded chunks"
+fi
+if (($(status_number 'Download:') < 1)); then
+  set_error "the status shows no download request"
+fi
+if (($(status_number 'failed tries') < 1)) && (($(status_number 'transport retries') < 1)); then
+  set_error "the status shows neither a failed try nor a transport retry"
+fi
+if (($(status_number 'transport retries') < 2)); then
+  set_error "the status shows fewer transport retries than injected"
+fi
+if (($(status_number 'bytes, failed') < 1)); then
+  set_error "the status does not count the failed download of the missing chunk"
+fi
+if ! grep -qE 'pending 0 \(queued 0, uploading 0, kept 0\)' <<<"${native_status}"; then
+  set_error "the status shows pending chunks after the recovery"
+fi
+program_status=$(console_output "status storage=dplcompat-program")
+printf '%s\n' "${program_status}" >"$tmp/status-program.log"
+if ! grep -q 'Chunks: received' <<<"${program_status}" \
+  || ! grep -q 'transport retries 0' <<<"${program_status}"; then
+  set_error "the program transport device shows no counters or native retries"
+fi
 
 # 9. Neither key appears in the SD trace, the daemon logs or the job logs.
 trace_files=$(find "${working}" -name '*.trace' -type f)

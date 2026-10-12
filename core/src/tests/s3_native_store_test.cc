@@ -25,6 +25,7 @@
 #include "gtest/gtest.h"
 #include "include/bareos.h"
 
+#include "stored/backends/hard_stop.h"
 #include "stored/backends/s3_native_store.h"
 #include "stored/backends/s3_sigv4.h"
 
@@ -1499,6 +1500,88 @@ TEST_F(s3_native, CancelEndsTheRetryPause)
   EXPECT_EQ(r.error().code, StoreErrc::kCanceled);
   EXPECT_LT(took, 2500ms);
   EXPECT_EQ(store->requests_sent(), 1u);
+}
+
+// A thread that sets the hard stop ends even a transfer that keeps moving.
+TEST_F(s3_native, HardStopEndsADownloadThatIsStillMoving)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.body = "abcdefghij";
+    r.drip_ms = 500;  // 5 s in total
+    return r;
+  });
+  auto store = Store(server, false, {{"request_retries", "3"}});
+  std::atomic<bool> stop{false};
+  std::atomic<bool> unrelated_canceled{false};
+  store->set_abort_check(
+      [&unrelated_canceled] { return unrelated_canceled.load(); });
+  std::vector<char> buffer(64);
+  auto stopper = CancelAfter(stop, 300ms);
+  storagedaemon::tls_hard_stop = &stop;
+  const auto start = std::chrono::steady_clock::now();
+  auto got = store->download("V", "0", buffer, std::nullopt);
+  const auto took = std::chrono::steady_clock::now() - start;
+  storagedaemon::tls_hard_stop = nullptr;
+  stopper.join();
+  ASSERT_FALSE(got.has_value());
+  EXPECT_EQ(got.error().code, StoreErrc::kCanceled);
+  EXPECT_LT(took, 2500ms);
+  EXPECT_EQ(store->requests_sent(), 1u);  // a stopped read is not retried
+}
+
+TEST_F(s3_native, HardStopEndsTheRetryPause)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) { return StubReply(500); });
+  auto store = Store(server, false, {{"request_retries", "3"}});
+  store->set_retry_base(30s);
+  std::atomic<bool> stop{false};
+  std::vector<char> buffer(64);
+  auto stopper = CancelAfter(stop, 500ms);
+  storagedaemon::tls_hard_stop = &stop;
+  const auto start = std::chrono::steady_clock::now();
+  auto got = store->download("V", "0", buffer, std::nullopt);
+  const auto took = std::chrono::steady_clock::now() - start;
+  storagedaemon::tls_hard_stop = nullptr;
+  stopper.join();
+  ASSERT_FALSE(got.has_value());
+  EXPECT_EQ(got.error().code, StoreErrc::kCanceled);
+  EXPECT_LT(took, 2500ms);
+}
+
+TEST_F(s3_native, ThreadWithoutAHardStopIsNotAffectedByAnotherThreadsFlag)
+{
+  StubServer server;
+  server.SetHandler([](const RecordedRequest&) {
+    StubReply r;
+    r.body = "abcdef";
+    r.drip_ms = 100;
+    return r;
+  });
+  auto store = Store(server);
+  std::atomic<bool> stop{true};  // set, but only for a thread that registers it
+  std::thread other([&stop] { storagedaemon::tls_hard_stop = &stop; });
+  other.join();
+  std::vector<char> buffer(64);
+  auto got = store->download("V", "0", buffer, std::nullopt);
+  ASSERT_TRUE(got.has_value()) << got.error().message;
+  EXPECT_EQ(std::string(got->data(), got->size()), "abcdef");
+}
+
+TEST_F(s3_native, RetriedRequestsAreCounted)
+{
+  StubServer server;
+  std::atomic<int> puts{0};
+  server.SetHandler([&puts](const RecordedRequest&) {
+    return puts++ < 2 ? StubReply(500) : StubReply(200);
+  });
+  auto store = Store(server, false, {{"request_retries", "3"}});
+  EXPECT_EQ(store->transport_retries(), 0u);
+  auto data = Bytes("chunk");
+  ASSERT_TRUE(store->upload("V", "0", data).has_value());
+  EXPECT_EQ(store->transport_retries(), 2u);
 }
 
 TEST_F(s3_native, AlreadyCanceledSendsNoRequest)

@@ -441,6 +441,25 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   }
 }
 
+// Runs on a read-ahead worker: no device state is touched, only the transport.
+bool DropletCompatibleDevice::ReadAheadFetch(const char* volname,
+                                             uint16_t chunk,
+                                             char* buffer,
+                                             uint32_t size,
+                                             uint32_t* received,
+                                             std::string* error)
+{
+  const std::string part = fmt::format(FMT_STRING("{:04d}"), chunk);
+  auto result
+      = m_storage->download(volname, part, {buffer, size}, std::nullopt);
+  if (!result) {
+    *error = result.error().message;
+    return false;
+  }
+  *received = static_cast<uint32_t>(result->size_bytes());
+  return true;
+}
+
 // Internal method for reading a chunk from the remote backing store.
 bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
 {

@@ -38,6 +38,7 @@
 #include "stored/device_control_record.h"
 #include "chunked_device.h"
 #include "flush_wait.h"
+#include "hard_stop.h"
 
 #include "stored/stored_globals.h"
 #include "lib/thread_specific_data.h"
@@ -421,7 +422,7 @@ EnqueueResult ChunkedDevice::EnqueueChunk(chunk_io_request* request,
         sizeof(chunk_io_request), new_request);
 
   // Counted before an io-thread can take it, uncounted if it is not kept.
-  CountPendingRequest(request->volname, 1);
+  CountPendingRequest(request->volname, request->chunk, 1);
   FlushWaitTracker tracker{std::chrono::seconds{flush_timeout_}, clock::now(),
                            GetUploadState().done};
   while (true) {
@@ -469,7 +470,7 @@ EnqueueResult ChunkedDevice::EnqueueChunk(chunk_io_request* request,
 
   if (!enqueued_request) {
     // The caller keeps the chunk's buffer.
-    CountPendingRequest(request->volname, -1);
+    CountPendingRequest(request->volname, request->chunk, -1);
     new_request->release = false;
     FreeChunkIoRequest(new_request);
     refusal = T_("the upload queue did not take the chunk");
@@ -478,7 +479,7 @@ EnqueueResult ChunkedDevice::EnqueueChunk(chunk_io_request* request,
 
   // Compare the return value from the enqueue.
   if (enqueued_request != new_request) {
-    CountPendingRequest(request->volname, -1);
+    CountPendingRequest(request->volname, request->chunk, -1);
     FreeChunkIoRequest(new_request);
   }
 
@@ -504,7 +505,7 @@ bool ChunkedDevice::RequeueChunk(chunk_io_request* request)
   if (enqueued_request != request) {
     Dmsg2(100, "Attempted to append chunk %d of volume %s twice\n",
           request->chunk, request->volname);
-    CountPendingRequest(request->volname, -1);
+    CountPendingRequest(request->volname, request->chunk, -1);
     FreeChunkIoRequest(request);
   }
   return true;
@@ -560,6 +561,9 @@ bool ChunkedDevice::DequeueChunk()
           new_request->chunk, new_request->volname,
           edit_pthread(pthread_self(), ed1, sizeof(ed1)));
 
+    // Read before the request can go back to the queue or be released.
+    const bool was_retry = new_request->tries > 0;
+    const size_t chunk_bytes = new_request->wbuflen;
     if (!FlushRemoteChunk(new_request)) {
       // Another thread uploads this chunk: back in a second, not a failed try.
       if (new_request->lease_conflict) {
@@ -601,35 +605,45 @@ bool ChunkedDevice::DequeueChunk()
             static_cast<long long>(retry_pause.count()));
       if (!RequeueChunk(new_request)) { return false; }
 
-      NotifyUploadEvent(false, error);
+      NotifyUploadEvent(false, error, 0, was_retry);
       requeued = true;
       continue;
     }
 
     /* Uncounted before the slot reserved by dequeue() is given back, so a
      * drained buffer means no chunk is counted any more. */
-    CountPendingRequest(new_request->volname, -1);
+    CountPendingRequest(new_request->volname, new_request->chunk, -1);
     cb_->unreserve_slot();
 
     // Processed the chunk so clean it up now.
     FreeChunkIoRequest(new_request);
 
     ClearReadonlyIfDrained();
-    NotifyUploadEvent(true, {});
+    NotifyUploadEvent(true, {}, chunk_bytes, was_retry);
 
     return true;
   }
 }
 
 // Records a finished upload try and wakes a waiting flush.
-void ChunkedDevice::NotifyUploadEvent(bool uploaded, const std::string& error)
+void ChunkedDevice::NotifyUploadEvent(bool uploaded,
+                                      const std::string& error,
+                                      size_t bytes,
+                                      bool retry)
 {
   {
     std::lock_guard<std::mutex> lock(upload_mutex_);
     ++upload_state_.events;
+    if (retry) { ++upload_state_.retried_tries; }
     if (uploaded) {
       ++upload_state_.done;
+      // An empty chunk is created, not uploaded; it is not counted.
+      if (bytes > 0) {
+        ++upload_state_.uploaded_chunks;
+        upload_state_.uploaded_bytes += bytes;
+      }
     } else {
+      ++upload_state_.failed_tries;
       upload_state_.last_error = error;
     }
     upload_state_.outcome_ms = SteadyMilliseconds();
@@ -697,13 +711,30 @@ void ChunkedDevice::FailWriter(const char* message)
   if (jcr) { jcr->setJobStatusWithPriorityCheck(JS_FatalError); }
 }
 
+// A chunk with data was handed to the upload path.
+void ChunkedDevice::CountReceivedChunk(size_t bytes)
+{
+  if (bytes == 0) { return; }
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  ++upload_state_.received_chunks;
+}
+
 // Adds change to the number of queued or uploading requests of the volume.
-void ChunkedDevice::CountPendingRequest(const char* volname, int change)
+void ChunkedDevice::CountPendingRequest(const char* volname,
+                                        uint16_t chunk,
+                                        int change)
 {
   std::lock_guard<std::mutex> lock(upload_mutex_);
   int& count = pending_requests_[volname];
   count += change;
   if (count == 0) { pending_requests_.erase(volname); }
+
+  // The first request of a chunk starts its age; the last one ends it.
+  const auto key = std::make_pair(std::string(volname), chunk);
+  auto& since = pending_since_[key];
+  if (since.first == 0 && change > 0) { since.second = SteadyMilliseconds(); }
+  since.first += change;
+  if (since.first <= 0) { pending_since_.erase(key); }
 }
 
 /* Number of chunks of the volume that this device has queued or is uploading,
@@ -754,7 +785,7 @@ void ChunkedDevice::KeepCurrentChunk(bool failed, const std::string& error)
       SetReadonly(KeptChunkFailure(entry.chunk, entry.volname, error));
     }
     kept_chunks_.push_back(std::move(entry));
-    CountPendingRequest(current_volname_, 1);
+    CountPendingRequest(current_volname_, kept_chunks_.back().chunk, 1);
     kept = ++kept_count_;
   }
   if (kept > 2) {
@@ -779,13 +810,15 @@ bool ChunkedDevice::UploadKeptChunk(std::list<KeptChunk>::iterator entry)
   request.buffer = entry->buffer;
   request.wbuflen = entry->buflen;
 
+  const bool was_retry = entry->tries > 0;
+  const size_t bytes = entry->buflen;
   const bool uploaded = FlushRemoteChunk(&request);
   const bool busy = !uploaded && request.lease_conflict;
   const std::string error = uploaded ? std::string{} : MessageText(errmsg);
   {
     std::lock_guard<std::mutex> lock(kept_mutex_);
     if (uploaded) {
-      CountPendingRequest(entry->volname.c_str(), -1);
+      CountPendingRequest(entry->volname.c_str(), entry->chunk, -1);
       FreeChunkbuffer(entry->buffer);
       kept_chunks_.erase(entry);
       if (--kept_count_ == 0) { ClearKeptReadonly(); }
@@ -805,7 +838,7 @@ bool ChunkedDevice::UploadKeptChunk(std::list<KeptChunk>::iterator entry)
       SetReadonly(KeptChunkFailure(entry->chunk, entry->volname, error));
     }
   }
-  NotifyUploadEvent(uploaded, error);
+  NotifyUploadEvent(uploaded, error, bytes, was_retry);
   return uploaded;
 }
 
@@ -860,6 +893,7 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
   request.buffer = current_chunk_->buffer;
   request.wbuflen = current_chunk_->buflen;
   request.release = release_chunk;
+  CountReceivedChunk(request.wbuflen);
 
   if (io_threads_) {
     std::string refusal;
@@ -886,7 +920,7 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
     Dmsg1(100, "Try to flush chunk number: %d\n", request.chunk);
     retval = FlushRemoteChunk(&request);
     if (retval) {
-      NotifyUploadEvent(true, {});
+      NotifyUploadEvent(true, {}, request.wbuflen);
     } else if (request.lease_conflict && request.wbuflen > 0) {
       // Another job uploads this chunk now: keep a copy, the writer goes on.
       KeepCurrentChunk(false, {});
@@ -942,6 +976,7 @@ bool ChunkedDevice::FlushChunkCopy(std::string& refusal)
   memcpy(request.buffer, current_chunk_->buffer, current_chunk_->buflen);
   request.wbuflen = current_chunk_->buflen;
   request.release = true;
+  CountReceivedChunk(request.wbuflen);
 
   switch (EnqueueChunk(&request, refusal)) {
     case EnqueueResult::kQueued:
@@ -955,6 +990,130 @@ bool ChunkedDevice::FlushChunkCopy(std::string& refusal)
       return false;
   }
   return false;
+}
+
+// Ends the worker of a speculative read, frees its buffer and drops the slot.
+auto ChunkedDevice::EraseReadAhead(
+    std::vector<std::unique_ptr<ReadAheadSlot>>::iterator it)
+    -> std::vector<std::unique_ptr<ReadAheadSlot>>::iterator
+{
+  (*it)->stop.store(true);
+  if ((*it)->worker.joinable()) { (*it)->worker.join(); }
+  free((*it)->buffer);
+  return read_ahead_.erase(it);
+}
+
+// Ends every speculative read; the workers are joined before this returns.
+void ChunkedDevice::StopReadAhead()
+{
+  for (auto& slot : read_ahead_) { slot->stop.store(true); }
+  while (!read_ahead_.empty()) { EraseReadAhead(read_ahead_.begin()); }
+}
+
+/* Starts speculative reads of the chunks after the current one while a
+ * read-only volume is read sequentially; never past the catalog size. */
+void ChunkedDevice::TopUpReadAhead()
+{
+  if (!current_chunk_ || current_chunk_->writing || !current_volname_
+      || current_chunk_->start_offset < 0 || !SupportsReadAhead()) {
+    return;
+  }
+  const int64_t chunk_size = current_chunk_->chunk_size;
+  const int64_t current = current_chunk_->start_offset / chunk_size;
+
+  for (auto it = read_ahead_.begin(); it != read_ahead_.end();) {
+    if ((*it)->volname != current_volname_ || (*it)->chunk <= current) {
+      it = EraseReadAhead(it);
+    } else {
+      ++it;
+    }
+  }
+
+  const uint64_t volume_bytes = VolCatInfo.VolCatBytes;
+  for (int64_t next = current + 1;
+       read_ahead_.size() < kReadAheadChunks
+       && next <= current + int64_t{kReadAheadChunks};
+       ++next) {
+    if (next >= MAX_CHUNKS
+        || static_cast<uint64_t>(next) * chunk_size >= volume_bytes) {
+      break;
+    }
+    if (std::any_of(read_ahead_.begin(), read_ahead_.end(),
+                    [next](const auto& slot) { return slot->chunk == next; })) {
+      continue;
+    }
+    auto slot = std::make_unique<ReadAheadSlot>();
+    slot->buffer = static_cast<char*>(malloc(chunk_size));
+    if (!slot->buffer) { break; }
+    slot->volname = current_volname_;
+    slot->chunk = static_cast<uint16_t>(next);
+    slot->size = static_cast<uint32_t>(chunk_size);
+    ReadAheadSlot* raw = slot.get();
+    try {
+      raw->worker = std::thread([this, raw] {
+        tls_hard_stop = &raw->stop;
+        std::string error;
+        uint32_t received = 0;
+        const bool ok
+            = ReadAheadFetch(raw->volname.c_str(), raw->chunk, raw->buffer,
+                             raw->size, &received, &error);
+        tls_hard_stop = nullptr;
+        if (ok) {
+          ++download_objects_;
+          download_bytes_ += received;
+        } else if (!raw->stop.load()) {
+          ++download_failures_;
+        }
+        std::lock_guard<std::mutex> lock(raw->mutex);
+        raw->ok = ok;
+        raw->received = received;
+        raw->error = std::move(error);
+        raw->finished = true;
+        raw->finished_cv.notify_all();
+      });
+    } catch (const std::system_error&) {
+      free(slot->buffer);
+      break;
+    }
+    read_ahead_.push_back(std::move(slot));
+  }
+}
+
+/* Makes the speculative read of the chunk the current chunk's data; false
+ * when there is none or it failed, and the caller reads the chunk itself. */
+bool ChunkedDevice::TakeReadAhead(uint16_t chunk)
+{
+  auto it = std::find_if(read_ahead_.begin(), read_ahead_.end(),
+                         [&](const auto& slot) {
+                           return slot->chunk == chunk && current_volname_
+                                  && slot->volname == current_volname_;
+                         });
+  if (it == read_ahead_.end()) { return false; }
+  ReadAheadSlot& slot = **it;
+  {
+    std::unique_lock<std::mutex> lock(slot.mutex);
+    while (!slot.finished) {
+      // A canceled job ends the read at once; the caller then fails fast.
+      if (WriterCanceled()) { slot.stop.store(true); }
+      slot.finished_cv.wait_for(lock, std::chrono::milliseconds{100});
+    }
+  }
+  /* A speculative read has no metadata size: it is taken when it is a full
+   * chunk or the last chunk of the volume; a shorter one is left to the
+   * job's own read with its own checks. */
+  const int64_t chunk_end
+      = (static_cast<int64_t>(chunk) + 1) * current_chunk_->chunk_size;
+  const bool usable
+      = slot.ok
+        && static_cast<ssize_t>(slot.received) <= current_chunk_->chunk_size
+        && (static_cast<ssize_t>(slot.received) == current_chunk_->chunk_size
+            || static_cast<uint64_t>(chunk_end) >= VolCatInfo.VolCatBytes);
+  if (usable) {
+    std::swap(current_chunk_->buffer, slot.buffer);
+    current_chunk_->buflen = slot.received;
+  }
+  EraseReadAhead(it);
+  return usable;
 }
 
 // Internal method for reading a chunk from the backing store.
@@ -979,7 +1138,18 @@ bool ChunkedDevice::ReadChunk(bool full)
   current_chunk_->end_offset
       = current_chunk_->start_offset + (current_chunk_->chunk_size - 1);
 
-  if (!ReadRemoteChunk(&request)) {
+  if (full && TakeReadAhead(request.chunk)) {
+    current_chunk_->loaded_end = current_chunk_->buflen;
+    return true;
+  }
+
+  const bool read_ok = ReadRemoteChunk(&request);
+  // A metadata request is a HEAD, not a transfer.
+  if (request.read_mode != ChunkReadMode::kMetadata && read_ok) {
+    ++download_objects_;
+    download_bytes_ += current_chunk_->buflen;
+  }
+  if (!read_ok) {
     // If the chunk doesn't exist on the backing store it has a size of 0 bytes.
     current_chunk_->buflen = 0;
     return false;
@@ -1037,7 +1207,13 @@ bool ChunkedDevice::EnsureChunkBytes(size_t offset, size_t count, bool full)
   request.read_offset = begin;
   request.read_length = end - begin;
   request.object_size = current_chunk_->buflen;
-  if (!ReadRemoteChunk(&request) || received != end - begin) {
+  const bool range_ok = ReadRemoteChunk(&request);
+  if (range_ok) {
+    ++download_objects_;
+    download_bytes_ += received;
+  }
+  if (!range_ok || received != end - begin) {
+    ++download_failures_;
     dev_errno = EIO;
     errno = EIO;
     InvalidateCurrentChunk();
@@ -1058,6 +1234,7 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
 {
   int retval = -1;
   std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
 
   // Kept chunks get one upload try, so a recovered store ends read-only.
   if (io_threads_ == 0 && kept_count_ > 0) { TryKeptChunks(false); }
@@ -1286,6 +1463,8 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
               goto bail_out;
           }
         } else {
+          // A fully read chunk makes the reading sequential: read ahead.
+          if (full_chunk) { TopUpReadAhead(); }
           /* Calculate how much data we can read from the just freshly read
            * chunk. */
           bytes_left
@@ -1479,6 +1658,7 @@ int ChunkedDevice::CloseChunk()
 {
   int retval = -1;
   std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
 
   // Kept chunks whose retry is due get one upload try.
   if (io_threads_ == 0 && kept_count_ > 0) { TryKeptChunks(true); }
@@ -1910,6 +2090,8 @@ bool ChunkedDevice::LoadChunk(bool full)
     // The switch drops the dirty data; its flag must not flush the next
     // chunk, which may be loaded only in part.
     current_chunk_->need_flushing = false;
+    // A seek is not sequential reading: speculative reads are dropped.
+    StopReadAhead();
     current_chunk_->buflen = 0;
     current_chunk_->loaded_begin = 0;
     current_chunk_->loaded_end = 0;
@@ -2015,6 +2197,7 @@ bool ChunkedDevice::CurrentChunkNeedsFlushing()
 void ChunkedDevice::InvalidateCurrentChunk()
 {
   std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
   if (!current_chunk_ || current_chunk_->need_flushing) { return; }
   current_chunk_->start_offset = -1;
   current_chunk_->end_offset = -1;
@@ -2048,6 +2231,8 @@ bool ChunkedDevice::ReadEndsTheVolume()
     return true;
   }
 
+  // A failed read that is not the end of the volume is a download failure.
+  ++download_failures_;
   PoolMem message(PM_MESSAGE);
   if (end == ReadEnd::kShortVolume) {
     Mmsg(message,
@@ -2197,6 +2382,32 @@ static int ListIoRequest(void* request, void* data)
   return 0;
 }
 
+// Queued requests of the upload buffer and those waiting for a retry.
+struct IoTally {
+  int queued{};
+  int retrying{};
+};
+
+static int TallyIoRequest(void* request, void* data)
+{
+  auto* tally = static_cast<IoTally*>(data);
+  ++tally->queued;
+  if (static_cast<chunk_io_request*>(request)->tries > 0) { ++tally->retrying; }
+  return 0;
+}
+
+// Age in ms of the oldest chunk still queued, uploading or kept; -1 if none.
+int64_t ChunkedDevice::OldestPendingMs()
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  int64_t oldest = -1;
+  for (const auto& entry : pending_since_) {
+    const int64_t age = SteadyMilliseconds() - entry.second.second;
+    if (age > oldest) { oldest = age; }
+  }
+  return oldest;
+}
+
 // Return specific device status information.
 bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
 {
@@ -2270,6 +2481,54 @@ bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
         = PmStrcat(dst->status, T_("No pending IO flush requests.\n"));
   }
 
+  /* Counters and the pending split come from memory only: queued, uploading
+   * and kept chunks, the chunks waiting for a retry and the oldest age. */
+  IoTally tally;
+  if (io_threads_ > 0 && cb_ && !cb_->empty()) {
+    cb_->peek(storagedaemon::PEEK_LIST, &tally, TallyIoRequest);
+  }
+  size_t kept = 0;
+  int waiting_retry = tally.retrying;
+  {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    for (const auto& entry : kept_chunks_) {
+      ++kept;
+      if (entry.tries > 0) { ++waiting_retry; }
+    }
+  }
+  const int64_t oldest_ms = OldestPendingMs();
+  PoolMem summary(PM_MESSAGE);
+  summary.bsprintf(
+      T_("Chunks: received %llu, uploaded %llu, pending %d (queued %d, "
+         "uploading %d, kept %zu), waiting for retry %d"),
+      static_cast<unsigned long long>(uploads.received_chunks),
+      static_cast<unsigned long long>(uploads.uploaded_chunks),
+      tally.queued + inflight_chunks + static_cast<int>(kept), tally.queued,
+      inflight_chunks, kept, waiting_retry);
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+  if (oldest_ms >= 0) {
+    summary.bsprintf(T_(", oldest pending %lld s"),
+                     static_cast<long long>(oldest_ms / 1000));
+    dst->status_length = PmStrcat(dst->status, summary.c_str());
+  }
+  dst->status_length = PmStrcat(dst->status, ".\n");
+  summary.bsprintf(
+      T_("Upload: %llu chunks, %llu bytes; failed tries %llu, retried tries "
+         "%llu.\n"),
+      static_cast<unsigned long long>(uploads.uploaded_chunks),
+      static_cast<unsigned long long>(uploads.uploaded_bytes),
+      static_cast<unsigned long long>(uploads.failed_tries),
+      static_cast<unsigned long long>(uploads.retried_tries));
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+  summary.bsprintf(
+      T_("Download: %llu objects, %llu bytes, failed %llu; transport "
+         "retries %llu.\n"),
+      static_cast<unsigned long long>(download_objects_.load()),
+      static_cast<unsigned long long>(download_bytes_.load()),
+      static_cast<unsigned long long>(download_failures_.load()),
+      static_cast<unsigned long long>(TransportRetries()));
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+
   return (dst->status_length > 0);
 }
 
@@ -2297,6 +2556,7 @@ std::vector<std::pair<std::string, uint16_t>> ChunkedDevice::ChunksNotUploaded()
 
 ChunkedDevice::~ChunkedDevice()
 {
+  StopReadAhead();
   if (thread_ids_) { StopThreads(); }
 
   // Chunks not uploaded by now are lost with the daemon.

@@ -23,6 +23,7 @@
 #define BAREOS_STORED_BACKENDS_OBJECT_STORE_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -98,6 +99,9 @@ class ObjectStore {
                                                 std::string_view obj_part) = 0;
 
   virtual bool supports_range_download() const { return false; }
+
+  // Requests this transport retried since it was created, for the status.
+  virtual uint64_t transport_retries() const { return 0; }
 
   /* Check polled by a transport that can stop a request in flight; when it
    * returns true the request ends as kCanceled. Set before the first

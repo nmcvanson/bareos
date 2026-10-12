@@ -70,7 +70,7 @@ class ChunkStateProbe {
   // Counts a chunk of the volume as pending, as an enqueue (+1) or a finished
   // upload (-1) does.
   static void CountPending(ChunkedDevice& dev, const char* volume, int change)
-  { dev.CountPendingRequest(volume, change); }
+  { dev.CountPendingRequest(volume, 0, change); }
 };
 
 }  // namespace storagedaemon

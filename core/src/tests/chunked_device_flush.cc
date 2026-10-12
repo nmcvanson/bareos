@@ -1687,6 +1687,56 @@ TEST(chunked_device_flush, DeviceStatusWithIoThreadsFollowsTheUploads)
   EXPECT_FALSE(Contains(text, "Device refuses writes")) << text;
 }
 
+// The unsigned number that follows the label in the text, or -1.
+long long NumberAfter(const std::string& text, const std::string& label)
+{
+  const size_t at = text.find(label);
+  if (at == std::string::npos) { return -1; }
+  return std::stoll(text.substr(at + label.size()));
+}
+
+TEST(chunked_device_flush, DeviceStatusCountsUploadsFailuresAndPendingAge)
+{
+  FakeChunkedDevice dev{1, 1, 30};
+  dev.fail_uploads = true;
+  ASSERT_EQ(dev.SetupChunk("TestVolume", O_CREAT | O_RDWR, 0640), 0);
+  const auto data = Pattern(2 * kChunk);
+  int write_errno = 0;
+  WriteUntilRefused(dev, data, 30s, write_errno);
+
+  ASSERT_TRUE(WaitStatus(dev, "Last upload failed"));
+  std::string text = StatusOf(dev);
+  EXPECT_GE(NumberAfter(text, "Chunks: received "), 1) << text;
+  EXPECT_EQ(NumberAfter(text, ", uploaded "), 0) << text;
+  EXPECT_GE(NumberAfter(text, "waiting for retry "), 1) << text;
+  EXPECT_TRUE(Contains(text, "oldest pending")) << text;
+  EXPECT_GE(NumberAfter(text, "failed tries "), 1) << text;
+  EXPECT_EQ(NumberAfter(text, "Upload: "), 0) << text;
+
+  dev.fail_uploads = false;
+  ASSERT_TRUE(WaitStored(dev, 0, kChunk));
+  ASSERT_TRUE(WaitStatus(dev, "pending 0 (queued 0, uploading 0, kept 0)"));
+  text = StatusOf(dev);
+  EXPECT_GE(NumberAfter(text, ", uploaded "), 1) << text;
+  EXPECT_GE(NumberAfter(text, "chunks, "), static_cast<long long>(kChunk))
+      << text;
+  EXPECT_GE(NumberAfter(text, "retried tries "), 1) << text;
+  EXPECT_EQ(NumberAfter(text, "waiting for retry "), 0) << text;
+  EXPECT_FALSE(Contains(text, "oldest pending")) << text;
+}
+
+TEST(chunked_device_flush, DeviceStatusCountsKeptChunksWithoutIoThreads)
+{
+  FakeChunkedDevice dev{0, 0, 5};
+  const auto data = Pattern(2 * kChunk);
+  FailFirstBlockingChunk(dev, data);
+  const std::string text = StatusOf(dev);
+  EXPECT_EQ(NumberAfter(text, "kept "), 1) << text;
+  EXPECT_EQ(NumberAfter(text, "pending "), 1) << text;
+  EXPECT_GE(NumberAfter(text, "failed tries "), 1) << text;
+  EXPECT_TRUE(Contains(text, "oldest pending")) << text;
+}
+
 // A failed read ends the volume only for a chunk that is absent at or after
 // the catalog size.
 static_assert(DecideReadEnd(ChunkPresence::kAbsent, 2 * kChunk, 2 * kChunk)
@@ -1738,6 +1788,31 @@ TEST(chunked_device_flush, ReadEndsAtTheCatalogSize)
   EXPECT_EQ(ChunkStateProbe::Capture(dev).start_offset, -1);
   std::vector<char> block(4096);
   EXPECT_EQ(dev.ReadChunked(0, block.data(), block.size()), 0);
+}
+
+TEST(chunked_device_flush, DeviceStatusCountsDownloadsAndRealFailuresOnly)
+{
+  FakeChunkedDevice dev{0, 0, 60};
+  const auto data = Pattern(kChunk);
+  dev.Seed("TestVolume", 0, data);
+  dev.Seed("TestVolume", 1, data);
+  OpenForRead(dev, 2 * kChunk);
+  std::string got;
+  EXPECT_EQ(ReadBlocks(dev, got), 0);
+  const std::string text = StatusOf(dev);
+  EXPECT_GE(NumberAfter(text, "Download: "), 2) << text;
+  EXPECT_EQ(NumberAfter(text, "objects, "), static_cast<long long>(2 * kChunk))
+      << text;
+  // Reaching the end of the volume is not a failure.
+  EXPECT_EQ(NumberAfter(text, "bytes, failed "), 0) << text;
+
+  // A chunk that is missing below the catalog size is a failed download.
+  FakeChunkedDevice short_dev{0, 0, 60};
+  short_dev.Seed("TestVolume", 0, data);
+  OpenForRead(short_dev, 2 * kChunk);
+  std::string partial;
+  EXPECT_EQ(ReadBlocks(short_dev, partial), -1);
+  EXPECT_EQ(NumberAfter(StatusOf(short_dev), "bytes, failed "), 1);
 }
 
 TEST(chunked_device_flush, HealthyReadsDoNotListAndEndListsOnlyOnce)
