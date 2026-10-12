@@ -98,6 +98,16 @@ program_timeout
    device.
 
 .. note::
+   Sizing the memory of a Storage Daemon (a rule of thumb, not a limit): for every
+   device that is writing at the same time add
+   :math:`MaximumAppendQueueSize + (iothreads * ioslots + 1) * chunksize` per
+   concurrent job, and for every device that is restoring with
+   ``transport=native`` add up to :math:`3 * chunksize` (the chunk being read
+   and the two read ahead). The default of Maximum Append Queue Size is 0, no
+   bound: set it on a Storage Daemon that serves many concurrent backups, or
+   the queue of a slow backend grows with the client data.
+
+.. note::
    With ``iothreads`` set to 0 each chunk is uploaded while the job writes. If
    that upload fails, the job fails with "could not upload chunk N of volume V"
    and the volume is marked Full. The chunk is kept in the storage daemon's
@@ -110,18 +120,27 @@ program_timeout
    two chunks are kept per device (a warning names more); they are lost only
    if the storage daemon stops, which it then logs. Canceling a job that
    retries kept chunks takes up to ``program_timeout`` plus one second when
-   the backend hangs instead of failing; with ``transport=native`` a request
-   in progress is not interrupted, so it can take up to ``request_retries``
-   plus one times ``stall_timeout`` plus the retry pauses (about 750 seconds
-   with the defaults); lower ``stall_timeout`` to shorten it. With ``Maximum
-   Concurrent Jobs`` above 1 on the device, a job may fail and the device
-   refuse writes while another job uploads the same chunk at its end; no data
-   is lost. Use ``iothreads`` of 1 or more for concurrent jobs on one device.
+   the backend hangs instead of failing. With ``transport=native``, canceling
+   a job ends a retry pause at once, a request that has moved no data within
+   about two seconds, and an upload that is sent but not answered within about
+   twelve seconds; the chunk stays kept. A transfer that is still moving
+   finishes first, also its slow tail (the send buffers draining and the
+   reply), but only up to those twelve seconds. This applies to a canceled
+   job; canceling a job that has already failed does not shorten its last
+   kept-chunk try. With ``Maximum Concurrent Jobs`` above 1 on the device, a
+   job may fail and the device refuse writes while another job uploads the
+   same chunk at its end; no data is lost. Use ``iothreads`` of 1 or more for
+   concurrent jobs on one device.
 
 .. note::
    A device that refuses writes, for any volume, also fails a job whose own
    chunks are all uploaded when it ends ("refuses writes"), since the device
    cannot tell whose data the refused chunks hold.
+
+.. note::
+   Keep ``No Rewind On Close = yes`` (the default) on dplcompat devices. With
+   ``no`` the device rewinds before it closes, and a chunk that is not stored
+   yet when a job on a shared device closes it can be lost.
 
 .. note::
    While a device refuses writes, each backup job that tries to open it marks
@@ -157,6 +176,36 @@ program_timeout
    are uploaded, ``update volume=<volume> volstatus=Recycle`` lets it be
    recycled again. If a storage daemon stops while a failed job's chunks are
    still queued, that job's Full volume stays shorter than the catalog says.
+
+.. note::
+   With ``transport=native`` a volume is opened with a metadata request only;
+   the label, a seek and a restore of single files read the bytes they need
+   with ranged requests, and a sequential restore then reads each chunk once.
+   While a restore reads a volume sequentially its device reads at most the
+   next two chunks ahead: it holds up to two more buffers of ``chunksize``
+   while the restore runs, and ends those reads on a seek, when it closes the
+   volume and when the job is canceled. A chunk that cannot be read ahead is
+   read again when the restore needs it, and fails the restore only then.
+   Appending to a volume always loads the whole last chunk first, and a chunk
+   that cannot be read in full, with a metadata request that succeeded, fails
+   the job; the volume is not marked Error and no new label is written.
+
+.. note::
+   ``status storage=<name>`` shows, from memory only and without a request to
+   the backend, for each dplcompat device: the chunks received, uploaded,
+   pending (queued, uploading, kept) and waiting for a retry, the age of the
+   oldest pending chunk, the chunks and bytes uploaded, failed upload tries
+   and retried tries, and the objects and bytes downloaded with failed
+   downloads and, for ``transport=native``, the failed request attempts of
+   the transport (all request kinds, the last attempt of a chain included;
+   not a rate). The counters count from the start of the storage daemon and
+   are approximate.
+
+.. note::
+   With read-ahead an outage of the backend during a restore is reported
+   about one retry chain (about 30 seconds with the defaults) later than
+   without it: the speculative read makes its own attempts before the
+   restore reads the chunk itself.
 
 .. note::
    Versions without the ``flush_timeout`` option behave differently: a backend
