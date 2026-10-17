@@ -1,0 +1,107 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./openstack-test-common
+openstack_test_begin
+fake_cli init --reset --spec "$current_test_directory/fakecloud-spec.json"
+full_log="$tmp/openstack-full.out"
+incr_log="$tmp/openstack-incr.out"
+diff_log="$tmp/openstack-diff.out"
+full_list_log="$tmp/openstack-full-files.out"
+incr_list_log="$tmp/openstack-incr-files.out"
+diff_list_log="$tmp/openstack-diff-files.out"
+restore_dir="$tmp/openstack-local-restore"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $full_log
+label volume=OpenStackFull storage=File pool=Full
+label volume=OpenStackIncr storage=File pool=Incremental
+label volume=OpenStackDiff storage=File pool=Differential
+run job=backup-openstack level=Full yes
+wait
+messages
+END_OF_DATA
+run_bconsole "$@"
+check_log "$full_log"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $full_list_log
+list files jobid=$(last_jobid_or_zero)
+END_OF_DATA
+run_bconsole "$@"
+full_count=$(grep -c '\.chunk' "$full_list_log")
+[ "$full_count" -eq 12 ] || {
+  echo "expected 12 Full chunks, got $full_count"
+  exit 1
+}
+
+fake_cli write --volume 44444444-4444-4444-8444-444444444444 \
+  --offset 0 --length 1048576 --seed 31
+fake_cli write --volume 44444444-4444-4444-8444-444444444444 \
+  --offset 4194304 --length 1048576 --seed 42
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $incr_log
+run job=backup-openstack level=Incremental yes
+wait
+END_OF_DATA
+run_bconsole "$@"
+check_log "$incr_log"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $incr_list_log
+list files jobid=$(last_jobid_or_zero)
+END_OF_DATA
+run_bconsole "$@"
+incr_count=$(grep -c '\.chunk' "$incr_list_log")
+[ "$incr_count" -eq 2 ] || {
+  echo "expected 2 Incremental chunks, got $incr_count"
+  exit 1
+}
+
+fake_cli write --volume 44444444-4444-4444-8444-444444444444 \
+  --offset 1048576 --length 1048576 --seed 53
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $diff_log
+run job=backup-openstack level=Differential yes
+wait
+END_OF_DATA
+run_bconsole "$@"
+check_log "$diff_log"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $diff_list_log
+list files jobid=$(last_jobid_or_zero)
+END_OF_DATA
+run_bconsole "$@"
+diff_count=$(grep -c '\.chunk' "$diff_list_log")
+[ "$diff_count" -eq 3 ] || {
+  echo "expected 3 Differential chunks, got $diff_count"
+  exit 1
+}
+
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $tmp/openstack-restore-local.out
+restore client=bareos-fd fileset=OpenStackTest where=$restore_dir select all done pluginoptions=${plugin_name}:restore_target=local
+yes
+wait
+END_OF_DATA
+run_bconsole "$@"
+check_log "$tmp/openstack-restore-local.out"
+restored_root="$restore_dir/33333333-3333-4333-8333-333333333333/44444444-4444-4444-8444-444444444444.raw"
+restored_data="$restore_dir/33333333-3333-4333-8333-333333333333/66666666-6666-4666-8666-666666666666.raw"
+cmp -n 8388608 "$restored_root" "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)"
+cmp -n 4194304 "$restored_data" "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)"
+end_test

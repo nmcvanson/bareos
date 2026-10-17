@@ -1,0 +1,300 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./openstack-test-common
+openstack_test_begin
+# This runner can be invoked alone; every run needs a known fake cloud state.
+fake_cli init --reset --spec "$current_test_directory/fakecloud-spec.json"
+
+capture_daemon_pids()
+{
+  local daemon pid
+  for daemon in dir fd sd; do
+    pid=$(ps -eo pid=,comm=,args= | awk -v name="bareos[-_]$daemon" \
+      -v conf="$BAREOS_CONFIG_DIR" \
+      '$0 ~ name && index($0, conf) {print $1}')
+    [[ "$pid" =~ ^[0-9]+$ ]] || {
+      echo "FINDING: expected one live bareos-$daemon for $BAREOS_CONFIG_DIR, got: $pid" >&2
+      return 1
+    }
+    printf 'bareos-%s=%s\n' "$daemon" "$pid"
+  done
+}
+
+assert_daemons_and_dumps()
+{
+  local before="$1" after daemon pid dump found=0
+  after=$(capture_daemon_pids)
+  while IFS='=' read -r daemon pid; do
+    [[ -n "$pid" ]] || continue
+    kill -0 "$pid" || {
+      echo "FINDING: $daemon PID $pid is not alive after the job" >&2
+      return 1
+    }
+    grep -Fxq "$daemon=$pid" <<<"$before" || {
+      echo "FINDING: $daemon PID changed during the job (before: $before; after: $after)" >&2
+      return 1
+    }
+    echo "daemon survival: $daemon PID $pid alive and unchanged"
+  done <<<"$after"
+  for dump in "$working"/bareos.*.traceback "$working"/bareos*.bactrace; do
+    [[ ! -e "$dump" ]] || {
+      echo "FINDING: unexpected daemon dump after the job: $dump" >&2
+      return 1
+    }
+  done
+  echo "daemon dump gate: no working/bareos.*.traceback or working/bareos*.bactrace"
+}
+
+assert_stall_established()
+{
+  local jobid="$1" stall="$2" delay_only="$3" state_json
+  state_json="$tmp/fake-state-before-cancel.json"
+  fake_cli show >"$state_json"
+  python3 - "$state_json" "$jobid" "$stall" "$delay_only" <<'PY'
+import json
+import sys
+
+path, jobid, stall, delay_only = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+fault = state.get("faults", {}).get("create_volume")
+if not fault:
+    raise SystemExit("FINDING: create_volume fault is not armed")
+if int(fault.get("remaining", 0)) <= 0:
+    raise SystemExit("FINDING: create_volume fault has no remaining activation")
+if float(fault.get("sleep", 0)) != float(stall):
+    raise SystemExit("FINDING: create_volume fault sleep does not match the expected stall")
+if fault.get("phase") != "after":
+    raise SystemExit("FINDING: create_volume fault is not armed for phase after")
+if bool(fault.get("delay_only")) != (delay_only == "yes"):
+    raise SystemExit("FINDING: create_volume delay_only mode is incorrect")
+volumes = [
+    volume
+    for volume in state.get("volumes", {}).values()
+    if str(volume.get("metadata", {}).get("bareos-job-id", "")) == jobid
+    and volume.get("metadata", {}).get("bareos-role") == "backup-temp-volume"
+]
+if not volumes:
+    raise SystemExit("FINDING: no temporary volume tagged with target JobId")
+print(
+    "stall established: JobId=%s fault=create_volume phase=after sleep=%ss "
+    "delay_only=%s remaining=%s temporary_volumes=%s"
+    % (
+        jobid,
+        stall,
+        delay_only,
+        fault.get("remaining"),
+        ",".join(volume["id"] for volume in volumes),
+    )
+)
+PY
+}
+
+wait_for_stall()
+{
+  local jobid="$1" stall="$2" delay_only="$3" deadline=$((SECONDS + 45))
+  until assert_stall_established "$jobid" "$stall" "$delay_only"; do
+    ((SECONDS < deadline)) || {
+      echo "FINDING: JobId $jobid did not establish the expected stall before timeout" >&2
+      return 1
+    }
+    sleep 1
+  done
+}
+
+grpc_cancel_form()
+{
+  local stall=30 bound=60 jobid run_started cancel_sent ended status elapsed_run
+  local since_cancel joblog daemon_pids_before
+  daemon_pids_before=$(capture_daemon_pids)
+  fake_cli fault --op create_volume --phase after --sleep "$stall" --delay-only
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+run job=backup-openstack level=Full yes
+END_OF_DATA
+  run_started=$SECONDS
+  run_bconsole "$@"
+  jobid=$(last_jobid_or_zero)
+  [[ "$jobid" != 0 ]]
+  wait_for_stall "$jobid" "$stall" yes
+  # The Director's cancel waits for the FD reply; use a separate session.
+  cancel_sent=$SECONDS
+  (printf 'cancel jobid=%s yes\n' "$jobid" \
+    | timeout 150s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" \
+      >"$tmp/cancel-session.out" 2>&1) &
+  ended=""
+  while ((SECONDS - cancel_sent < stall + bound + 20)); do
+    status=$(printf 'list jobid=%s\n' "$jobid" \
+      | timeout 30s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" 2>&1 \
+      | awk -F'|' '$2 ~ /^ *[0-9]+ *$/ {gsub(/ /, "", $11); print $11}' | tail -n 1)
+    case "$status" in
+      A | T | E | e | f)
+        ended=$SECONDS
+        break
+        ;;
+    esac
+    sleep 2
+  done
+  wait || true
+  [[ -n "$ended" ]] || {
+    echo "job ${jobid} did not end within stall + ${bound} s" >&2
+    return 1
+  }
+  elapsed_run=$((ended - run_started))
+  since_cancel=$((ended - cancel_sent))
+  echo "gRPC cancel: JobId=${jobid} status=${status} stall=${stall}s run_to_end=${elapsed_run}s cancel_to_end=${since_cancel}s"
+  ((elapsed_run >= stall)) || {
+    echo "FINDING: job ended before the ${stall}s stall returned" >&2
+    return 1
+  }
+  ((since_cancel <= stall + bound)) || {
+    echo "FINDING: job exceeded stall + ${bound}s after cancel" >&2
+    return 1
+  }
+  [[ "$status" != T ]] || {
+    echo "FINDING: canceled job finished T" >&2
+    return 1
+  }
+  [[ "$status" == A ]]
+  joblog=$(printf 'list joblog jobid=%s\n' "$jobid" \
+    | timeout 30s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" 2>&1)
+  printf '%s\n' "$joblog" >"$tmp/grpc-cancel-joblog.txt"
+  echo "=== joblog of the canceled job"
+  printf '%s\n' "$joblog" | grep -E 'python3-fd-mod|Termination|Fatal|Error' | head -n 12 || true
+  grep -q 'Termination:.*Backup Canceled' <<<"$joblog"
+  grep -q 'openstack: cancel requested' <<<"$joblog" || {
+    echo "FINDING: required 'openstack: cancel requested' marker is absent" >&2
+    return 1
+  }
+  echo "gRPC cancellation branch: required cancel marker present"
+  if grep -qi 'injected fault' <<<"$joblog"; then
+    echo "FINDING: job log shows an injected fault" >&2
+    return 1
+  fi
+  if grep -Eq 'left behind|cleanup failed' <<<"$joblog"; then
+    echo "FINDING: plugin reported leftovers or failed cleanup" >&2
+    return 1
+  fi
+  assert_daemons_and_dumps "$daemon_pids_before"
+  fake_cli check-clean
+  fake_cli clear-faults
+}
+
+case "$(basename "$current_test_directory")" in
+  py3grpc-* | py3agrpc-*)
+    grpc_cancel_form "$@"
+    end_test
+    exit 0
+    ;;
+esac
+
+native_cancel_form()
+{
+  local stall=600 jobid native_joblog status daemon_pids_before fd_pid_before
+  local job_end check_start status_file status_output branch
+  daemon_pids_before=$(capture_daemon_pids)
+  fd_pid_before=$(awk -F= '$1 == "bareos-fd" {print $2}' <<<"$daemon_pids_before")
+  fake_cli fault --op create_volume --phase after --sleep "$stall"
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+run job=backup-openstack level=Full yes
+END_OF_DATA
+  run_bconsole "$@"
+  jobid=$(last_jobid_or_zero)
+  [[ "$jobid" != 0 ]]
+  wait_for_stall "$jobid" "$stall" no
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+cancel jobid=$jobid yes
+wait
+END_OF_DATA
+  export BCONSOLE_TIMEOUT=60s
+  run_bconsole "$@"
+  job_end=$SECONDS
+  status=$(printf 'list jobid=%s\n' "$jobid" \
+    | timeout 30s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" 2>&1 \
+    | awk -F'|' '$2 ~ /^ *[0-9]+ *$/ {gsub(/ /, "", $11); print $11}' | tail -n 1)
+  native_joblog=$(printf 'list joblog jobid=%s\n' "$jobid" \
+    | timeout 30s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" 2>&1)
+  printf '%s\n' "$native_joblog" >"$tmp/native-cancel-joblog.txt"
+  echo "=== joblog of the canceled job (native)"
+  printf '%s\n' "$native_joblog" | grep -E 'python3-fd-mod|Termination|Fatal|Error' | head -n 12 || true
+  [[ "$status" == A ]] || {
+    echo "FINDING: expected native status A, got '$status'" >&2
+    return 1
+  }
+  grep -q 'Termination:.*Backup Canceled' <<<"$native_joblog" || {
+    echo "FINDING: native job lacks Backup Canceled termination" >&2
+    return 1
+  }
+  assert_daemons_and_dumps "$daemon_pids_before"
+  if grep -q 'openstack: cancel requested' <<<"$native_joblog"; then
+    branch=marker
+    echo "native cancellation branch: marker present"
+    fake_cli check-clean
+  else
+    grep -Fq 'Network error with FD during Backup' <<<"$native_joblog" || {
+      echo "FINDING: native marker absent and Network error with FD during Backup absent" >&2
+      return 1
+    }
+    grep -Fq 'No Job status returned from FD' <<<"$native_joblog" || {
+      echo "FINDING: native marker absent and No Job status returned from FD absent" >&2
+      return 1
+    }
+    branch=teardown-plus-live-FD-status
+    check_start=$SECONDS
+    status_file="$tmp/native-status-client-${jobid}.out"
+    if ! printf 'status client=bareos-fd\nquit\n' \
+      | timeout 8s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" \
+        >"$status_file" 2>&1; then
+      cat "$status_file"
+      echo "FINDING: status client failed for still-live FD PID $fd_pid_before" >&2
+      return 1
+    fi
+    status_output=$(cat "$status_file")
+    [[ "$(capture_daemon_pids)" == "$daemon_pids_before" ]] || {
+      echo "FINDING: daemon PID identity changed before status-client evidence" >&2
+      return 1
+    }
+    kill -0 "$fd_pid_before" || {
+      echo "FINDING: same FD PID $fd_pid_before is not alive for status-client evidence" >&2
+      return 1
+    }
+    grep -Fq 'Running Jobs:' <<<"$status_output" || {
+      cat "$status_file"
+      echo "FINDING: status client returned no recognizable Running Jobs response" >&2
+      return 1
+    }
+    if grep -Eq "JobId[=: ]+${jobid}([^0-9]|$)" <<<"$status_output"; then
+      echo "FINDING: status client still lists target JobId $jobid" >&2
+      return 1
+    fi
+    echo "status client success: same live FD PID=$fd_pid_before; JobId=$jobid absent"
+    fake_cli check-clean
+    if ((SECONDS - check_start > 10 || SECONDS - job_end > 10)); then
+      echo "FINDING: status-client and check-clean exceeded 10s from job end" >&2
+      return 1
+    fi
+    echo "bounded native evidence: branch=$branch status-client-and-check-clean=$((SECONDS - job_end))s after job end"
+  fi
+  echo "native cancellation branch taken: $branch"
+  fake_cli clear-faults
+}
+
+native_cancel_form "$@"
+end_test

@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+openstack_test_begin()
+{
+  TestName="$(basename "$(pwd)")"
+  export TestName
+  JobName=backup-openstack
+  . ./environment
+  export PATH="$current_test_directory/sbin:$current_test_directory/bin:$PATH"
+  . "$BAREOS_SCRIPTS_DIR"/functions
+  # plugin name in plugin options: the bridge variant names the inferior
+  # explicitly, the automatic gRPC variant keeps python3
+  case "$(basename "$current_test_directory")" in
+    py3grpc-*) plugin_name=grpc:bareos-grpc-fd-plugin-bridge:python3 ;;
+    *) plugin_name=python3 ;;
+  esac
+  export plugin_name
+  export OPENSTACK_FAKE_ROOT="$tmp/openstack-fake-root"
+  export PYTHONPATH="$current_test_directory/python-modules${PYTHONPATH:+:$PYTHONPATH}"
+  start_test
+}
+
+fake_cli()
+{
+  python3 -m bareos_openstack.fake_backend "$@" --root "$OPENSTACK_FAKE_ROOT"
+}
