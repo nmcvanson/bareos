@@ -148,6 +148,7 @@ set(PYFILES
     libcloud/BareosLibcloudApi.py
     libcloud/bareos-fd-libcloud.py
     incus/bareos-fd-incus.py
+    openstack/bareos-fd-openstack.py
 )
 
 include(CMakeDependentOption)
@@ -172,6 +173,26 @@ install(
 install(
   DIRECTORY libcloud/bareos_libcloud_api
   DESTINATION ${plugindir}
+  COMPONENT filedaemon
+)
+
+install(
+  DIRECTORY openstack/bareos_openstack
+  DESTINATION ${plugindir}
+  COMPONENT filedaemon
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "fake_backend.py" EXCLUDE
+)
+
+configure_file(
+  openstack/bareos-openstack-tool
+  ${CMAKE_CURRENT_BINARY_DIR}/openstack-tool/bareos-openstack-tool @ONLY
+  NEWLINE_STYLE UNIX
+)
+
+install(
+  PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/openstack-tool/bareos-openstack-tool
+  DESTINATION ${sbindir}
   COMPONENT filedaemon
 )
 
