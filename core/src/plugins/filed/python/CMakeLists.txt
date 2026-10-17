@@ -60,6 +60,20 @@ if(HAVE_PYTHON AND NOT HAVE_WIN32)
       PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/test/:${CMAKE_CURRENT_BINARY_DIR}/python3modules/${CMAKE_CONFIG_TYPE}:${CMAKE_CURRENT_SOURCE_DIR}/pyfiles
       "LSAN_OPTIONS=fast_unwind_on_malloc=0 suppressions=${CMAKE_CURRENT_SOURCE_DIR}/test/lsan-suppressions.txt"
   )
+  if(NOT Python3_VERSION VERSION_LESS "3.9")
+    add_test(
+      NAME bareos-fd-openstack-unittests
+      COMMAND ${Python3_EXECUTABLE} -m unittest discover -s
+              ${CMAKE_CURRENT_SOURCE_DIR}/openstack/test -p "test_*.py" -v
+    )
+    set_property(
+      TEST bareos-fd-openstack-unittests
+      PROPERTY
+        ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/openstack:${CMAKE_CURRENT_SOURCE_DIR}/pyfiles"
+        "PYTHONDONTWRITEBYTECODE=1"
+    )
+  endif()
 endif()
 
 if(HAVE_PYTHON)
