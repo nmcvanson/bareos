@@ -1,0 +1,11 @@
+Pool {
+  Name = Wave1bVfOut
+  Pool Type = Backup
+  Recycle = no
+  AutoPrune = no
+  Volume Retention = 365 days
+  Maximum Volume Bytes = 50G
+  Maximum Volumes = 4
+  Label Format = "Wave1bVfOut-"
+  Storage = S3a2
+}

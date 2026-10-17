@@ -1,0 +1,28 @@
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+
+Device {
+  Name = DplcompatA
+  Media Type = S3Native
+  Archive Device = S3 Object Storage
+  Device Options = "transport=native"
+                   ",s3cfg=@tmpdir@/s3cfg"
+                   ",bucket=testbucket"
+                   ",iothreads=0"
+                   ",chunksize=5242880"
+                   ",flush_timeout=120"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}

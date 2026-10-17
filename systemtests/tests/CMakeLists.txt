@@ -97,6 +97,7 @@ add_subdirectory(py3plug-fd-proxmox)
 add_subdirectory(py3plug-fd-postgresql)
 add_subdirectory(py3plug-fd-vmware)
 add_subdirectory(py3plug-fd-openstack)
+add_subdirectory(openstack-agentless-e2e)
 
 add_subdirectory(py3plug-dir)
 add_subdirectory(py3plug-sd)

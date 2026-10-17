@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./environment
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+stub_pid=""
+sd_b_started=0
+stop_sd_b()
+{
+  if ((sd_b_started)); then
+    BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos-sd2" \
+      BAREOS_SD_PORT="$BAREOS_STORAGE2_PORT" \
+      BAREOS_PIDFILE_PREFIX="$tmp/sd-b-" \
+      "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop || true
+    sd_b_started=0
+  fi
+}
+
+cleanup_on_error()
+{
+  local status=$?
+  if ((status != 0)); then
+    stop_sd_b
+    if [[ -n "$stub_pid" ]]; then
+      kill "$stub_pid" 2>/dev/null || true
+      wait "$stub_pid" 2>/dev/null || true
+    fi
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-fd" stop || true
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-dir" stop || true
+    BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos" \
+      BAREOS_SD_PORT="$BAREOS_STORAGE_PORT" \
+      BAREOS_PIDFILE="$tmp/sd-a-sd.pid" \
+      "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop || true
+  fi
+}
+trap cleanup_on_error EXIT
+
+"${BAREOS_SCRIPTS_DIR}/cleanup"
+"${BAREOS_SCRIPTS_DIR}/setup"
+mkdir -p "$tmp/s3-data" "$tmp/s3-control" "$tmp/sd-a-working" \
+  "$tmp/sd-b-working" "$tmp/sd-a-cache" "$tmp/sd-b-cache"
+export PYTHONPATH="$current_test_directory/python-modules${PYTHONPATH:+:$PYTHONPATH}"
+python3 -m bareos_openstack.fake_backend init --reset \
+  --spec "$current_test_directory/fakecloud-spec.json" \
+  --root "$tmp/fakecloud"
+cp "$(python3 -m bareos_openstack.fake_backend volume-path \
+  --volume 44444444-4444-4444-8444-444444444444 --root "$tmp/fakecloud")" \
+  "$tmp/original-root.img"
+cp "$(python3 -m bareos_openstack.fake_backend volume-path \
+  --volume 66666666-6666-4666-8666-666666666666 --root "$tmp/fakecloud")" \
+  "$tmp/original-data.img"
+
+access_key=AKIATESTSTUBKEY0001
+secret_key=stubsecret0123456789abcdefghijklmnopqrst
+python3 ./s3-stub.py "$tmp/s3-data" "$tmp/s3-control" testbucket \
+  "$access_key" "$secret_key" us-east-1 >"$tmp/s3-stub.out" 2>&1 &
+stub_pid=$!
+printf '%s\n' "$stub_pid" >"$tmp/s3-stub.pid"
+for attempt in $(seq 1 100); do
+  [[ -s "$tmp/s3-control/port" ]] && break
+  sleep 0.2
+done
+if [[ ! -s "$tmp/s3-control/port" ]]; then
+  cat "$tmp/s3-stub.out" >&2
+  echo "S3 stub did not start within 20 seconds" >&2
+  exit 1
+fi
+stub_port=$(cat "$tmp/s3-control/port")
+umask 077
+cat >"$tmp/s3cfg" <<END_OF_DATA
+[default]
+access_key = ${access_key}
+secret_key = ${secret_key}
+host_base = 127.0.0.1:${stub_port}
+host_bucket = 127.0.0.1:${stub_port}
+use_https = False
+bucket_location = us-east-1
+END_OF_DATA
+umask 022
+
+"${BAREOS_SCRIPTS_DIR}/bareos-ctl-dir" start
+"${BAREOS_SCRIPTS_DIR}/bareos-ctl-fd" start
+BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos" \
+  BAREOS_SD_PORT="$BAREOS_STORAGE_PORT" \
+  BAREOS_PIDFILE="$tmp/sd-a-sd.pid" \
+  "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" start
+sd_b_started=1
+BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos-sd2" \
+  BAREOS_SD_PORT="$BAREOS_STORAGE2_PORT" \
+  BAREOS_PIDFILE_PREFIX="$tmp/sd-b-" \
+  "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" start >"$tmp/sd-b-start.log" 2>&1 || {
+  cat "$tmp/sd-b-start.log" >&2
+  exit 1
+}
+for attempt in $(seq 1 50); do
+  if timeout 1 bash -c \
+    ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE2_PORT}" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+if ! timeout 1 bash -c \
+  ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE2_PORT}" 2>/dev/null; then
+  cat "$tmp/sd-b-start.log" >&2
+  echo "SD-B did not listen on ${BAREOS_STORAGE2_PORT} within 10 seconds" >&2
+  exit 1
+fi
+"${BAREOS_SCRIPTS_DIR}/bareos" status
+echo "Wave1b fixture started: stub_port=${stub_port} SD-A=${BAREOS_STORAGE_PORT} SD-B=${BAREOS_STORAGE2_PORT}"
+trap - EXIT

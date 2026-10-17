@@ -1,0 +1,10 @@
+Pool {
+  Name = Wave1bControl
+  Pool Type = Backup
+  Recycle = no
+  AutoPrune = no
+  Volume Retention = 365 days
+  Maximum Volume Bytes = 50G
+  Maximum Volumes = 2
+  Label Format = "Wave1bControl-"
+}

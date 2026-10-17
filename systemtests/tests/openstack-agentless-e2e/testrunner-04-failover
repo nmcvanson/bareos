@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+if ! timeout 1 bash -c \
+  ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE2_PORT}" 2>/dev/null; then
+  start_sd_b
+fi
+timeout 2 bash -c \
+  ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE2_PORT}"
+label_volume Wave1bFailover S3b Full
+a_stopped=0
+restore_a_and_finish()
+{
+  local status=$?
+  trap - EXIT
+  if ((a_stopped)); then
+    start_sd_a || status=1
+  fi
+  if ((status != 0)); then
+    estat=998
+  fi
+  end_test
+  exit "$status"
+}
+trap restore_a_and_finish EXIT
+stop_sd_a
+a_stopped=1
+if timeout 1 bash -c ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE_PORT}"; then
+  echo "SD-A still accepts connections after stop" >&2
+  exit 1
+fi
+timeout 2 bash -c ":</dev/tcp/127.0.0.1/${BAREOS_STORAGE2_PORT}"
+echo "preferred member verified: S3a endpoint unreachable; S3b endpoint reachable"
+started=$SECONDS
+run_group_backup failover Full S3b 32 Wave1bFailover
+elapsed=$((SECONDS - started))
+if ((elapsed > 120)); then
+  echo "storage failover exceeded its 120 second bound: ${elapsed}s" >&2
+  exit 1
+fi
+echo "failover completed in ${elapsed}s; selected S3b after preferred S3a failure"
+check_clean

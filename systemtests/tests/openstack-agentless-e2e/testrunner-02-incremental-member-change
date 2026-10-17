@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+fake_cli write --volume 44444444-4444-4444-8444-444444444444 \
+  --offset 2097152 --length 1048576 --seed 31
+fake_cli write --volume 66666666-6666-4666-8666-666666666666 \
+  --offset 5242880 --length 1048576 --zero
+label_volume Wave1bIncB S3b Incremental
+console_output 'disable storage=S3a' >"$tmp/disable-S3a.log"
+run_group_backup changed-incremental-b Incremental S3b 2 Wave1bIncB
+inc_b_jobid="$LAST_JOB_ID"
+files="$tmp/files-${inc_b_jobid}.txt"
+grep -Fq '/44444444-4444-4444-8444-444444444444/00000002.chunk' "$files"
+grep -Fq '/66666666-6666-4666-8666-666666666666/00000005.chunk' "$files"
+inc_b_objects=$(psql -d regress_openstack_agentless_e2e -Atc \
+  "SELECT count(*) FROM RestoreObject WHERE JobId = ${inc_b_jobid}")
+[[ "$inc_b_objects" -eq 1 ]]
+echo "changed Incremental JobId=${inc_b_jobid} RestoreObjects=${inc_b_objects}"
+console_output 'enable storage=S3a' >"$tmp/enable-S3a.log"
+label_volume Wave1bIncA S3a Incremental
+run_group_backup unchanged-incremental Incremental S3a 0 Wave1bIncA
+unchanged_jobid="$LAST_JOB_ID"
+unchanged_objects=$(psql -d regress_openstack_agentless_e2e -Atc \
+  "SELECT count(*) FROM RestoreObject WHERE JobId = ${unchanged_jobid}")
+[[ "$unchanged_objects" -eq 1 ]]
+echo "unchanged Incremental JobId=${unchanged_jobid} RestoreObjects=${unchanged_objects}"
+check_clean
+echo "incremental JobId=${inc_b_jobid} member=S3b changed_chunks=2; unchanged JobId=${unchanged_jobid} member=S3a chunks=0"
+end_test
