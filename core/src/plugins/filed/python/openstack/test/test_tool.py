@@ -40,7 +40,9 @@ from test_cloud_fake import (
     PROXY,
     ROOT_VOL,
     SERVER,
+    TARGET,
     base_spec,
+    batch_d_spec,
     image_booted_spec,
     make_cloud,
     read_state,
@@ -404,6 +406,124 @@ class BatchDToolTest(unittest.TestCase):
         self.cloud(spec)
         code, out, err = self.tool("leftovers")
         self.assertEqual((code, out.strip(), err), (0, "no leftovers", ""))
+
+
+class ToolTransferScopesTest(unittest.TestCase):
+    """--proxy-credentials: the tool looks at the tenant and the provider project."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        spec = batch_d_spec(groups=False, proxy_project_id=TARGET)
+        self.be, _ = make_cloud(self._tmp.name, spec, proxy_instance_id="", proxy=False)
+        self.pbe = fake_backend.FakeBackend(
+            {
+                "backend": "fake",
+                "fake_root": self.be._root,
+                "fake_project_id": TARGET,
+                "proxy_instance_id": PROXY,
+            }
+        )
+        self.pbe.connect()
+        self.creds = os.path.join(self._tmp.name, "provider.ini")
+        with open(self.creds, "w", encoding="utf-8") as f:
+            f.write("backend=fake\nfake_project_id=%s\nproxy_instance_id=%s\n" % (TARGET, PROXY))
+        self.args = [
+            "--backend",
+            "fake",
+            "--fake-root",
+            self.be._root,
+            "--proxy-credentials",
+            self.creds,
+        ]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def tool(self, *argv):
+        return run(*(self.args + list(argv)))
+
+    def temp_volume(self, backend, job, source=ROOT_VOL):
+        return backend.create_volume(
+            "bareos-%d-tmp-%s" % (job, source),
+            1,
+            bareos_tags(job, SERVER, "backup-temp-volume", source),
+            5,
+        )
+
+    def fixture(self):
+        """A tenant volume held by a transfer, an attached provider volume and a
+        restore-side transfer in the provider project."""
+        stuck = self.temp_volume(self.be, 40, ROOT_VOL)
+        tid, _ = self.be.create_transfer(stuck.id, "bareos-40-xfer-%s" % ROOT_VOL)
+        moved = self.temp_volume(self.pbe, 40, DATA_VOL)
+        self.pbe.attach_to_proxy(moved.id, 5)
+        restored = self.pbe.create_volume(
+            "r", 1, bareos_tags(41, SERVER, "restore-volume", ROOT_VOL), 5
+        )
+        rid, _ = self.pbe.create_transfer(restored.id, "bareos-41-xfer-%s" % ROOT_VOL)
+        return stuck.id, tid, moved.id, rid
+
+    def test_report_lists_both_scopes(self):
+        stuck, tid, moved, rid = self.fixture()
+        code, out, _ = self.tool("leftovers")
+        self.assertEqual(code, 1)
+        self.assertIn("tenant volume %s" % stuck, out)
+        self.assertIn("provider volume %s" % moved, out)
+        self.assertIn("provider attachment %s is attached" % moved, out)
+        self.assertIn("tenant transfer %s" % tid, out)
+        self.assertIn("provider transfer %s" % rid, out)
+
+    def test_cleanup_removes_backup_transfers_and_keeps_restore_ones(self):
+        stuck, tid, moved, rid = self.fixture()
+        code, out, _ = self.tool(
+            "leftovers", "--cleanup", "--older-than-job", "50", "--yes", "--detach"
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("removed tenant transfer %s" % tid, out)
+        self.assertIn("removed tenant volume %s" % stuck, out)
+        self.assertIn("removed provider volume %s" % moved, out)
+        self.assertIn("kept    provider transfer %s" % rid, out)
+        state = read_state(self.be)
+        self.assertNotIn(stuck, state["volumes"])
+        self.assertNotIn(moved, state["volumes"])
+        self.assertEqual(list(state["transfers"]), [rid])
+
+    def test_attached_provider_volume_is_kept_without_detach(self):
+        _, _, moved, _ = self.fixture()
+        code, out, _ = self.tool(
+            "leftovers", "--cleanup", "--older-than-job", "50", "--yes"
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("kept    provider volume %s" % moved, out)
+        self.assertIn(moved, read_state(self.be)["volumes"])
+
+    def test_cleanup_removes_volumes_of_every_scope_before_snapshots(self):
+        self.be.create_snapshot(
+            ROOT_VOL,
+            "bareos-40-snap-%s" % ROOT_VOL,
+            bareos_tags(40, SERVER, "backup-snapshot", ROOT_VOL),
+            force=True,
+            timeout=5,
+        )
+        moved = self.temp_volume(self.pbe, 40)
+        code, out, _ = self.tool(
+            "leftovers", "--cleanup", "--older-than-job", "50", "--yes"
+        )
+        self.assertEqual(code, 0, out)
+        volume_at = out.index("removed provider volume %s" % moved.id)
+        self.assertLess(volume_at, out.index("removed tenant snapshot"))
+
+    def test_unreadable_credentials_file_is_an_error(self):
+        self.args[-1] = os.path.join(self._tmp.name, "missing.ini")
+        code, _, err = self.tool("leftovers")
+        self.assertEqual(code, 2)
+        self.assertIn("missing.ini", err)
+
+    def test_without_the_option_only_the_tenant_is_seen(self):
+        self.fixture()
+        code, out, _ = run("--backend", "fake", "--fake-root", self.be._root, "leftovers")
+        self.assertEqual(code, 1)
+        self.assertNotIn("provider", out)
 
 
 if __name__ == "__main__":
