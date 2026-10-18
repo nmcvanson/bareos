@@ -77,8 +77,11 @@ class RestoreCloudSession:
         poll_timeout=900,
         log=None,
         target_backend=None,
+        groups_in_target=False,
     ):
         self.backend = backend
+        # transfer mode: the saved security group ids belong to the target project
+        self.groups_in_target = groups_in_target
         # server, ports, flavor and networks live in the target project
         self.tbackend = target_backend or backend
         self.cross = target_backend is not None
@@ -293,7 +296,9 @@ class RestoreCloudSession:
             for group_id in port.get("security_group_ids", []):
                 if group_id not in names:
                     try:
-                        name = self.backend.get_security_group_name(group_id)
+                        name = (
+                            self.tbackend if self.groups_in_target else self.backend
+                        ).get_security_group_name(group_id)
                     except CloudNotFound as exc:
                         raise RestoreError(
                             "security group %s of port %s no longer exists in the "
