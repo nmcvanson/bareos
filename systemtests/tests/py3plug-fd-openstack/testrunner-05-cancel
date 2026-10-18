@@ -195,6 +195,10 @@ END_OF_DATA
   assert_daemons_and_dumps "$daemon_pids_before"
   fake_cli check-clean
   fake_cli clear-faults
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+messages
+END_OF_DATA
+  run_bconsole "$@"
 }
 
 case "$(basename "$current_test_directory")" in
@@ -294,6 +298,10 @@ END_OF_DATA
   fi
   echo "native cancellation branch taken: $branch"
   fake_cli clear-faults
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+messages
+END_OF_DATA
+  run_bconsole "$@"
 }
 
 native_cancel_form "$@"
