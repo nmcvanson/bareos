@@ -314,6 +314,54 @@ the credentials of the target project. The transfer key is never logged or store
   credentials.
 
 
+Transfer mode (proxy in another project)
+''''''''''''''''''''''''''''''''''''''''
+
+Use this mode when the |fd| runs in a different project from the protected server. The default
+``proxy_mode=native`` attaches the temporary volume to the proxy directly and needs both in one
+project. With ``proxy_mode=transfer`` the two projects have fixed roles: the **tenant** project owns
+the protected server, and the **provider** project owns the proxy server.
+
+.. code-block:: bareosconfig
+   :caption: FileSet of a server in the tenant project, backed up by a proxy in the provider project
+
+   Plugin = "python3:module_name=bareos-fd-openstack:cloud=tenant:server_id=<id>:proxy_mode=transfer:proxy_project_credentials=provider.ini"
+
+* The connection of the FileSet (``cloud`` or the credential options) is the tenant. It must not set
+  ``proxy_instance_id``.
+* ``proxy_project_credentials`` is a file in the format of ``restore_project_credentials`` (a relative
+  path is relative to the |fd| configuration directory, and the plugin warns when group or others
+  can read it). It holds the credentials of the provider project and ``proxy_instance_id``, the
+  server that runs the |fd|.
+* The credential of the provider project needs a member role in that project and enough volume quota
+  there: one volume for each volume being read at a time, large enough for the biggest volume of the
+  server.
+* The |fd| must reach the Nova and Cinder APIs of both projects.
+
+Backup: the tenant takes the snapshot, creates the temporary volume and offers it with a Cinder
+transfer named ``bareos-<job>-xfer-<volume>``. The provider accepts the transfer, attaches the volume
+to the proxy, reads it, detaches it and deletes it. The tenant deletes the snapshot last. The plugin
+On OpenStack the accept is the quota check: a refused accept leaves the transfer pending and the
+cleanup of the job deletes it together with the volume.
+
+Restore reverses the direction: the provider writes and attaches the new volumes, the tenant accepts
+them and creates the ports and the server. The saved security groups are looked up by name through
+the tenant connection. ``restore_project_cloud`` and ``restore_project_credentials`` cannot be used in
+this mode, and ``force`` and ``restore_keep_addresses`` are refused as in any cross-project restore.
+If the tenant refuses a transfer for quota, the restored volumes stay in the provider project, the
+pending transfer is deleted and the ``recovery:`` line lists the volumes that did not move. The
+volume type is checked in the tenant project only, while the volumes are created in the provider
+project; a restore with ``restore_volume_type`` needs that type in both. A local restore
+(``restore_target=local``) ignores ``proxy_mode``, but ``restore_security_groups`` is still refused
+there, as with the ``restore_project_*`` options.
+
+If the owner of a temporary volume cannot be established after an error (for example because a
+project does not answer), the plugin keeps the volume and lists it as left behind; it never deletes a
+volume whose project it does not know. A later backup of the same server reports earlier leftovers
+in both projects and removes them with ``cleanup_leftovers=yes``, including a transfer that is still
+pending. The operator tool does the same with ``--proxy-credentials`` (see below).
+
+
 Validated environments
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -356,6 +404,14 @@ leftovers --cleanup --older-than-job N --yes [--detach]
    volume of a running job is read by its |fd|. Temporary volumes that are attached to the proxy are
    kept and reported unless ``--detach`` is given, which detaches them first. Volumes with the
    role ``restore-volume`` are never deleted.
+
+``--proxy-credentials FILE`` (before the command)
+   For a transfer-mode setup, with ``--config`` naming the tenant: the tool then looks at the tenant
+   and at the provider project named by the ``proxy_project_credentials`` file, and prefixes every
+   line with ``tenant`` or ``provider``. Pending transfers are listed in both projects.
+   ``--cleanup`` deletes a pending transfer only when its name is ``bareos-<job>-xfer-...`` with a job
+   lower than ``N`` and its volume is a temporary volume of that job; the same run then deletes that
+   volume in its project. Transfers of a restore stay reported only.
 
 Exit codes: ``0`` all checks passed or the command did what was asked, ``1`` a check failed or
 leftovers were found, ``2`` wrong usage or a cloud error. The read-only commands never change the
@@ -428,6 +484,13 @@ restore_project_cloud, restore_project_credentials (optional, at most one)
    ``defaults_file`` with the credentials of the target project (see Restore to another
    project). Not combined with ``force``, ``restore_keep_addresses`` or
    ``restore_target=local``.
+
+proxy_mode (optional)
+   ``native`` (default) or ``transfer``. See Transfer mode.
+
+proxy_project_credentials (optional)
+   File with the credentials and the ``proxy_instance_id`` of the provider project. Required with
+   ``proxy_mode=transfer`` and refused otherwise.
 
 restore_security_groups (optional)
    Comma separated names of security groups of the target project that replace the saved ones.
