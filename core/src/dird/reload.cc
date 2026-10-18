@@ -238,20 +238,34 @@ bail_out:
   return retval;
 }
 
-bool DoReloadConfig()
+// Held by every configuration change (reload, configure add/set/create).
+// ATOMIC_FLAG_INIT is needed until we switch to C++20; a flag, not a mutex,
+// because the SIGHUP handler reaches this in signal context.
+static std::atomic_flag config_change_active = ATOMIC_FLAG_INIT;
+
+std::optional<ConfigChangeToken> TryBeginConfigChange()
 {
-  // ATOMIC_FLAG_INIT is needed until we switch to C++20;
-  // but it can be kept even after that.
-  static std::atomic_flag is_reloading = ATOMIC_FLAG_INIT;
-  bool reloaded = false;
+  if (config_change_active.test_and_set()) { return std::nullopt; }
+  return ConfigChangeToken();
+}
 
+void ConfigChangeToken::Release()
+{
+  if (active_) {
+    active_ = false;
+    config_change_active.clear();
+  }
+}
 
-  if (is_reloading.test_and_set()) {
-    /* Note: don't use Jmsg here, as it could produce a race condition
-     * on multiple parallel reloads */
-    Qmsg(nullptr, M_ERROR, 0, T_("Already reloading. Request ignored.\n"));
+bool ReloadConfigHeld(const ConfigChangeToken& token)
+{
+  if (!token.active()) {
+    Qmsg(nullptr, M_ERROR, 0,
+         T_("Reload refused: the caller does not hold the change guard.\n"));
     return false;
   }
+
+  bool reloaded = false;
 
   StopStatisticsThread();
 
@@ -293,8 +307,20 @@ bool DoReloadConfig()
   StartStatisticsThread();
   UnlockJobs();
 
-  is_reloading.clear();
   return reloaded;
+}
+
+bool DoReloadConfig()
+{
+  auto token = TryBeginConfigChange();
+  if (!token) {
+    /* Note: don't use Jmsg here, as it could produce a race condition
+     * on multiple parallel reloads */
+    Qmsg(nullptr, M_ERROR, 0, T_("Already reloading. Request ignored.\n"));
+    return false;
+  }
+
+  return ReloadConfigHeld(*token);
 }
 
 
