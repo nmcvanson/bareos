@@ -108,6 +108,7 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         self.cancel_event = threading.Event()
         self.backend = None
         self.target_backend = None
+        self.proxy_backend = None
         self.backup_session = None
         self.producer = None
         self.queue = None
@@ -285,12 +286,21 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
 
         o = self.options
         try:
-            self.backend = cloud.create_backend(o.backend_config(), proxy=True)
+            transfer = o.proxy_mode == "transfer"
+            provider_config = self._proxy_backend_config() if transfer else None
+            self.backend = cloud.create_backend(
+                o.backend_config(), proxy=not transfer
+            )
             self.backend.set_cancel_event(self.cancel_event)
             self.backend.connect()
+            if transfer:
+                self.proxy_backend = cloud.create_backend(provider_config, proxy=True)
+                self.proxy_backend.set_cancel_event(self.cancel_event)
+                self.proxy_backend.connect()
             self.backup_session = BackupCloudSession(
                 self.backend,
                 int(self.jobId),
+                proxy_backend=self.proxy_backend,
                 server_id=o.server_id,
                 server_name=o.server_name,
                 poll_timeout=o.poll_timeout,
@@ -512,12 +522,12 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
 
     def _release_cancel(self):
         """Let cleanup and abort run their waits after a cancel"""
-        for backend in (self.backend, self.target_backend):
+        for backend in (self.backend, self.target_backend, self.proxy_backend):
             if backend is not None:
                 backend.set_cancel_event(None)
 
     def _close_backend(self):
-        for name in ("backend", "target_backend"):
+        for name in ("backend", "target_backend", "proxy_backend"):
             backend = getattr(self, name)
             if backend is not None:
                 try:
@@ -651,9 +661,20 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         except ValueError as e:
             raise ValueError("%s %s: %s" % (option, name, e)) from None
 
+    def _proxy_backend_config(self):
+        """Configuration of the provider project connection (transfer mode)"""
+        o = self.options
+        return self._file_backend_config(
+            "proxy_project_credentials",
+            o.proxy_project_credentials,
+            o.proxy_backend_config,
+        )
+
     def _target_backend_config(self):
         """Configuration of the target project connection, or None"""
         o = self.options
+        if o.proxy_mode == "transfer" and o.restore_target == "cloud":
+            return o.backend_config()
         if not (o.restore_project_cloud or o.restore_project_credentials):
             return None
         name = o.restore_project_credentials
@@ -667,7 +688,13 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         o = self.options
         try:
             target_config = self._target_backend_config()
-            self.backend = cloud.create_backend(o.backend_config(), proxy=True)
+            if o.proxy_mode == "transfer" and o.restore_target == "cloud":
+                # the provider writes and attaches, the tenant receives and boots
+                self.backend = cloud.create_backend(
+                    self._proxy_backend_config(), proxy=True
+                )
+            else:
+                self.backend = cloud.create_backend(o.backend_config(), proxy=True)
             self.backend.set_cancel_event(self.cancel_event)
             self.backend.connect()
             if target_config is not None:
@@ -681,6 +708,7 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
                 o.restore_cloud_options(),
                 poll_timeout=o.poll_timeout,
                 target_backend=self.target_backend,
+                groups_in_target=o.proxy_mode == "transfer",
                 log=self.log,
             )
             self.restore_session.precheck()

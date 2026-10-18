@@ -190,6 +190,8 @@ class Options:
         "restore_target": (_enum("cloud", "local"), "cloud"),
         "restore_project_cloud": (_str, ""),
         "restore_project_credentials": (_str, ""),
+        "proxy_mode": (_enum("native", "transfer"), "native"),
+        "proxy_project_credentials": (_str, ""),
         "restore_security_groups": (_str, ""),
         "snapshot_mode": (_enum("per-volume", "group"), "per-volume"),
         "restore_local_dir": (_str, ""),
@@ -289,8 +291,26 @@ class Options:
         return errors
 
     def _backend_errors(self):
-        """Backend errors; the proxy is always needed with backend=sdk"""
-        return self._config_errors(self._values)
+        """Backend errors; the FileSet proxy is not used in transfer mode"""
+        return self._config_errors(
+            self._values, proxy_needed=self._values["proxy_mode"] != "transfer"
+        )
+
+    def _proxy_mode_errors(self):
+        """Errors of proxy_mode and proxy_project_credentials"""
+        o = self._values
+        errors = []
+        if o["proxy_mode"] == "transfer":
+            if not o["proxy_project_credentials"]:
+                errors.append("proxy_mode=transfer needs proxy_project_credentials")
+            if o["proxy_instance_id"]:
+                errors.append(
+                    "proxy_instance_id belongs in proxy_project_credentials "
+                    "with proxy_mode=transfer"
+                )
+        elif o["proxy_project_credentials"]:
+            errors.append("proxy_project_credentials needs proxy_mode=transfer")
+        return errors
 
     def validate_backup(self):
         """Return the list of option errors of a backup job (empty = valid)"""
@@ -298,6 +318,7 @@ class Options:
         o = self._values
         if bool(o["server_id"]) == bool(o["server_name"]):
             errors.append("exactly one of server_id and server_name must be set")
+        errors.extend(self._proxy_mode_errors())
         errors.extend(self._backend_errors())
         chunk_size = o["chunk_size"]
         if chunk_size % 65536 != 0 or not MIB <= chunk_size <= GIB:
@@ -315,7 +336,10 @@ class Options:
         errors = []
         o = self._values
         mode = o["restore_target"]
-        cross = bool(o["restore_project_cloud"] or o["restore_project_credentials"])
+        transfer = o["proxy_mode"] == "transfer" and mode == "cloud"
+        cross = bool(
+            o["restore_project_cloud"] or o["restore_project_credentials"] or transfer
+        )
         if o["restore_project_cloud"] and o["restore_project_credentials"]:
             errors.append(
                 "restore_project_cloud and restore_project_credentials exclude "
@@ -338,6 +362,12 @@ class Options:
                     "restore_project_* cannot be used with restore_target=local"
                 )
             return errors
+        errors.extend(self._proxy_mode_errors())
+        if transfer and (o["restore_project_cloud"] or o["restore_project_credentials"]):
+            errors.append(
+                "proxy_mode=transfer excludes restore_project_cloud and "
+                "restore_project_credentials"
+            )
         errors.extend(self._backend_errors())
         if cross:
             for key in ("force", "restore_keep_addresses"):
@@ -374,6 +404,25 @@ class Options:
         full["verify_ssl"] = True
         full.update(config)
         errors = self._config_errors(full, proxy_needed=False)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return full
+
+    def proxy_backend_config(self, credentials_path):
+        """Backend configuration of the provider project, with its proxy_instance_id
+
+        Raises ValueError (no option values in the text) when it is unusable.
+        """
+        o = self._values
+        full = {key: "" for key in self._BACKEND_KEYS if key != "verify_ssl"}
+        full["verify_ssl"] = True
+        for key in ("backend", "fake_root", "cacert", "verify_ssl"):
+            full[key] = o[key]
+        loaded = load_options_file(credentials_path)
+        for key in self._BACKEND_KEYS + ("fake_project_id",):
+            if loaded.is_set(key):
+                full[key] = loaded[key]
+        errors = self._config_errors(full, proxy_needed=True)
         if errors:
             raise ValueError("; ".join(errors))
         return full
