@@ -924,6 +924,108 @@ class FakeBatchDTest(unittest.TestCase):
             self.assertNotIn(snap_id, self.state()["snapshots"])
 
 
+class FakeProxyProjectTest(unittest.TestCase):
+    """The proxy server lives in the TARGET project; PROJECT is the tenant."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        spec = batch_d_spec(proxy_project_id=TARGET)
+        self.tenant, _ = make_cloud(self._tmp.name, spec, proxy_instance_id="")
+        self.provider = fake_backend.FakeBackend(
+            {
+                "backend": "fake",
+                "fake_root": self.tenant._root,
+                "fake_project_id": TARGET,
+                "proxy_instance_id": PROXY,
+            }
+        )
+        self.provider.connect()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def set_quota(self, **limits):
+        with self.tenant._locked() as state:
+            state["quota"] = {TARGET: limits}
+
+    def test_proxy_id_from_the_wrong_project_is_refused(self):
+        cfg = {
+            "backend": "fake",
+            "fake_root": self.tenant._root,
+            "proxy_instance_id": PROXY,
+        }
+        with self.assertRaises(CloudConfigError):
+            fake_backend.FakeBackend(cfg).connect()
+
+    def test_attach_of_a_volume_of_another_project_is_refused(self):
+        vol = self.tenant.create_volume("t", 1, {}, 5)
+        # a connection of the volume's project that is not the proxy's project
+        with self.assertRaises(CloudNotFound):
+            self.tenant.attach_to_proxy(vol.id, 5)
+        with self.assertRaises(CloudNotFound):
+            self.provider.attach_to_proxy(vol.id, 5)
+
+    def test_transfer_then_attach_through_the_provider(self):
+        vol = self.tenant.create_volume("t", 1, {"k": "v"}, 5)
+        tid, key = self.tenant.create_transfer(vol.id, "bareos-7-xfer-x")
+        self.provider.accept_transfer(tid, key, 5)
+        self.assertEqual(self.provider.get_volume(vol.id).status, "available")
+        path = self.provider.attach_to_proxy(vol.id, 5)
+        self.assertTrue(path)
+        self.assertEqual(self.provider.list_proxy_attachments(), [vol.id])
+        self.provider.detach_from_proxy(vol.id, 5)
+        self.provider.delete_volume(vol.id, 5)
+        with self.assertRaises(CloudNotFound):
+            self.provider.get_volume(vol.id)
+
+    def test_accept_over_quota_leaves_the_transfer_pending(self):
+        self.set_quota(volumes=0)
+        vol = self.tenant.create_volume("t", 1, {}, 5)
+        tid, key = self.tenant.create_transfer(vol.id, "bareos-7-xfer-x")
+        with self.assertRaises(CloudConflict) as ctx:
+            self.provider.accept_transfer(tid, key, 5)
+        self.assertIn("volumes", str(ctx.exception))
+        self.assertNotIn(key, str(ctx.exception))
+        self.assertEqual(self.tenant.get_volume(vol.id).status, "awaiting-transfer")
+        self.assertEqual(len(self.tenant.list_transfers("bareos-")), 1)
+
+    def test_gigabyte_and_per_volume_limits(self):
+        self.set_quota(gigabytes=1, per_volume_gigabytes=1)
+        big = self.tenant.create_volume("b", 2, {}, 5)
+        tid, key = self.tenant.create_transfer(big.id, "x")
+        with self.assertRaises(CloudConflict):
+            self.provider.accept_transfer(tid, key, 5)
+        self.tenant.delete_transfer(tid)
+        small = self.tenant.create_volume("s", 1, {}, 5)
+        tid, key = self.tenant.create_transfer(small.id, "y")
+        self.provider.accept_transfer(tid, key, 5)
+
+    def test_volume_limits_report_what_is_left(self):
+        self.assertEqual(self.provider.volume_limits(), {})
+        self.set_quota(volumes=3, gigabytes=10, per_volume_gigabytes=5)
+        self.provider.create_volume("p", 4, {}, 5)
+        self.assertEqual(
+            self.provider.volume_limits(),
+            {"volumes": 2, "gigabytes": 6, "per_volume_gigabytes": 5},
+        )
+
+    def test_lost_create_response_leaves_a_listed_transfer(self):
+        vol = self.tenant.create_volume("t", 1, {}, 5)
+        with self.tenant._locked() as state:
+            state["faults"]["create_transfer"] = {
+                "remaining": 1,
+                "phase": "after",
+                "lost": True,
+            }
+        seen = []
+        with self.assertRaises(CloudError):
+            self.tenant.create_transfer(vol.id, "bareos-7-xfer-x", seen.append)
+        self.assertEqual(seen, [])
+        pending = self.tenant.list_transfers("bareos-7-xfer-")
+        self.assertEqual([t.volume_id for t in pending], [vol.id])
+        self.assertEqual(self.provider.list_transfers("bareos-"), [])
+
+
 class FakeIsolationTest(unittest.TestCase):
     """A scoped connection never sees or changes a foreign owner's resources."""
 
