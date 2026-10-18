@@ -63,6 +63,8 @@ AFTER_OPS = (
     "create_server",
     "attach_to_proxy",
     "create_group_snapshot",
+    "create_transfer",
+    "accept_transfer",
 )
 MIN_GROUP_MICROVERSION = (3, 14)
 
@@ -217,6 +219,36 @@ class FakeBackend(CloudBackend):
             raise CloudConfigError("project %s is not part of the fake cloud" % proj)
         return found
 
+    @staticmethod
+    def _proxy_project(state):
+        """Project of the proxy server record; the cloud's project when unset."""
+        rec = state["servers"].get(state["proxy_server_id"]) or {}
+        return rec.get("project_id", state["project_id"])
+
+    def _quota_free(self, state, proj):
+        """Remaining quota of a project by Cinder name; unlimited keys are left out."""
+        limits = (state.get("quota") or {}).get(proj) or {}
+        used = [v for v in state["volumes"].values() if self._owner(state, v) == proj]
+        free = {}
+        for key, limit in limits.items():
+            limit = int(limit)
+            if limit < 0:
+                continue
+            if key == "per_volume_gigabytes":
+                free[key] = limit
+                continue
+            kind, _, vtype = key.partition("_")
+            scope = [v for v in used if not vtype or v["volume_type"] == vtype]
+            if kind == "volumes":
+                free[key] = limit - len(scope)
+            elif kind == "gigabytes":
+                free[key] = limit - sum(v["size_gb"] for v in scope)
+        return free
+
+    @staticmethod
+    def _owner(state, rec):
+        return rec.get("project_id", state["project_id"])
+
     def _require_proxy(self):
         if self._no_proxy:
             raise CloudConfigError("this connection has no proxy server")
@@ -275,6 +307,11 @@ class FakeBackend(CloudBackend):
             if wanted and wanted != state["proxy_server_id"]:
                 raise CloudConfigError(
                     "proxy_instance_id %s is not the proxy of the fake cloud" % wanted
+                )
+            if wanted and self._proj(state) != self._proxy_project(state):
+                raise CloudConfigError(
+                    "proxy server %s is not in project %s"
+                    % (wanted, self._proj(state))
                 )
 
     def close(self):
@@ -634,6 +671,10 @@ class FakeBackend(CloudBackend):
             if vol is None:
                 raise CloudNotFound("volume %s not found" % volume_id)
             proxy = state["proxy_server_id"]
+            if self._owner(state, vol) != self._proxy_project(state):
+                raise CloudNotFound(
+                    "volume %s is not in the project of the proxy server" % volume_id
+                )
             if proxy not in vol["attached_server_ids"]:
                 if vol["status"] != "available":
                     raise CloudConflict(
@@ -738,7 +779,7 @@ class FakeBackend(CloudBackend):
             }
             vol["status"] = "awaiting-transfer"
             self._log(state, "create_transfer", transfer_id)
-        if on_created is not None:
+        if on_created is not None and not self._lost_response("create_transfer"):
             on_created(transfer_id)
         return transfer_id, key
 
@@ -756,6 +797,18 @@ class FakeBackend(CloudBackend):
                     "transfer %s cannot be accepted by its own project" % transfer_id
                 )
             vol = state["volumes"][rec["volume_id"]]
+            free = self._quota_free(state, proj)
+            for key, left in free.items():
+                need = 1 if key.startswith("volumes") else vol["size_gb"]
+                if key == "per_volume_gigabytes":
+                    over = vol["size_gb"] > left
+                else:
+                    vtype = key.partition("_")[2]
+                    over = (not vtype or vol["volume_type"] == vtype) and need > left
+                if over:
+                    raise CloudConflict(
+                        "quota %s of project %s is exceeded" % (key, proj)
+                    )
             if proj == state["project_id"]:
                 vol.pop("project_id", None)
             else:
@@ -763,6 +816,10 @@ class FakeBackend(CloudBackend):
             vol["status"] = "available"
             del state["transfers"][transfer_id]
             self._log(state, "accept_transfer", transfer_id)
+
+    def volume_limits(self):
+        with self._locked(write=False) as state:
+            return self._quota_free(state, self._proj(state))
 
     @_fault_wrapper
     def delete_transfer(self, transfer_id):
@@ -1244,6 +1301,8 @@ def seed(root, spec, reset=False):
     state.update(_seed_catalog(spec))
     for extra in spec.get("projects", []):
         state.setdefault("projects", {})[extra["id"]] = _seed_catalog(extra)
+    if spec.get("quota"):
+        state["quota"] = copy.deepcopy(spec["quota"])
     for key in (
         "block_storage_microversion",
     ):
@@ -1272,6 +1331,9 @@ def seed(root, spec, reset=False):
         "security_groups": [],
         "attachments": [],
     }
+
+    if spec.get("proxy_project_id"):
+        state["servers"][proxy_id]["project_id"] = spec["proxy_project_id"]
 
     result = {"servers": {}, "volumes": {}, "ports": {}}
     for srv in spec.get("servers", []):
@@ -1486,6 +1548,7 @@ def _run(args):
                         "id": rec["id"],
                         "name": rec["name"],
                         "status": rec["status"],
+                        "project_id": rec.get("project_id", state["project_id"]),
                         "volume_ids": [a["volume_id"] for a in rec["attachments"]],
                         "port_ids": sorted(
                             p["id"]

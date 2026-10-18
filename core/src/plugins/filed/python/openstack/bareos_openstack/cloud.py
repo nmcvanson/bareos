@@ -463,6 +463,10 @@ class CloudBackend(abc.ABC):
     def list_transfers(self, name_prefix):
         pass
 
+    def volume_limits(self):
+        """Remaining volume quota by Cinder name, or None when it cannot be read."""
+        return None
+
     @abc.abstractmethod
     def find_consistency_group(self, volume_ids):
         """Id of the group holding exactly these volumes, with consistent snapshots."""
