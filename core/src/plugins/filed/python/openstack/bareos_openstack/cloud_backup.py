@@ -19,9 +19,10 @@
 
 """Cloud side of a backup job: snapshots, temporary volumes and their cleanup."""
 
+import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .cloud import (
     CONSISTENCY_GROUP,
@@ -48,6 +49,7 @@ from .cloud import (
 )
 
 USABLE_STATUSES = ("ACTIVE", "SHUTOFF", "PAUSED", "SUSPENDED")
+XFER_NAME = re.compile(r"^bareos-(\d+)-xfer-")
 
 
 @dataclass
@@ -56,6 +58,15 @@ class BackupInventory:
     volumes: list
     ports: list
     consistency: str = CONSISTENCY_PER_VOLUME
+
+
+@dataclass
+class PendingTransfer:
+    """A pending transfer of a temporary volume, seen as a leftover."""
+
+    id: str
+    volume_id: str
+    metadata: dict = field(default_factory=dict)
 
 
 def _no_log(_level, _message):
@@ -99,6 +110,7 @@ class BackupCloudSession:
         self.pbe = proxy_backend or backend
         self.transfers = {}
         self.owners = {}
+        self._scope = {}
         self.job_id = job_id
         self.server_id = server_id
         self.server_name = server_name
@@ -216,14 +228,32 @@ class BackupCloudSession:
                     tags = gsnap.tags
                     if tags.get(TAG_SERVER_ID) == server.id:
                         groups.append(gsnap)
-            for vol in self.backend.list_volumes(
-                dict(wanted, **{TAG_ROLE: ROLE_BACKUP_TEMP_VOLUME})
-            ):
-                found.append(("volume", vol))
+            scopes = [("tenant", self.backend)]
+            if self.proxy_backend is not None:
+                scopes.append(("provider", self.proxy_backend))
+            for scope, be in scopes:
+                for vol in be.list_volumes(
+                    dict(wanted, **{TAG_ROLE: ROLE_BACKUP_TEMP_VOLUME})
+                ):
+                    found.append(("volume", vol))
+                    self._scope[vol.id] = scope
             for snap in self.backend.list_snapshots(
                 dict(wanted, **{TAG_ROLE: ROLE_BACKUP_SNAPSHOT})
             ):
                 found.append(("snapshot", snap))
+            if self.proxy_backend is not None:
+                held = {r.id for k, r in found if k == "volume"}
+                for tr in self.backend.list_transfers("bareos-"):
+                    match = XFER_NAME.match(tr.name)
+                    if match and tr.volume_id in held:
+                        found.append(
+                            (
+                                "transfer",
+                                PendingTransfer(
+                                    tr.id, tr.volume_id, {TAG_JOB_ID: match.group(1)}
+                                ),
+                            )
+                        )
         except CloudError as exc:
             self._log("warning", "cannot look for leftover resources: %s" % exc)
             return []
@@ -274,21 +304,28 @@ class BackupCloudSession:
                 % ", ".join(kept),
             )
         try:
-            attached = set(self.backend.list_proxy_attachments())
+            attached = set(self.pbe.list_proxy_attachments())
         except CloudError as exc:
             self._log("warning", "cannot list proxy attachments: %s" % exc)
             attached = set()
         for kind, res in [
             r
-            for name in ("volume", "snapshot", "group snapshot")
+            for name in ("transfer", "volume", "snapshot", "group snapshot")
             for r in removable
             if r[0] == name
         ]:
             try:
-                if kind == "volume":
+                if kind == "transfer":
+                    self.backend.delete_transfer(res.id)
+                elif kind == "volume":
                     if res.id in attached:
-                        self.backend.detach_from_proxy(res.id, self.poll_timeout)
-                    self.backend.delete_volume(res.id, self.poll_timeout)
+                        self.pbe.detach_from_proxy(res.id, self.poll_timeout)
+                    owner = (
+                        self.proxy_backend
+                        if self._scope.get(res.id) == "provider"
+                        else self.backend
+                    )
+                    owner.delete_volume(res.id, self.poll_timeout)
                 elif kind == "snapshot":
                     self.backend.delete_snapshot(res.id, self.poll_timeout)
                 else:
@@ -643,21 +680,41 @@ class BackupCloudSession:
             intents = sorted(self.attach_intents)
             temps = dict(self.temp_volumes)
             snaps = dict(self.snapshots)
-        for volume_id in intents:
-            if self._detach(volume_id, failed):
-                with self._lock:
-                    self.attach_intents.discard(volume_id)
-        for source, volume_id in temps.items():
-            if self._delete_volume(volume_id, failed):
-                with self._lock:
-                    if self.temp_volumes.get(source) == volume_id:
-                        del self.temp_volumes[source]
+        if self.proxy_backend is not None:
+            self._cleanup_transfer_volumes(temps, failed)
+        else:
+            for volume_id in intents:
+                if self._detach(volume_id, failed):
+                    with self._lock:
+                        self.attach_intents.discard(volume_id)
+            for source, volume_id in temps.items():
+                if self._delete_volume(volume_id, failed):
+                    with self._lock:
+                        if self.temp_volumes.get(source) == volume_id:
+                            del self.temp_volumes[source]
         for source, snapshot_id in snaps.items():
             if self._delete_snapshot(snapshot_id, failed):
                 with self._lock:
                     if self.snapshots.get(source) == snapshot_id:
                         del self.snapshots[source]
         wanted = {TAG_CREATED_BY: TAG_CREATED_BY_VALUE, TAG_JOB_ID: str(self.job_id)}
+        if self.proxy_backend is None:
+            self._sweep_temp_volumes(wanted, failed)
+        try:
+            snapshots = self.backend.list_snapshots(
+                dict(wanted, **{TAG_ROLE: ROLE_BACKUP_SNAPSHOT})
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log(
+                "warning", "cannot list snapshots of job %s: %s" % (self.job_id, exc)
+            )
+            snapshots = []
+        for snap in snapshots:
+            self._delete_snapshot(snap.id, failed)
+        if self.snapshot_mode == "group":
+            self._cleanup_group_snapshots(failed)
+
+    def _sweep_temp_volumes(self, wanted, failed):
         try:
             volumes = self.backend.list_volumes(
                 dict(wanted, **{TAG_ROLE: ROLE_BACKUP_TEMP_VOLUME})
@@ -672,19 +729,74 @@ class BackupCloudSession:
             if vol.id in attached and not self._detach(vol.id, failed):
                 continue
             self._delete_volume(vol.id, failed)
+
+    def _cleanup_transfer_volumes(self, temps, failed):
+        """Transfer mode: drop pending transfers, then delete volumes by owner."""
+        prefix = "bareos-%s-xfer-" % self.job_id
         try:
-            snapshots = self.backend.list_snapshots(
-                dict(wanted, **{TAG_ROLE: ROLE_BACKUP_SNAPSHOT})
-            )
+            pending = self.backend.list_transfers(prefix)
         except Exception as exc:  # pylint: disable=broad-except
             self._log(
-                "warning", "cannot list snapshots of job %s: %s" % (self.job_id, exc)
+                "warning", "cannot list transfers of job %s: %s" % (self.job_id, exc)
             )
-            snapshots = []
-        for snap in snapshots:
-            self._delete_snapshot(snap.id, failed)
-        if self.snapshot_mode == "group":
-            self._cleanup_group_snapshots(failed)
+            pending = []
+        for tr in pending:
+            try:
+                self.backend.delete_transfer(tr.id)
+                failed.pop("transfer %s" % tr.id, None)
+            except Exception as exc:  # pylint: disable=broad-except
+                failed["transfer %s" % tr.id] = str(exc)
+        with self._lock:
+            self.transfers.clear()
+        for source, volume_id in temps.items():
+            if self._delete_temp(volume_id, failed):
+                with self._lock:
+                    if self.temp_volumes.get(source) == volume_id:
+                        del self.temp_volumes[source]
+        wanted = {
+            TAG_CREATED_BY: TAG_CREATED_BY_VALUE,
+            TAG_JOB_ID: str(self.job_id),
+            TAG_ROLE: ROLE_BACKUP_TEMP_VOLUME,
+        }
+        for be in (self.backend, self.proxy_backend):
+            try:
+                volumes = be.list_volumes(wanted)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log(
+                    "warning",
+                    "cannot list volumes of job %s: %s" % (self.job_id, exc),
+                )
+                continue
+            for vol in volumes:
+                self._delete_temp(vol.id, failed)
+
+    def _delete_temp(self, volume_id, failed):
+        """Delete a temporary volume wherever it is; keep it when the owner is unknown."""
+        key = "volume %s" % volume_id
+        for _ in range(3):
+            owner = self._resolve_owner(volume_id)
+            if owner == "gone":
+                with self._lock:
+                    self.attach_intents.discard(volume_id)
+                failed.pop(key, None)
+                failed.pop("attachment %s" % volume_id, None)
+                return True
+            if owner == "unknown":
+                failed[key] = "the owner of the volume could not be established"
+                return False
+            be = self.proxy_backend if owner == "provider" else self.backend
+            try:
+                if owner == "provider":
+                    if volume_id in self.pbe.list_proxy_attachments():
+                        self.pbe.detach_from_proxy(volume_id, self.poll_timeout)
+                    with self._lock:
+                        self.attach_intents.discard(volume_id)
+                be.delete_volume(volume_id, self.poll_timeout)
+            except Exception as exc:  # pylint: disable=broad-except
+                failed[key] = str(exc)
+                return False
+        failed[key] = "the volume is still present after the delete"
+        return False
 
     def _cleanup_group_snapshots(self, failed):
         """Remove the tracked group snapshot and those found by description."""
