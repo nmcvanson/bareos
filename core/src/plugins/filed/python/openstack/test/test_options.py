@@ -657,5 +657,108 @@ class LoadOptionsFileTests(unittest.TestCase):
             opt.load_options_file(os.path.join(self.tmp, "missing.ini"))
 
 
+class ProxyModeTests(unittest.TestCase):
+    @staticmethod
+    def sdk(**extra):
+        o = Options()
+        o["server_id"] = "abc"
+        o["cloud"] = "tenant"
+        for key, value in extra.items():
+            o[key] = value
+        return o
+
+    def test_defaults_are_native(self):
+        o = Options()
+        self.assertEqual(o["proxy_mode"], "native")
+        self.assertEqual(o["proxy_project_credentials"], "")
+
+    def test_transfer_needs_credentials_file(self):
+        o = self.sdk(proxy_mode="transfer")
+        self.assertTrue(
+            any("proxy_project_credentials" in e for e in o.validate_backup())
+        )
+        o["proxy_project_credentials"] = "provider.ini"
+        self.assertEqual(o.validate_backup(), [])
+
+    def test_transfer_tenant_has_no_proxy_id(self):
+        o = self.sdk(
+            proxy_mode="transfer",
+            proxy_project_credentials="provider.ini",
+            proxy_instance_id="p",
+        )
+        self.assertTrue(any("proxy_instance_id" in e for e in o.validate_backup()))
+
+    def test_native_refuses_credentials_file(self):
+        o = self.sdk(proxy_instance_id="p", proxy_project_credentials="p.ini")
+        self.assertTrue(any("proxy_mode=transfer" in e for e in o.validate_backup()))
+
+    def test_native_still_needs_proxy_id(self):
+        self.assertTrue(
+            any("proxy_instance_id" in e for e in self.sdk().validate_backup())
+        )
+
+    def test_restore_transfer_rules(self):
+        o = self.sdk(proxy_mode="transfer", proxy_project_credentials="p.ini")
+        self.assertEqual(o.validate_restore("/r"), [])
+        o["restore_security_groups"] = "default"
+        self.assertEqual(o.validate_restore("/r"), [])
+        for key in ("force", "restore_keep_addresses"):
+            bad = self.sdk(proxy_mode="transfer", proxy_project_credentials="p.ini")
+            bad[key] = "yes"
+            self.assertTrue(bad.validate_restore("/r"), key)
+        for key, value in (
+            ("restore_project_cloud", "other"),
+            ("restore_project_credentials", "t.ini"),
+        ):
+            bad = self.sdk(proxy_mode="transfer", proxy_project_credentials="p.ini")
+            bad[key] = value
+            errors = bad.validate_restore("/r")
+            self.assertTrue(any("excludes" in e for e in errors), key)
+
+    def test_restore_local_ignores_proxy_mode(self):
+        o = Options()
+        o["restore_target"] = "local"
+        o["proxy_mode"] = "transfer"
+        o["restore_local_dir"] = "/tmp/x"
+        self.assertEqual(o.validate_restore("/r"), [])
+
+
+class ProxyBackendConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, text):
+        path = os.path.join(self.tmp, "provider.ini")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_keeps_proxy_id(self):
+        path = self.write(
+            "auth_url=https://k/v3\nusername=u\npassword=ProviderPw1\n"
+            "proxy_instance_id=proxy-1\n"
+        )
+        cfg = Options().proxy_backend_config(path)
+        self.assertEqual(cfg["proxy_instance_id"], "proxy-1")
+        self.assertEqual(cfg["password"], "ProviderPw1")
+        self.assertEqual(set(cfg) - {"fake_project_id"}, BACKEND_KEYS)
+
+    def test_fake_project_id(self):
+        o = Options()
+        o["backend"] = "fake"
+        o["fake_root"] = "/r"
+        cfg = o.proxy_backend_config(self.write("fake_project_id=prov\n"))
+        self.assertEqual(cfg["fake_project_id"], "prov")
+        self.assertEqual(cfg["fake_root"], "/r")
+
+    def test_missing_proxy_id_refused_without_values(self):
+        path = self.write("auth_url=https://k/v3\nusername=u\npassword=ProviderPw1\n")
+        with self.assertRaises(ValueError) as ctx:
+            Options().proxy_backend_config(path)
+        self.assertIn("proxy_instance_id", str(ctx.exception))
+        self.assertNotIn("ProviderPw1", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

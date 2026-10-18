@@ -351,6 +351,70 @@ class PluginSmokeTests(unittest.TestCase):
         self.assertEqual(rc, stub.bRC_OK, stub.messages)
         self.assertTrue([m for _, m in stub.messages if "restored server" in m])
 
+    def transfer_cloud(self):
+        """Two-project fake cloud: the proxy lives in proj-b; returns the creds file."""
+        spec = copy.deepcopy(SPEC)
+        spec["proxy_project_id"] = "proj-b"
+        spec["projects"] = [
+            {
+                "id": "proj-b",
+                "flavors": copy.deepcopy(SPEC["flavors"]),
+                "networks": copy.deepcopy(SPEC["networks"]),
+                "security_groups": [{"id": "sg-b", "name": "default"}],
+            }
+        ]
+        root = os.path.join(self.tmp, "fake-transfer")
+        self.fake_backend.seed(root, spec)
+        creds = os.path.join(self.tmp, "provider.ini")
+        with open(creds, "w", encoding="utf-8") as f:
+            f.write(
+                "backend=fake\nfake_project_id=proj-b\nproxy_instance_id=%s\n"
+                % PROXY_ID
+            )
+        self.root = root
+        return creds
+
+    def test_transfer_mode_backup_then_restore_reverses_the_transfer(self):
+        stub = bareosfd_stub
+        creds = self.transfer_cloud()
+        source = self.volume_bytes()
+        defn = self.plugindef(proxy_mode="transfer", proxy_project_credentials=creds)
+        plugin, rc = self.daemon.new_plugin(defn)
+        self.assertEqual(rc, stub.bRC_OK, stub.messages)
+        rc, files = self.daemon.backup(plugin)
+        self.assertEqual(rc, stub.bRC_OK, stub.messages)
+        chunks = [f for f in files if f["type"] == stub.FT_REG]
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(chunks[0]["data"], source[:MIB])
+        self.assertEqual(chunks[2]["data"], source[2 * MIB :])
+        self.check_clean()
+        rplugin, rc = self.daemon.new_plugin(defn)
+        self.assertEqual(rc, stub.bRC_OK, stub.messages)
+        rc = self.daemon.restore(rplugin, files)
+        self.assertEqual(rc, stub.bRC_OK, stub.messages)
+        self.assertTrue([m for _, m in stub.messages if "restored server" in m])
+        self.check_clean()
+        with open(os.path.join(self.root, "state.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        restored = [
+            v for v in state["volumes"].values() if v["name"].endswith("-restore-1")
+        ]
+        self.assertEqual(len(restored), 1)
+        self.assertNotEqual(restored[0].get("project_id"), "proj-b")
+        with open(os.path.join(self.root, "volumes", restored[0]["id"] + ".img"), "rb") as f:
+            self.assertEqual(f.read(len(source)), source)
+
+    def test_transfer_mode_without_credentials_is_refused(self):
+        stub = bareosfd_stub
+        plugin, rc = self.daemon.new_plugin(self.plugindef(proxy_mode="transfer"))
+        self.assertEqual(rc, stub.bRC_OK)
+        rc, _ = self.daemon.backup(plugin)
+        self.assertEqual(rc, stub.bRC_Error)
+        self.assertTrue(
+            [m for _, m in stub.messages if "proxy_project_credentials" in m],
+            stub.messages,
+        )
+
     def test_cross_project_with_force_is_refused_before_the_cloud(self):
         stub = bareosfd_stub
         plugin, _ = self.daemon.new_plugin(self.plugindef())
