@@ -40,7 +40,7 @@ from .cloud import (
 )
 from .cloud_backup import USABLE_STATUSES
 
-XFER_NAME = re.compile(r"^bareos-\d+-xfer-")
+XFER_NAME = re.compile(r"^bareos-(\d+)-xfer-")
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -59,6 +59,11 @@ def _build_parser():
     parser.add_argument("--config", help="options file (defaults_file format)")
     parser.add_argument("--backend", choices=("sdk", "fake"))
     parser.add_argument("--fake-root", help="fake cloud directory (--backend fake)")
+    parser.add_argument(
+        "--proxy-credentials",
+        help="proxy_project_credentials file of a transfer-mode setup; the tool "
+        "then looks at the tenant and the provider project",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list-servers", help="list the servers of the project")
@@ -88,6 +93,7 @@ def _build_parser():
 
 
 def _backend(args):
+    loaded = None
     if args.config:
         loader = getattr(options, "load_options_file", None)
         if loader is None:
@@ -107,9 +113,43 @@ def _backend(args):
         raise ToolError("--backend fake needs --fake-root")
     if config.get("backend") != "fake" and not args.config:
         raise ToolError("--config is required for backend sdk")
-    backend = create_backend(config, proxy=True)
-    backend.connect()
+    transfer = bool(args.proxy_credentials)
+    args.pbe = None
+    backend = create_backend(config, proxy=not transfer)
+    try:
+        backend.connect()
+        if transfer:
+            args.pbe = _provider_backend(args, config, loaded)
+    except Exception:
+        backend.close()
+        raise
     return backend
+
+
+def _provider_backend(args, config, loaded):
+    """Connect the provider project named by --proxy-credentials."""
+    opts = loaded or options.Options()
+    if loaded is None:
+        opts["backend"] = config.get("backend", "sdk")
+    if config.get("fake_root"):
+        opts["fake_root"] = config["fake_root"]
+    try:
+        provider = opts.proxy_backend_config(args.proxy_credentials)
+    except (OSError, ValueError, options.UnknownOptionError) as exc:
+        raise ToolError(
+            "cannot read %s: %s" % (args.proxy_credentials, exc)
+        ) from exc
+    pbe = create_backend(provider, proxy=True)
+    pbe.connect()
+    return pbe
+
+
+def _scopes(be, args):
+    """(name, backend) of every project to look at; one unnamed one without transfer."""
+    pbe = getattr(args, "pbe", None)
+    if pbe is None:
+        return [("", be)]
+    return [("tenant", be), ("provider", pbe)]
 
 
 def _out(text):
@@ -220,23 +260,28 @@ def _collect(be, server_id):
     return found
 
 
-def _report_only(be, server_id):
+def _prefix(scope):
+    return scope + " " if scope else ""
+
+
+def _report_only(be, server_id, scope=""):
     """Lines for pending Bareos transfers."""
     lines = []
     try:
         for tr in be.list_transfers("bareos-"):
             if XFER_NAME.match(tr.name):
                 lines.append(
-                    "transfer %s name=%s volume=%s (pending; not removed by the "
-                    "tool)" % (tr.id, tr.name, tr.volume_id)
+                    "%stransfer %s name=%s volume=%s (pending; not removed by the "
+                    "tool)" % (_prefix(scope), tr.id, tr.name, tr.volume_id)
                 )
     except CloudError as exc:
         print("warning: transfers not listed: %s" % exc, file=sys.stderr)
     return lines
 
 
-def _line(kind, res, tags):
-    return "%s %s job=%s server=%s" % (
+def _line(kind, res, tags, scope=""):
+    return "%s%s %s job=%s server=%s" % (
+        _prefix(scope),
         kind,
         res.id,
         tags.get(TAG_JOB_ID, "?"),
@@ -244,65 +289,121 @@ def _line(kind, res, tags):
     )
 
 
+def _proxy_side(scope):
+    """True when the scope's connection holds the proxy server."""
+    return scope != "tenant"
+
+
 def _leftovers(be, args):
     if args.cleanup:
         return _cleanup(be, args)
-    found = _collect(be, args.server_id)
-    listed = {res.id for kind, res, _ in found if kind == "volume"}
-    attached = [v for v in be.list_proxy_attachments() if v in listed]
-    for kind, res, tags in found:
-        _out(_line(kind, res, tags))
-    for volume_id in attached:
-        _out("attachment %s is attached to the proxy" % volume_id)
-    pending = _report_only(be, args.server_id)
-    for line in pending:
-        _out(line)
-    if not found and not attached and not pending:
+    anything = False
+    for scope, sbe in _scopes(be, args):
+        found = _collect(sbe, args.server_id)
+        listed = {res.id for kind, res, _ in found if kind == "volume"}
+        attached = []
+        if _proxy_side(scope):
+            attached = [v for v in sbe.list_proxy_attachments() if v in listed]
+        for kind, res, tags in found:
+            _out(_line(kind, res, tags, scope))
+        for volume_id in attached:
+            _out(
+                "%sattachment %s is attached to the proxy"
+                % (_prefix(scope), volume_id)
+            )
+        pending = _report_only(sbe, args.server_id, scope)
+        for line in pending:
+            _out(line)
+        anything = anything or bool(found or attached or pending)
+    if not anything:
         _out("no leftovers")
         return EXIT_OK
     return EXIT_FINDINGS
 
 
+def _drop_backup_transfers(sbe, scope, found, args):
+    """Delete pending transfers of older backup jobs; return the failure count."""
+    tags_of = {res.id: tags for kind, res, tags in found if kind == "volume"}
+    failures = 0
+    try:
+        pending = sbe.list_transfers("bareos-")
+    except CloudError as exc:
+        _out("FAILED  %stransfers not listed: %s" % (_prefix(scope), exc))
+        return 1
+    for tr in pending:
+        match = XFER_NAME.match(tr.name)
+        tags = tags_of.get(tr.volume_id)
+        if not match or tags is None:
+            continue
+        job = match.group(1)
+        if tags.get(TAG_JOB_ID) != job or int(job) >= args.older_than_job:
+            continue
+        try:
+            sbe.delete_transfer(tr.id)
+            _out("removed %stransfer %s name=%s" % (_prefix(scope), tr.id, tr.name))
+        except CloudError as exc:
+            failures += 1
+            _out("FAILED  %stransfer %s: %s" % (_prefix(scope), tr.id, exc))
+    return failures
+
+
+def _remove(sbe, scope, found, attached, args, kinds):
+    """Remove (or report as kept) the resources of the given kinds; return failures."""
+    failures = 0
+    for kind in kinds:
+        for item_kind, res, tags in found:
+            if item_kind != kind:
+                continue
+            job = tags.get(TAG_JOB_ID, "")
+            if not job.isdigit() or int(job) >= args.older_than_job:
+                _out(
+                    "kept    %s (job id not lower than %d)"
+                    % (_line(kind, res, tags, scope), args.older_than_job)
+                )
+                continue
+            if kind == "volume" and res.id in attached and not args.detach:
+                _out(
+                    "kept    %s (attached to the proxy; a job may be reading it)"
+                    % _line(kind, res, tags, scope)
+                )
+                continue
+            try:
+                if kind == "volume":
+                    if res.id in attached:
+                        sbe.detach_from_proxy(res.id, args.timeout)
+                    sbe.delete_volume(res.id, args.timeout)
+                elif kind == "snapshot":
+                    sbe.delete_snapshot(res.id, args.timeout)
+                else:
+                    sbe.delete_group_snapshot(res.id, args.timeout)
+                _out("removed %s" % _line(kind, res, tags, scope))
+            except CloudError as exc:
+                failures += 1
+                _out("FAILED  %s: %s" % (_line(kind, res, tags, scope), exc))
+    return failures
+
+
 def _cleanup(be, args):
     if args.older_than_job is None or not args.yes:
         raise ToolError("--cleanup needs --older-than-job N and --yes")
-    timeout = args.timeout
-    attached = set(be.list_proxy_attachments())
     failures = 0
-    collected = _collect(be, args.server_id)
-    ordered = sorted(
-        collected,
-        key=lambda item: ("volume", "snapshot", "group snapshot").index(item[0]),
-    )
-    for kind, res, tags in ordered:
-        job = tags.get(TAG_JOB_ID, "")
-        if not job.isdigit() or int(job) >= args.older_than_job:
-            _out(
-                "kept    %s (job id not lower than %d)"
-                % (_line(kind, res, tags), args.older_than_job)
-            )
-            continue
-        if kind == "volume" and res.id in attached and not args.detach:
-            _out(
-                "kept    %s (attached to the proxy; a job may be reading it)"
-                % _line(kind, res, tags)
-            )
-            continue
-        try:
-            if kind == "volume":
-                if res.id in attached:
-                    be.detach_from_proxy(res.id, timeout)
-                be.delete_volume(res.id, timeout)
-            elif kind == "snapshot":
-                be.delete_snapshot(res.id, timeout)
-            else:
-                be.delete_group_snapshot(res.id, timeout)
-            _out("removed %s" % _line(kind, res, tags))
-        except CloudError as exc:
-            failures += 1
-            _out("FAILED  %s: %s" % (_line(kind, res, tags), exc))
-    for line in _report_only(be, args.server_id):
-        _out("kept    %s" % line)
+    scopes = _scopes(be, args)
+    # volumes of every scope first, then the snapshots they were made from
+    collected = {}
+    for scope, sbe in scopes:
+        attached = set(sbe.list_proxy_attachments()) if _proxy_side(scope) else set()
+        found = _collect(sbe, args.server_id)
+        collected[scope] = found
+        if getattr(args, "pbe", None) is not None:
+            failures += _drop_backup_transfers(sbe, scope, found, args)
+        failures += _remove(sbe, scope, found, attached, args, ("volume",))
+    for scope, sbe in scopes:
+        failures += _remove(
+            sbe, scope, collected[scope], set(), args, ("snapshot", "group snapshot")
+        )
+    for scope, sbe in scopes:
+        for line in _report_only(sbe, args.server_id, scope):
+            _out("kept    %s" % line)
     return EXIT_FINDINGS if failures else EXIT_OK
 
 
@@ -328,6 +429,9 @@ def main(argv=None):
     finally:
         if backend is not None:
             backend.close()
+        pbe = getattr(args, "pbe", None)
+        if pbe is not None:
+            pbe.close()
 
 
 if __name__ == "__main__":
