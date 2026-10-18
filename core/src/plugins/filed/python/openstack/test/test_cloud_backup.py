@@ -50,6 +50,7 @@ from test_cloud_fake import (
     base_spec,
     batch_d_spec,
     image_booted_spec,
+    TARGET,
     make_cloud,
     read_state,
 )
@@ -427,6 +428,209 @@ class BackupSessionTest(unittest.TestCase):
         self.assertEqual(sess.cleanup(), [])
         self.assertEqual(check_clean(self.be), [])
 
+
+
+class TransferBackupTest(unittest.TestCase):
+    """Transfer mode: tenant connection `be`, provider connection `pbe`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        spec = batch_d_spec(groups=False, proxy_project_id=TARGET)
+        self.be, _ = make_cloud(
+            self._tmp.name, spec, proxy_instance_id="", proxy=False
+        )
+        self.pbe = fake_backend.FakeBackend(
+            {
+                "backend": "fake",
+                "fake_root": self.be._root,
+                "fake_project_id": TARGET,
+                "proxy_instance_id": PROXY,
+            }
+        )
+        self.pbe.connect()
+        self.log = Collector()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def session(self, job=JOB, **kw):
+        args = dict(
+            server_id=SERVER,
+            poll_timeout=5,
+            log=self.log,
+            proxy_backend=self.pbe,
+        )
+        args.update(kw)
+        return BackupCloudSession(self.be, job, **args)
+
+    def fault(self, op, **spec):
+        with self.be._locked() as state:
+            state["faults"][op] = spec
+
+    def quota(self, **limits):
+        with self.be._locked() as state:
+            state["quota"] = {TARGET: limits}
+
+    def state(self):
+        return read_state(self.be)
+
+    def assert_clean(self):
+        state = self.state()
+        self.assertEqual(state.get("transfers", {}), {})
+        self.assertEqual(
+            [
+                v["id"]
+                for v in state["volumes"].values()
+                if v["metadata"].get("bareos-role") == "backup-temp-volume"
+            ],
+            [],
+        )
+        self.assertEqual(check_clean(self.be), [])
+
+    def test_open_moves_the_volume_and_release_cleans_up(self):
+        sess = self.session()
+        sess.prepare()
+        path = sess.open_volume(ROOT_VOL)
+        temp = sess.temp_volumes[ROOT_VOL]
+        self.assertTrue(path)
+        rec = self.state()["volumes"][temp]
+        self.assertEqual(rec["project_id"], TARGET)
+        self.assertEqual(rec["attached_server_ids"], [PROXY])
+        self.assertEqual(sess.transfers, {})
+        sess.release_volume(ROOT_VOL)
+        self.assertNotIn(temp, self.state()["volumes"])
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_quota_short_refuses_before_the_transfer(self):
+        self.quota(volumes=0)
+        sess = self.session()
+        sess.prepare()
+        with self.assertRaises(CloudConflict):
+            sess.open_volume(ROOT_VOL)
+        self.assertEqual(self.state().get("transfers", {}), {})
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_accept_refused_leaves_a_pending_transfer_for_cleanup(self):
+        self.fault("accept_transfer", remaining=1, message="quota says no")
+        sess = self.session()
+        sess.prepare()
+        with self.assertRaises(CloudError) as ctx:
+            sess.open_volume(ROOT_VOL)
+        transfer = next(iter(self.state()["transfers"].values()))
+        key = transfer["auth_key"]
+        self.assertNotIn(key, str(ctx.exception))
+        self.assertEqual(len(sess.transfers), 1)
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+        self.assertFalse(any(key in msg for _, msg in self.log.lines))
+
+    def test_lost_create_response_is_found_by_name(self):
+        self.fault("create_transfer", remaining=1, phase="after", lost=True)
+        sess = self.session()
+        sess.prepare()
+        with self.assertRaises(CloudError):
+            sess.open_volume(ROOT_VOL)
+        self.assertEqual(sess.transfers, {})
+        self.assertEqual(len(self.state()["transfers"]), 1)
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_lost_accept_response_reconciles_the_owner(self):
+        self.fault("accept_transfer", remaining=1, phase="after")
+        sess = self.session()
+        sess.prepare()
+        with self.assertRaises(CloudError):
+            sess.open_volume(ROOT_VOL)
+        temp = sess.temp_volumes[ROOT_VOL]
+        self.assertEqual(sess.owners[temp], "provider")
+        self.assertEqual(self.state()["volumes"][temp]["project_id"], TARGET)
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_attach_failure_after_the_move_deletes_through_the_provider(self):
+        self.fault("attach_to_proxy", remaining=1, message="attach broke")
+        sess = self.session()
+        sess.prepare()
+        with self.assertRaises(CloudError):
+            sess.open_volume(ROOT_VOL)
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_unknown_owner_is_kept_and_reported(self):
+        sess = self.session()
+        sess.prepare()
+        sess.open_volume(ROOT_VOL)
+        temp = sess.temp_volumes[ROOT_VOL]
+        with mock.patch.object(self.pbe, "get_volume", side_effect=OSError("down")):
+            left = sess.cleanup()
+        self.assertIn("volume %s" % temp, left)
+        self.assertIn(temp, self.state()["volumes"])
+
+    def test_accept_landing_during_cleanup_does_not_leak(self):
+        sess = self.session()
+        sess.prepare()
+        tenant_vol = self.be.create_volume(
+            "bareos-%d-tmp-x" % JOB,
+            1,
+            bareos_tags(JOB, SERVER, "backup-temp-volume", ROOT_VOL),
+            5,
+        )
+        sess.temp_volumes[ROOT_VOL] = tenant_vol.id
+        tid, key = self.be.create_transfer(
+            tenant_vol.id, "bareos-%d-xfer-%s" % (JOB, ROOT_VOL)
+        )
+        real = self.be.delete_transfer
+
+        def accept_first(transfer_id):
+            self.pbe.accept_transfer(transfer_id, key, 5)
+            return real(transfer_id)
+
+        with mock.patch.object(self.be, "delete_transfer", side_effect=accept_first):
+            self.assertEqual(sess.cleanup(), [])
+        self.assertNotIn(tenant_vol.id, self.state()["volumes"])
+        self.assert_clean()
+
+    def earlier_job(self, job=JOB - 1):
+        """Leave a provider-owned attached volume and a pending transfer of `job`."""
+        old = self.session(job)
+        old.prepare()
+        old.open_volume(ROOT_VOL)
+        stuck = self.be.create_volume(
+            "bareos-%d-tmp-%s" % (job, DATA_VOL),
+            1,
+            bareos_tags(job, SERVER, "backup-temp-volume", DATA_VOL),
+            5,
+        )
+        self.be.create_transfer(stuck.id, "bareos-%d-xfer-%s" % (job, DATA_VOL))
+        return old.temp_volumes[ROOT_VOL], stuck.id
+
+    def test_leftovers_of_both_projects_are_reported(self):
+        provider_vol, stuck = self.earlier_job()
+        self.session().prepare()
+        warning = " ".join(m for lv, m in self.log.lines if lv == "warning")
+        self.assertIn(provider_vol, warning)
+        self.assertIn(stuck, warning)
+        self.assertIn("transfer", warning)
+        self.assertIn(provider_vol, self.state()["volumes"])
+        self.assertEqual(len(self.state()["transfers"]), 1)
+
+    def test_leftovers_of_both_projects_are_removed(self):
+        provider_vol, stuck = self.earlier_job()
+        sess = self.session(cleanup_leftovers=True)
+        sess.prepare()
+        state = self.state()
+        self.assertNotIn(provider_vol, state["volumes"])
+        self.assertNotIn(stuck, state["volumes"])
+        self.assertEqual(state.get("transfers", {}), {})
+        self.assertEqual(sess.cleanup(), [])
+        self.assert_clean()
+
+    def test_native_session_uses_one_connection(self):
+        sess = BackupCloudSession(self.pbe, JOB, server_id=SERVER, log=self.log)
+        self.assertIs(sess.pbe, self.pbe)
+        self.assertIsNone(sess.proxy_backend)
 
 
 class GroupSnapshotBackupTest(unittest.TestCase):
