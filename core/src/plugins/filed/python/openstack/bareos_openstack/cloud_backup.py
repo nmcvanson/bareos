@@ -37,11 +37,14 @@ from .cloud import (
     CloudConfigError,
     CloudConflict,
     CloudError,
+    CloudNotFound,
+    CloudTransferAccepted,
     GroupSnapshotInfo,
     ServerInfo,
     bareos_tags,
     group_snapshot_description,
     group_snapshot_name,
+    transfer_name,
 )
 
 USABLE_STATUSES = ("ACTIVE", "SHUTOFF", "PAUSED", "SUSPENDED")
@@ -80,6 +83,7 @@ class BackupCloudSession:
         cleanup_leftovers=False,
         log=None,
         snapshot_mode="per-volume",
+        proxy_backend=None,
     ):
         if snapshot_mode not in ("per-volume", "group"):
             raise CloudConfigError(
@@ -90,6 +94,11 @@ class BackupCloudSession:
         self.group_members = {}
         self.group_pending = set()
         self.backend = backend
+        # transfer mode: backend is the tenant, proxy_backend the provider
+        self.proxy_backend = proxy_backend
+        self.pbe = proxy_backend or backend
+        self.transfers = {}
+        self.owners = {}
         self.job_id = job_id
         self.server_id = server_id
         self.server_name = server_name
@@ -355,6 +364,9 @@ class BackupCloudSession:
             snapshot_id=snap_id,
             on_created=self._record(self.temp_volumes, volume_id, "volume"),
         )
+        if self.proxy_backend is not None:
+            self.owners[temp.id] = "tenant"
+            self._move_to_provider(volume_id, temp)
         with self._lock:
             if self.closed:
                 raise CloudCancelled("session closed")
@@ -362,12 +374,102 @@ class BackupCloudSession:
         path = self._timed(
             "attach until the device was found",
             "volume %s" % volume_id,
-            self.backend.attach_to_proxy,
+            self.pbe.attach_to_proxy,
             temp.id,
             self.poll_timeout,
         )
         self._log("info", "volume %s attached as %s" % (temp.id, path))
         return path
+
+    def _check_quota(self, temp):
+        """Refuse before the transfer when the provider quota is known to be short."""
+        try:
+            free = self.proxy_backend.volume_limits()
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log("warning", "cannot read the provider volume quota: %s" % exc)
+            return
+        for key, left in (free or {}).items():
+            if key == "per_volume_gigabytes":
+                short = temp.size_gb > left
+            else:
+                kind, _, vtype = key.partition("_")
+                if vtype and vtype != temp.volume_type:
+                    continue
+                short = left < (1 if kind == "volumes" else temp.size_gb)
+            if short:
+                raise CloudConflict(
+                    "the quota %s of the provider project is too low for the "
+                    "%d GB temporary volume" % (key, temp.size_gb)
+                )
+
+    @staticmethod
+    def _probe(backend, volume_id):
+        """True or False when the connection answers, None when the probe fails."""
+        try:
+            backend.get_volume(volume_id)
+            return True
+        except CloudNotFound:
+            return False
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+    def _resolve_owner(self, volume_id):
+        """tenant, provider, gone (in neither project) or unknown."""
+        in_tenant = self._probe(self.backend, volume_id)
+        in_provider = self._probe(self.proxy_backend, volume_id)
+        if in_tenant is True and in_provider is False:
+            owner = "tenant"
+        elif in_provider is True and in_tenant is False:
+            owner = "provider"
+        elif in_tenant is False and in_provider is False:
+            owner = "gone"
+        else:
+            owner = "unknown"
+        self.owners[volume_id] = owner
+        return owner
+
+    def _move_to_provider(self, source, temp):
+        """Transfer the temporary volume from the tenant to the provider."""
+        self._check_quota(temp)
+        key = ""
+        try:
+            transfer_id, key = self.backend.create_transfer(
+                temp.id,
+                transfer_name(self.job_id, source),
+                on_created=self._record(self.transfers, source, "transfer"),
+            )
+            with self._lock:
+                self.transfers[source] = transfer_id
+            self.proxy_backend.accept_transfer(transfer_id, key, self.poll_timeout)
+        except CloudTransferAccepted:
+            self.owners[temp.id] = "provider"
+            self.transfers.pop(source, None)
+            raise
+        except Exception:
+            # the response may be lost after the volume moved
+            if self._resolve_owner(temp.id) == "provider":
+                self.transfers.pop(source, None)
+            raise
+        finally:
+            key = ""
+        with self._lock:
+            self.owners[temp.id] = "provider"
+            self.transfers.pop(source, None)
+        self._log("info", "volume %s transferred to the provider project" % temp.id)
+
+    def _drop_transfer(self, source):
+        """Delete the pending transfer of one source volume; True when none is left."""
+        transfer_id = self.transfers.get(source)
+        if not transfer_id:
+            return True
+        try:
+            self.backend.delete_transfer(transfer_id)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log("warning", "could not delete transfer %s: %s" % (transfer_id, exc))
+            return False
+        with self._lock:
+            self.transfers.pop(source, None)
+        return True
 
     # Cleanup ----------------------------------------------------------------
 
@@ -384,13 +486,18 @@ class BackupCloudSession:
             temp = self.temp_volumes.get(volume_id)
             snap = self.snapshots.get(volume_id)
             intent = temp in self.attach_intents
-        deletable = True
-        if temp and intent:
+        deletable = self._drop_transfer(volume_id) if temp else True
+        temp_be = (
+            self.proxy_backend
+            if self.owners.get(temp) == "provider"
+            else self.backend
+        )
+        if temp and intent and deletable:
             try:
                 self._timed(
                     "detach",
                     "volume %s" % volume_id,
-                    self.backend.detach_from_proxy,
+                    self.pbe.detach_from_proxy,
                     temp,
                     self.poll_timeout,
                 )
@@ -404,7 +511,7 @@ class BackupCloudSession:
                 self._timed(
                     "delete of temporary volume",
                     "volume %s" % volume_id,
-                    self.backend.delete_volume,
+                    temp_be.delete_volume,
                     temp,
                     self.poll_timeout,
                 )
