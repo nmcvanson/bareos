@@ -27,7 +27,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from bareos_openstack import metadata, tool
+from bareos_openstack import fake_backend, metadata, tool
 from bareos_openstack.cloud import (
     CloudCancelled,
     CloudError,
@@ -47,6 +47,7 @@ from test_cloud_fake import (
     DATA_VOL,
     PORT,
     PROJECT,
+    PROXY,
     ROOT_VOL,
     SERVER,
     TARGET,
@@ -984,6 +985,97 @@ class BatchDRestoreTest(unittest.TestCase):
         self.assertTrue(keys)
         for key in keys:
             self.assertNotIn(key, text)
+
+class TransferModeRestoreTest(unittest.TestCase):
+    """B2 restore: the provider writes and attaches, the tenant receives and boots."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log = Collector()
+        spec = batch_d_spec(proxy_project_id=TARGET)
+        self.tbe, _ = make_cloud(
+            self._tmp.name, spec, proxy_instance_id="", proxy=False
+        )
+        self.pbe = fake_backend.FakeBackend(
+            {
+                "backend": "fake",
+                "fake_root": self.tbe._root,
+                "fake_project_id": TARGET,
+                "proxy_instance_id": PROXY,
+            }
+        )
+        self.pbe.connect()
+        backup = BackupCloudSession(self.tbe, 5, server_id=SERVER, poll_timeout=5)
+        inv = backup.prepare()
+        backup.cleanup()
+        states = {
+            ROOT_VOL: {"size_bytes": 8 * MIB, "chunk_count": 2},
+            DATA_VOL: {"size_bytes": 4 * MIB, "chunk_count": 1},
+        }
+        job = {"job_id": 5, "level": "F", "backup_time": 1, "plugin_version": "0.1.0"}
+        chunking = {"chunk_size": 4 * MIB, "hash": "sha256", "hijacked_stat_fields": []}
+        self.doc = metadata.build_document(inv, states, job, chunking)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def session(self, groups_in_target=True, **opts):
+        return RestoreCloudSession(
+            self.pbe,
+            self.doc,
+            JOB,
+            RestoreCloudOptions(**opts),
+            poll_timeout=5,
+            log=self.log,
+            target_backend=self.tbe,
+            groups_in_target=groups_in_target,
+        )
+
+    def state(self):
+        return read_state(self.tbe)
+
+    def test_restore_reverses_the_transfer_direction(self):
+        sess = self.session()
+        sess.precheck()
+        sess.prepare_volumes()
+        for new_id in sess.restored.values():
+            self.assertEqual(self.state()["volumes"][new_id]["project_id"], TARGET)
+        result = sess.finish(True)
+        state = self.state()
+        self.assertEqual(state["servers"][result.server_id]["project_id"], PROJECT)
+        for new_id in result.volume_ids.values():
+            self.assertEqual(state["volumes"][new_id].get("project_id", PROJECT), PROJECT)
+            self.assertEqual(state["volumes"][new_id]["status"], "in-use")
+        port = state["ports"][result.port_ids[0]]
+        self.assertEqual(port["security_group_ids"], ["sg-1"])
+        self.assertEqual(state.get("transfers", {}), {})
+
+    def test_saved_groups_are_read_through_the_tenant(self):
+        with self.assertRaises(RestoreError) as ctx:
+            self.session(groups_in_target=False).precheck()
+        self.assertIn("restore_security_groups", str(ctx.exception))
+        self.session(groups_in_target=True).precheck()
+
+    def test_tenant_quota_refusal_keeps_the_volumes_in_the_provider(self):
+        with self.tbe._locked() as state:
+            state["quota"] = {state["project_id"]: {"volumes": 0}}
+        sess = self.session()
+        sess.precheck()
+        sess.prepare_volumes()
+        with self.assertRaises(RestoreError) as ctx:
+            sess.finish(True)
+        self.assertIn("transferring volume", str(ctx.exception))
+        state = self.state()
+        self.assertEqual(state.get("transfers", {}), {})
+        for new_id in sess.restored.values():
+            self.assertEqual(state["volumes"][new_id]["project_id"], TARGET)
+        kept = sess.abort()
+        self.assertEqual(sorted(kept), sorted(sess.restored.values()))
+        for new_id in sess.restored.values():
+            self.assertEqual(self.state()["volumes"][new_id]["project_id"], TARGET)
+            self.assertEqual(self.state()["volumes"][new_id]["status"], "available")
+        self.assertIn("moved to the target project -,", sess._recovery_line())
+
 
 if __name__ == "__main__":
     unittest.main()
