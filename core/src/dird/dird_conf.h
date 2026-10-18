@@ -637,6 +637,9 @@ class RunResource : public BareosResource {
 };
 
 ConfigurationParser* InitDirConfig(const char* configfile, int exit_code);
+// Valid StorageGroupPolicy names, null-terminated.
+extern const char* storage_group_policies[];
+
 bool PropagateJobdefs(int res_type, JobResource* res);
 bool ValidateResource(int type, const ResourceItem* items, BareosResource* res);
 
