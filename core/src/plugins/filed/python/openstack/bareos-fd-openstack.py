@@ -626,38 +626,42 @@ class BareosFdOpenStack(BareosFdPluginBaseclass.BareosFdPluginBaseclass):
         self._info("restoring %d volume(s) to %s" % (len(doc["volumes"]), dirpath))
         return bareosfd.bRC_OK
 
+    def _credentials_path(self, name):
+        """Path of a credentials file in the config dir; warns when too open"""
+        path = os.path.join(self.configdir, name)
+        try:
+            if os.stat(path).st_mode & 0o077:
+                self._warning(
+                    "the credentials file %s is readable by group or others" % name
+                )
+        except OSError:
+            pass
+        return path
+
+    def _file_backend_config(self, option, name, loader):
+        """Backend configuration from a credentials file, with readable errors"""
+        try:
+            return loader(self._credentials_path(name))
+        except UnknownOptionError as e:
+            raise ValueError("unknown option '%s' in %s" % (e, name)) from None
+        except OSError as e:
+            raise ValueError(
+                "cannot read %s %s: %s" % (option, name, e.strerror or "error")
+            ) from None
+        except ValueError as e:
+            raise ValueError("%s %s: %s" % (option, name, e)) from None
+
     def _target_backend_config(self):
         """Configuration of the target project connection, or None"""
         o = self.options
         if not (o.restore_project_cloud or o.restore_project_credentials):
             return None
-        path = None
         name = o.restore_project_credentials
-        if name:
-            path = os.path.join(self.configdir, name)
-            try:
-                if os.stat(path).st_mode & 0o077:
-                    self._warning(
-                        "the file %s of restore_project_credentials is readable "
-                        "by group or others" % name
-                    )
-            except OSError:
-                pass
-        try:
-            return o.target_backend_config(path)
-        except UnknownOptionError as e:
-            raise ValueError("unknown option '%s' in %s" % (e, name)) from None
-        except OSError as e:
-            raise ValueError(
-                "cannot read restore_project_credentials %s: %s"
-                % (name, e.strerror or "error")
-            ) from None
-        except ValueError as e:
-            if name:
-                raise ValueError(
-                    "restore_project_credentials %s: %s" % (name, e)
-                ) from None
-            raise
+        if not name:
+            return o.target_backend_config()
+        return self._file_backend_config(
+            "restore_project_credentials", name, o.target_backend_config
+        )
 
     def _prepare_cloud(self, doc, chunk_size):
         o = self.options
