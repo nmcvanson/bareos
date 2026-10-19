@@ -19,14 +19,40 @@
 
         <!-- Navigation items -->
         <q-list dark>
-          <q-item v-for="nav in mainNavItems" :key="nav.to"
-                  :data-testid="nav.drawerTestId"
-                  clickable v-ripple :to="nav.to" exact
-                  active-class="bg-white text-primary"
-                  @click="drawerOpen = false">
-            <q-item-section avatar><q-icon :name="nav.icon" /></q-item-section>
-            <q-item-section>{{ nav.label }}</q-item-section>
-          </q-item>
+          <template v-for="nav in mainNavItems" :key="nav.testId">
+            <q-item
+              v-if="!nav.children"
+              :data-testid="nav.drawerTestId"
+              clickable
+              v-ripple
+              :to="nav.to"
+              exact
+              active-class="bg-white text-primary"
+              @click="drawerOpen = false"
+            >
+              <q-item-section avatar><q-icon :name="nav.icon" /></q-item-section>
+              <q-item-section>{{ nav.label }}</q-item-section>
+            </q-item>
+            <q-expansion-item
+              v-else
+              :icon="nav.icon"
+              :label="nav.label"
+              :data-testid="nav.drawerTestId"
+            >
+              <q-item
+                v-for="child in nav.children"
+                :key="child.testId"
+                clickable
+                v-ripple
+                :to="child.to"
+                :data-testid="child.drawerTestId"
+                active-class="bg-white text-primary"
+                @click="drawerOpen = false"
+              >
+                <q-item-section class="q-pl-md">{{ child.label }}</q-item-section>
+              </q-item>
+            </q-expansion-item>
+          </template>
         </q-list>
 
         <q-separator dark class="q-my-sm" />
@@ -120,10 +146,37 @@
         <q-tabs v-if="!$q.screen.lt.md" dense align="left"
                 class="q-ml-md" indicator-color="white"
                 active-color="white" active-bg-color="rgba(255,255,255,0.15)">
-          <q-route-tab v-for="nav in mainNavItems" :key="nav.to"
-                       :data-testid="nav.testId"
-                       :name="nav.label.toLowerCase()" :to="nav.to"
-                       :label="nav.label" no-caps />
+          <template v-for="nav in mainNavItems" :key="nav.testId">
+            <q-route-tab
+              v-if="!nav.children"
+              :data-testid="nav.testId"
+              :name="nav.label.toLowerCase()"
+              :to="nav.to"
+              :label="nav.label"
+              no-caps
+            />
+            <q-btn-dropdown
+              v-else
+              flat
+              no-caps
+              class="text-white"
+              :label="nav.label"
+              :data-testid="nav.testId"
+            >
+              <q-list>
+                <q-item
+                  v-for="child in nav.children"
+                  :key="child.testId"
+                  clickable
+                  v-close-popup
+                  :to="child.to"
+                  :data-testid="child.testId"
+                >
+                  <q-item-section>{{ child.label }}</q-item-section>
+                </q-item>
+              </q-list>
+            </q-btn-dropdown>
+          </template>
         </q-tabs>
 
         <q-space />
@@ -470,9 +523,39 @@ const mainNavItems = computed(() => [
   { label: t('Dashboard'), to: '/dashboard', icon: 'dashboard', testId: 'nav-dashboard', drawerTestId: 'drawer-nav-dashboard' },
   { label: t('Jobs'), to: '/jobs', icon: 'work', testId: 'nav-jobs', drawerTestId: 'drawer-nav-jobs' },
   { label: t('Restore'), to: '/restore', icon: 'restore', testId: 'nav-restore', drawerTestId: 'drawer-nav-restore' },
-  { label: t('Clients'), to: '/clients', icon: 'devices', testId: 'nav-clients', drawerTestId: 'drawer-nav-clients' },
-  { label: t('Schedules'), to: '/schedules', icon: 'schedule', testId: 'nav-schedules', drawerTestId: 'drawer-nav-schedules' },
-  { label: t('Storages'), to: '/storages', icon: 'storage', testId: 'nav-storages', drawerTestId: 'drawer-nav-storages' },
+  {
+    label: t('Components'),
+    icon: 'dns',
+    testId: 'nav-components',
+    drawerTestId: 'drawer-nav-components',
+    children: [
+      { label: t('Overview'), to: '/components', testId: 'nav-components-overview', drawerTestId: 'drawer-nav-components-overview' },
+      { label: t('Storage Daemons'), to: '/components', testId: 'nav-components-storage-daemons', drawerTestId: 'drawer-nav-components-storage-daemons' },
+      { label: t('Clients'), to: '/clients', testId: 'nav-components-clients', drawerTestId: 'drawer-nav-components-clients' },
+      { label: t('Storage groups'), to: '/storage-groups', testId: 'nav-components-storage-groups', drawerTestId: 'drawer-nav-components-storage-groups' },
+      { label: t('Pools'), to: '/storages?tab=pools', testId: 'nav-components-pools', drawerTestId: 'drawer-nav-components-pools' },
+      { label: t('Volumes'), to: '/storages?tab=volumes', testId: 'nav-components-volumes', drawerTestId: 'drawer-nav-components-volumes' },
+      { label: t('Autochangers'), to: '/autochangers', testId: 'nav-components-autochangers', drawerTestId: 'drawer-nav-components-autochangers' },
+    ],
+  },
+  {
+    label: t('Configuration'),
+    icon: 'settings_applications',
+    testId: 'nav-configuration',
+    drawerTestId: 'drawer-nav-configuration',
+    children: [
+      { label: t('Jobs'), to: '/config/job', testId: 'nav-configuration-jobs', drawerTestId: 'drawer-nav-configuration-jobs' },
+      { label: t('JobDefs'), to: '/config/jobdefs', testId: 'nav-configuration-jobdefs', drawerTestId: 'drawer-nav-configuration-jobdefs' },
+      { label: t('Clients'), to: '/config/client', testId: 'nav-configuration-clients', drawerTestId: 'drawer-nav-configuration-clients' },
+      { label: t('FileSets'), to: '/config/fileset', testId: 'nav-configuration-filesets', drawerTestId: 'drawer-nav-configuration-filesets' },
+      { label: t('Schedules'), to: '/config/schedule', testId: 'nav-configuration-schedules', drawerTestId: 'drawer-nav-configuration-schedules' },
+      { label: t('Pools'), to: '/config/pool', testId: 'nav-configuration-pools', drawerTestId: 'drawer-nav-configuration-pools' },
+      { label: t('Storages'), to: '/config/storage', testId: 'nav-configuration-storages', drawerTestId: 'drawer-nav-configuration-storages' },
+      { label: t('Messages'), to: '/config/messages', testId: 'nav-configuration-messages', drawerTestId: 'drawer-nav-configuration-messages' },
+      { label: t('Consoles and Profiles'), to: '/config/console', testId: 'nav-configuration-consoles-profiles', drawerTestId: 'drawer-nav-configuration-consoles-profiles' },
+      { label: t('New job'), to: '/jobs/new', testId: 'nav-configuration-new-job', drawerTestId: 'drawer-nav-configuration-new-job' },
+    ],
+  },
   { label: t('Director'), to: '/director', icon: 'settings', testId: 'nav-director', drawerTestId: 'drawer-nav-director' },
   { label: t('Analytics'), to: '/analytics', icon: 'bar_chart', testId: 'nav-analytics', drawerTestId: 'drawer-nav-analytics' },
 ])
