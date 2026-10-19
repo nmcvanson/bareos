@@ -247,7 +247,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDirectorStore } from '../stores/director.js'
 import { useDirectorAclStore } from '../stores/directorAcl.js'
-import { directorCollection } from '../composables/useDirectorFetch.js'
+import { DOT_LISTS, dotListNames } from '../utils/dotLists.js'
 import { actionAllowed } from '../utils/acl.js'
 import { validateJobForm, buildConfigureAddJobCommand, buildJobResourcePreview } from '../utils/jobConfig.js'
 import { configureAddAndReload } from '../utils/configureAdd.js'
@@ -298,26 +298,13 @@ watch(form, () => {
   runNotice.value = null
 }, { deep: true })
 
-const asNames = (res, key) => directorCollection(res?.[key] ?? res?.result?.[key] ?? res)
-  .map((item) => (typeof item === 'string' ? item : item?.name ?? item?.value))
-  .filter(Boolean)
-
 async function loadLists() {
-  const sources = [
-    ['jobs', '.jobs', 'jobs'],
-    ['jobdefs', '.jobdefs', 'jobdefs'],
-    ['clients', '.clients', 'clients'],
-    ['filesets', '.filesets', 'filesets'],
-    ['schedules', '.schedule', 'schedules'],
-    ['pools', '.pools', 'pools'],
-    ['storages', '.storages', 'storages'],
-    ['messages', '.msgs', 'msgs'],
-  ]
+  const names = Object.keys(DOT_LISTS)
   try {
-    const results = await Promise.all(sources.map(([, command]) => director.call(command)))
+    const results = await Promise.all(names.map(name => director.call(DOT_LISTS[name].command)))
     const next = {}
-    sources.forEach(([name, , key], i) => {
-      next[name] = asNames(results[i], key)
+    names.forEach((name, i) => {
+      next[name] = dotListNames(name, results[i])
     })
     lists.value = next
   } catch (err) {

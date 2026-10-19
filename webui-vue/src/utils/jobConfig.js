@@ -39,9 +39,15 @@ export function validateJobForm(form, lists = {}) {
     errors.name = 'Name must use letters, digits, dot, underscore or hyphen'
   } else if (listNames(lists.jobs).includes(form.name)) errors.name = 'Job already exists'
   for (const [field, list] of [
-    ['client', 'clients'], ['fileset', 'filesets'], ['pool', 'pools'], ['messages', 'messages'],
+    ['client', 'clients'], ['fileset', 'filesets'], ['pool', 'pools'],
   ]) {
     if (!listNames(lists[list]).includes(form[field])) errors[field] = 'Select an available resource'
+  }
+  // Messages may come from the chosen JobDefs; the Director checks the result after the add.
+  if (form.messages) {
+    if (!listNames(lists.messages).includes(form.messages)) errors.messages = 'Select an available resource'
+  } else if (!form.jobdefs) {
+    errors.messages = 'Select an available resource'
   }
   for (const [field, list] of [['jobdefs', 'jobdefs'], ['schedule', 'schedules']]) {
     if (form[field] && !listNames(lists[list]).includes(form[field])) {

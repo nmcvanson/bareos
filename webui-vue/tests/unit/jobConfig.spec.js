@@ -52,7 +52,7 @@ describe('validateJobForm', () => {
     expect(validateJobForm({ ...form, name }, lists)).toHaveProperty('name')
   })
 
-  it.each(['client', 'fileset', 'pool', 'messages'])('requires an available %s', field => {
+  it.each(['client', 'fileset', 'pool'])('requires an available %s', field => {
     expect(validateJobForm({ ...form, [field]: '' }, lists)).toHaveProperty(field)
     expect(validateJobForm({ ...form, [field]: 'unknown' }, lists)).toHaveProperty(field)
   })
