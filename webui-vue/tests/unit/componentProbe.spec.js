@@ -128,7 +128,7 @@ Device "StorageDevice" (/var/bareos/storage) is not open.
 Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
 `
 
-  it('probes Director, Storage Daemons, and Clients sequentially with fake director', async () => {
+  it('probes Director, Clients, then Storage Daemons sequentially', async () => {
     const callLog = []
     const fakeDirector = {
       rawCall: vi.fn(async (cmd) => {
@@ -165,8 +165,8 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
     // Verify call sequence
     expect(callLog).toEqual([
       'status director',
-      'status storage="StorageAlpha"',
       'status client="client-node1"',
+      'status storage="StorageAlpha"',
     ])
 
     // Verify Director result
@@ -186,7 +186,7 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
     })
 
     // Verify Storage result
-    expect(results[1]).toMatchObject({
+    expect(results[2]).toMatchObject({
       id: 'sd1.internal:9103',
       kind: 'storage',
       key: 'sd1.internal:9103',
@@ -194,7 +194,7 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
       reachable: true,
       error: null,
     })
-    expect(results[1].header).toEqual({
+    expect(results[2].header).toEqual({
       name: 'my-sd',
       version: '25.1.1',
       started: '19-Oct-26 00:44',
@@ -203,14 +203,14 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
     })
 
     // Verify Client result
-    expect(results[2]).toMatchObject({
+    expect(results[1]).toMatchObject({
       id: 'client-node1',
       kind: 'client',
       name: 'client-node1',
       reachable: true,
       error: null,
     })
-    expect(results[2].header).toEqual({
+    expect(results[1].header).toEqual({
       name: 'my-fd',
       version: '25.1.1',
       started: '19-Oct-26 00:44',
@@ -254,7 +254,7 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
       error: 'Connection refused by Director',
     })
 
-    expect(results[1]).toMatchObject({
+    expect(results[2]).toMatchObject({
       id: 'sd.down:9103',
       kind: 'storage',
       reachable: false,
@@ -262,7 +262,7 @@ Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
       error: 'Failed to connect to Storage daemon.',
     })
 
-    expect(results[2]).toMatchObject({
+    expect(results[1]).toMatchObject({
       id: 'FailedClient',
       kind: 'client',
       reachable: false,

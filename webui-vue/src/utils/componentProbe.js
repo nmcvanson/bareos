@@ -99,30 +99,63 @@ export function groupStorageDaemons(showStorages) {
   }))
 }
 
-async function executeRawCall(director, cmd) {
-  if (director && typeof director.rawCall === 'function') {
-    return await director.rawCall(cmd)
-  }
+const PROBE_LIMIT_MS = 20_000
+const pendingByDirector = new WeakMap()
+
+function startRawCall(director, cmd) {
+  if (director && typeof director.rawCall === 'function') return director.rawCall(cmd)
   if (director && typeof director.call === 'function') {
-    const res = await director.call(cmd)
-    if (typeof res === 'string') return res
-    if (res?.output && typeof res.output === 'string') return res.output
-    if (res?.result && typeof res.result === 'string') return res.result
-    return JSON.stringify(res)
+    return Promise.resolve(director.call(cmd)).then(res => {
+      if (typeof res === 'string') return res
+      if (typeof res?.output === 'string') return res.output
+      if (typeof res?.result === 'string') return res.result
+      return JSON.stringify(res)
+    })
   }
   throw new Error('Director does not support rawCall or call')
 }
 
-export async function probeComponents(director, { storages = [], clients = [], probeDirector = true } = {}) {
+// At most one unanswered call per Director name and command; a later probe waits on it.
+async function executeRawCall(director, cmd, directorName) {
+  let timer
+  const key = `${directorName ?? ''}\u0000${cmd}`
+  const waiting = director !== null && typeof director === 'object' ? pendingByDirector.get(director)?.get(key) : undefined
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(waiting
+      ? 'Previous probe is still waiting for an answer'
+      : `No answer within ${PROBE_LIMIT_MS / 1000} s`)), PROBE_LIMIT_MS)
+  })
+  try {
+    let request = waiting
+    if (!request) {
+      request = Promise.resolve(startRawCall(director, cmd))
+      const pending = pendingByDirector.get(director) ?? new Map()
+      pendingByDirector.set(director, pending)
+      pending.set(key, request)
+      const clear = () => { if (pending.get(key) === request) pending.delete(key) }
+      request.then(clear, clear)
+    }
+    // The deadline bounds the UI wait; it cannot cancel a native Director call.
+    return await Promise.race([request, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function probeComponents(director, { storages = [], clients = [], probeDirector = true, onResult = null, directorName = '' } = {}) {
   const results = []
+  const publish = result => {
+    results.push(result)
+    onResult?.(result)
+  }
 
   // 1. Probe Director
   if (probeDirector) {
     try {
-      const res = await executeRawCall(director, 'status director')
+      const res = await executeRawCall(director, 'status director', directorName)
       const header = parseDaemonHeader(res)
       if (header) {
-        results.push({
+        publish({
           id: 'director',
           kind: 'director',
           name: header.name || 'Director',
@@ -132,7 +165,7 @@ export async function probeComponents(director, { storages = [], clients = [], p
           probeTime: Date.now(),
         })
       } else {
-        results.push({
+        publish({
           id: 'director',
           kind: 'director',
           name: 'Director',
@@ -143,7 +176,7 @@ export async function probeComponents(director, { storages = [], clients = [], p
         })
       }
     } catch (err) {
-      results.push({
+      publish({
         id: 'director',
         kind: 'director',
         name: 'Director',
@@ -155,7 +188,51 @@ export async function probeComponents(director, { storages = [], clients = [], p
     }
   }
 
-  // 2. Probe Storage Daemons sequentially (one status call at a time)
+  // 2. Probe Clients before Storage Daemons
+  const clientList = Array.isArray(clients) && clients.length > 0 && typeof clients[0] === 'object' && clients[0]?.name && !clients[0]?.clients
+    ? clients
+    : extractClientList(clients)
+  for (const c of clientList) {
+    const cName = typeof c === 'string' ? c : c?.name
+    if (!cName) continue
+    try {
+      const res = await executeRawCall(director, 'status client=' + quoteDirectorString(cName), directorName)
+      const header = parseDaemonHeader(res)
+      if (header) {
+        publish({
+          id: cName,
+          kind: 'client',
+          name: cName,
+          reachable: true,
+          header,
+          error: null,
+          probeTime: Date.now(),
+        })
+      } else {
+        publish({
+          id: cName,
+          kind: 'client',
+          name: cName,
+          reachable: false,
+          header: null,
+          error: (typeof res === 'string' ? res.trim() : null) || 'Failed to parse Client status',
+          probeTime: Date.now(),
+        })
+      }
+    } catch (err) {
+      publish({
+        id: cName,
+        kind: 'client',
+        name: cName,
+        reachable: false,
+        header: null,
+        error: err?.message ?? String(err),
+        probeTime: Date.now(),
+      })
+    }
+  }
+
+  // 3. Probe Storage Daemons last, sequentially
   const daemonList = Array.isArray(storages) && storages[0]?.firstStorageName
     ? storages
     : groupStorageDaemons(storages)
@@ -164,10 +241,10 @@ export async function probeComponents(director, { storages = [], clients = [], p
     const target = sd.firstStorageName || sd.storages?.[0]?.name || sd.name
     if (!target) continue
     try {
-      const res = await executeRawCall(director, 'status storage=' + quoteDirectorString(target))
+      const res = await executeRawCall(director, 'status storage=' + quoteDirectorString(target), directorName)
       const header = parseDaemonHeader(res)
       if (header) {
-        results.push({
+        publish({
           id: sd.key || target,
           kind: 'storage',
           key: sd.key,
@@ -179,7 +256,7 @@ export async function probeComponents(director, { storages = [], clients = [], p
           probeTime: Date.now(),
         })
       } else {
-        results.push({
+        publish({
           id: sd.key || target,
           kind: 'storage',
           key: sd.key,
@@ -192,56 +269,12 @@ export async function probeComponents(director, { storages = [], clients = [], p
         })
       }
     } catch (err) {
-      results.push({
+      publish({
         id: sd.key || target,
         kind: 'storage',
         key: sd.key,
         name: sd.key || target,
         storageName: target,
-        reachable: false,
-        header: null,
-        error: err?.message ?? String(err),
-        probeTime: Date.now(),
-      })
-    }
-  }
-
-  // 3. Probe Clients sequentially
-  const clientList = Array.isArray(clients) && clients.length > 0 && typeof clients[0] === 'object' && clients[0]?.name && !clients[0]?.clients
-    ? clients
-    : extractClientList(clients)
-  for (const c of clientList) {
-    const cName = typeof c === 'string' ? c : c?.name
-    if (!cName) continue
-    try {
-      const res = await executeRawCall(director, 'status client=' + quoteDirectorString(cName))
-      const header = parseDaemonHeader(res)
-      if (header) {
-        results.push({
-          id: cName,
-          kind: 'client',
-          name: cName,
-          reachable: true,
-          header,
-          error: null,
-          probeTime: Date.now(),
-        })
-      } else {
-        results.push({
-          id: cName,
-          kind: 'client',
-          name: cName,
-          reachable: false,
-          header: null,
-          error: (typeof res === 'string' ? res.trim() : null) || 'Failed to parse Client status',
-          probeTime: Date.now(),
-        })
-      }
-    } catch (err) {
-      results.push({
-        id: cName,
-        kind: 'client',
-        name: cName,
         reachable: false,
         header: null,
         error: err?.message ?? String(err),

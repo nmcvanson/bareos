@@ -544,27 +544,28 @@ async function probeAll() {
   probing.value = true
 
   try {
-    const probed = await probeComponents(director, {
+    probeResults.value = { director: null, storages: {}, clients: {} }
+    await probeComponents(director, {
       storages: rawStorages.value,
       clients: rawClients.value,
       probeDirector: true,
+      directorName: auth.user?.director || '',
+      onResult: p => {
+        if (p.kind === 'director') {
+          probeResults.value.director = p.reachable
+            ? { reachable: true, ...p.header }
+            : { reachable: false, error: p.error }
+        } else if (p.kind === 'storage') {
+          probeResults.value.storages[p.key || p.id] = p.reachable
+            ? { reachable: true, ...p.header }
+            : { reachable: false, error: p.error }
+        } else if (p.kind === 'client') {
+          probeResults.value.clients[p.id] = p.reachable
+            ? { reachable: true, ...p.header }
+            : { reachable: false, error: p.error }
+        }
+      },
     })
-
-    for (const p of probed) {
-      if (p.kind === 'director') {
-        probeResults.value.director = p.reachable
-          ? { reachable: true, ...p.header }
-          : { reachable: false, error: p.error }
-      } else if (p.kind === 'storage') {
-        probeResults.value.storages[p.key || p.id] = p.reachable
-          ? { reachable: true, ...p.header }
-          : { reachable: false, error: p.error }
-      } else if (p.kind === 'client') {
-        probeResults.value.clients[p.id] = p.reachable
-          ? { reachable: true, ...p.header }
-          : { reachable: false, error: p.error }
-      }
-    }
   } catch (err) {
     pageError.value = err?.message ?? String(err)
   } finally {

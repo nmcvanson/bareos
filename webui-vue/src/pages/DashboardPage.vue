@@ -896,12 +896,14 @@ async function runComponentsProbe() {
     if (componentStorages.value.length === 0 || componentClients.value.length === 0) {
       await loadComponentResources()
     }
-    const probed = await probeComponents(director, {
+    componentProbeResults.value = []
+    await probeComponents(director, {
       storages: componentStorages.value,
       clients: componentClients.value,
       probeDirector: true,
+      directorName: auth.user?.director || '',
+      onResult: result => { componentProbeResults.value.push(result) },
     })
-    componentProbeResults.value = probed
   } catch (err) {
     $q.notify({ type: 'negative', message: err?.message ?? String(err) })
   } finally {
