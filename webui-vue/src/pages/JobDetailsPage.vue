@@ -3,7 +3,7 @@
     <q-inner-loading :showing="loading" :label="t('Loading job…')" />
     <div v-if="error" class="text-negative q-pa-md">{{ error }}</div>
 
-    <div v-else-if="!loading && job">
+    <div v-else-if="!loading">
       <!-- Header row -->
       <div class="row items-center q-mb-md">
         <q-btn
@@ -15,12 +15,55 @@
           class="q-mr-md"
         />
         <div class="row items-center q-gutter-sm">
-          <div class="text-h6">Job #{{ job.id }} — {{ job.name }}</div>
+          <div class="text-h6" data-testid="job-details-title">
+            <template v-if="hasValidJob">
+              Job #{{ job.id }} — {{ job.name }}
+            </template>
+            <template v-else>
+              Job {{ currentJobId }}
+            </template>
+          </div>
           <q-spinner v-if="isRunning" color="primary" size="18px" :title="t('Auto-refreshing…')" />
         </div>
       </div>
 
-      <div class="row q-col-gutter-md">
+      <div v-if="!hasValidJob" class="text-grey q-pa-md" data-testid="job-details-not-found">
+        {{ t('This job does not exist or this console may not see it.') }}
+      </div>
+
+      <div v-else class="row q-col-gutter-md">
+
+        <!-- Outcome -->
+        <div class="col-12">
+          <q-card flat bordered class="bareos-panel">
+            <q-card-section class="panel-header">{{ t('Outcome') }}</q-card-section>
+            <q-card-section>
+              <div class="row items-center q-gutter-sm">
+                <q-chip
+                  dense
+                  :color="outcomeChipProps.color"
+                  :text-color="outcomeChipProps.textColor"
+                  :icon="outcomeChipProps.icon"
+                  :label="t(outcome.label)"
+                />
+                <span v-if="outcome.termination" class="text-body2 text-weight-medium">
+                  {{ outcome.termination }}
+                </span>
+              </div>
+              <div
+                v-if="showReasonLines"
+                class="q-mt-sm"
+              >
+                <div class="text-caption text-weight-bold q-mb-xs">{{ t('Reasons') }}:</div>
+                <q-list dense bordered separator class="rounded-borders">
+                  <q-item v-for="(line, idx) in outcome.reasonLines" :key="idx">
+                    <q-item-section class="text-body2 font-monospace">{{ line }}</q-item-section>
+                  </q-item>
+                </q-list>
+              </div>
+            </q-card-section>
+          </q-card>
+        </div>
 
         <!-- Summary -->
         <div class="col-12 col-md-6">
@@ -60,14 +103,138 @@
         <!-- Volumes + Actions -->
         <div class="col-12 col-md-6 column q-gutter-md">
 
+          <!-- Throughput -->
+          <q-card flat bordered class="bareos-panel">
+            <q-card-section class="panel-header">{{ t('Throughput') }}</q-card-section>
+            <q-card-section>
+              <q-list dense separator>
+                <q-item>
+                  <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('Files') }}</q-item-section>
+                  <q-item-section>
+                    {{ formatNumber(displayThroughputFiles, settings.locale) }}
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('Bytes') }}</q-item-section>
+                  <q-item-section>
+                    {{ formatBytes(displayThroughputBytes) }}
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('Duration') }}</q-item-section>
+                  <q-item-section>
+                    {{ job?.duration || '—' }}
+                  </q-item-section>
+                </q-item>
+                <q-item v-if="!isRunning">
+                  <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('Rate') }}</q-item-section>
+                  <q-item-section>
+                    {{ displayThroughputRate }}
+                  </q-item-section>
+                </q-item>
+                <template v-if="isRunning">
+                  <q-item v-if="fdRunning">
+                    <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('FD Rate') }}</q-item-section>
+                    <q-item-section>
+                      {{ fdRunning.bytesPerSec != null ? `${formatBytes(fdRunning.bytesPerSec)}/s` : '—' }}
+                    </q-item-section>
+                  </q-item>
+                  <q-item v-if="sdRunning">
+                    <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('SD Average Rate') }}</q-item-section>
+                    <q-item-section>
+                      {{ sdRunning.aveBytesPerSec != null ? `${formatBytes(sdRunning.aveBytesPerSec)}/s` : '—' }}
+                    </q-item-section>
+                  </q-item>
+                  <q-item v-if="sdRunning">
+                    <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('SD Last Rate') }}</q-item-section>
+                    <q-item-section>
+                      {{ sdRunning.lastBytesPerSec != null ? `${formatBytes(sdRunning.lastBytesPerSec)}/s` : '—' }}
+                    </q-item-section>
+                  </q-item>
+                  <q-item v-if="fdRunning?.processingFile">
+                    <q-item-section class="text-weight-medium" style="max-width:160px">{{ t('Processing file') }}</q-item-section>
+                    <q-item-section class="font-monospace text-caption ellipsis" :title="fdRunning.processingFile">
+                      {{ fdRunning.processingFile }}
+                    </q-item-section>
+                  </q-item>
+                </template>
+              </q-list>
+              <div class="q-mt-sm text-caption text-grey-7">
+                {{ t('CPU and memory per job are not reported by Bareos.') }}
+              </div>
+            </q-card-section>
+          </q-card>
+
           <!-- Actions -->
           <q-card flat bordered class="bareos-panel">
             <q-card-section class="panel-header">{{ t('Actions') }}</q-card-section>
             <q-card-section class="q-gutter-sm">
+              <q-btn
+                v-if="canRestoreFromThisJob"
+                icon="settings_backup_restore"
+                :label="t('Restore from this job')"
+                color="secondary"
+                no-caps
+                :to="{ path: '/restore', query: restoreFromJobQuery }"
+                data-testid="restore-from-job-btn"
+              />
               <q-btn icon="restart_alt" :label="t('Rerun Job')" color="primary" no-caps
                      :loading="rerunLoading" @click="confirmRerun" />
               <q-btn v-if="isRunning" icon="cancel" :label="t('Cancel Job')" color="negative" no-caps
                      :loading="cancelLoading" @click="confirmCancel" />
+            </q-card-section>
+          </q-card>
+
+          <!-- Storage -->
+          <q-card v-if="showStorageCard" flat bordered class="bareos-panel">
+            <q-card-section class="panel-header">{{ t('Storage') }}</q-card-section>
+            <q-card-section>
+              <div v-if="storageEvents.attempts.length > 0" class="row items-center q-gutter-xs q-mb-sm">
+                <template v-for="(attempt, i) in storageEvents.attempts" :key="i">
+                  <q-chip
+                    v-if="attempt.outcome === 'skipped-disabled'"
+                    dense
+                    color="grey"
+                    text-color="white"
+                    icon="block"
+                    :label="`${attempt.storage} (${t('disabled')})`"
+                  />
+                  <q-chip
+                    v-else-if="attempt.outcome === 'refused'"
+                    dense
+                    color="orange"
+                    text-color="white"
+                    icon="error"
+                    :label="`${attempt.storage} (${t('could not take the job')})`"
+                  />
+                  <q-chip
+                    v-else-if="attempt.outcome === 'used'"
+                    dense
+                    color="positive"
+                    text-color="white"
+                    icon="check_circle"
+                    :label="attempt.storage"
+                  />
+                </template>
+              </div>
+
+              <div class="q-gutter-y-xs text-body2">
+                <div v-if="storageEvents.policy">
+                  <span class="text-weight-bold">{{ t('Policy') }}:</span> {{ storageEvents.policy }}
+                </div>
+                <div v-if="storageEvents.storageSource">
+                  <span class="text-weight-bold">{{ t('Storage list from') }}:</span> {{ storageEvents.storageSource }}
+                </div>
+                <div v-if="storageEvents.failedOverTo">
+                  {{ t('Failed over to {storage}', { storage: storageEvents.failedOverTo }) }}
+                </div>
+                <div v-if="storageEvents.allDisabled" class="text-negative text-weight-bold">
+                  {{ t('All members are disabled') }}
+                </div>
+                <div v-if="storageEvents.dispatchedTo">
+                  {{ t('Dispatched to {storage}', { storage: storageEvents.dispatchedTo }) }}
+                </div>
+              </div>
             </q-card-section>
           </q-card>
 
@@ -126,13 +293,11 @@
 
       </div>
     </div>
-
-    <div v-else-if="!loading" class="text-center q-pa-xl text-grey">{{ t('Job not found.') }}</div>
   </q-page>
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { useI18n } from 'vue-i18n'
@@ -148,16 +313,21 @@ import { switchActiveDirector } from '../composables/useDirectorSession.js'
 import { usePersistedTablePagination } from '../composables/usePersistedTablePagination.js'
 import { useAuthStore } from '../stores/auth.js'
 import { useDirectorStore } from '../stores/director.js'
+import { useDirectorAclStore } from '../stores/directorAcl.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { buildClientDetailsQuery } from '../utils/clients.js'
 import { quoteDirectorString } from '../utils/directorStrings.js'
 import { buildDirectorPageQuery } from '../utils/director.js'
 import { formatNumber } from '../utils/locales.js'
+import { actionAllowed } from '../utils/acl.js'
 import {
   buildCancelJobCommand,
   buildJobDetailsQuery,
   buildListJobCommand,
   buildRerunJobCommand,
+  buildRestoreFromJobQuery,
+  canRestoreFromJob,
+  isValidJobRecord,
   resolveJobDetailsClientOrigin,
   resolveJobDetailsQuery,
   resolveJobDetailsDashboardOrigin,
@@ -173,22 +343,33 @@ import JobStatusBadge from '../components/JobStatusBadge.vue'
 import JobLevelBadge from '../components/JobLevelBadge.vue'
 import JobTypeBadge from '../components/JobTypeBadge.vue'
 import VolumeNameLink from '../components/VolumeNameLink.vue'
+import { parseJobStorageEvents } from '../utils/jobStorageEvents.js'
+import { jobOutcome } from '../utils/jobOutcome.js'
+import { parseFdRunning, parseSdRunning, finalRate } from '../utils/jobProgress.js'
+import { createPoller } from '../utils/poller.js'
+import { createInflightGuard } from '../utils/inflightGuard.js'
+import { useJobScope } from '../utils/jobScope.js'
+import { createLiveProgress, displayProgress } from '../utils/liveProgress.js'
 
 const route    = useRoute()
 const router   = useRouter()
 const $q       = useQuasar()
 const auth = useAuthStore()
 const director = useDirectorStore()
+const acl = useDirectorAclStore()
 const settings = useSettingsStore()
 const { t } = useI18n()
 
-const currentJobId = computed(() => route.params.id)
-const requestedDirector = computed(() => (
-  typeof route.query.director === 'string' ? route.query.director : ''
-))
-const currentJobDirector = computed(() => (
-  requestedDirector.value || auth.user?.director || settings.directorName || ''
-))
+onMounted(() => {
+  acl.ensureLoaded().catch(() => {})
+})
+
+const {
+  jobId: currentJobId,
+  requestedDirector,
+  jobDirector: currentJobDirector,
+  scopeKey,
+} = useJobScope({ route, auth, settings })
 const backToJobsQuery = computed(() => resolveJobsListQuery(route.query))
 const dashboardOrigin = computed(() => resolveJobDetailsDashboardOrigin(route.query))
 const clientOrigin = computed(() => resolveJobDetailsClientOrigin(route.query))
@@ -275,6 +456,7 @@ const backLocation = computed(() => {
 const loading       = ref(true)
 const jobData       = ref(null)
 const logLines      = ref('')
+const rawJobLog     = ref([])
 const logContainer  = ref(null)
 const volumes       = ref([])
 const volumeDetailsByName = ref({})
@@ -307,24 +489,43 @@ async function ensureJobDirector() {
   await switchActiveDirector(requestedDirector.value)
 }
 
-async function loadJob() {
+const loadGuard = createInflightGuard()
+const currentScope = () => scopeKey.value
+
+// One load per job and Director at a time, shared by the watcher, the timer
+// and the actions.
+function loadJob() {
+  return loadGuard.run(currentScope(), loadJobNow)
+}
+
+async function loadJobNow() {
+  const scope = currentScope()
+  const directorName = currentJobDirector.value
   await ensureJobDirector()
   const [jobRes, logRes, mediaRes] = await Promise.allSettled([
     director.call(buildListJobCommand(currentJobId.value)),
     director.call(`list joblog jobid=${currentJobId.value}`),
     director.call(`list jobmedia jobid=${currentJobId.value}`),
   ])
+  if (scope !== currentScope()) return
 
   if (jobRes.status === 'fulfilled') {
     const raw   = jobRes.value
-    const entry = Array.isArray(raw?.jobs) ? raw.jobs[0] : (raw?.jobs ?? raw)
-    if (entry) {
+    let entry = Array.isArray(raw?.jobs) ? raw.jobs[0] : (raw?.jobs ?? raw)
+    if (entry && !entry.jobid && !entry.id && typeof entry === 'object') {
+      const firstVal = Object.values(entry)[0]
+      if (firstVal && typeof firstVal === 'object' && (firstVal.jobid || firstVal.id)) {
+        entry = firstVal
+      }
+    }
+    if (isValidJobRecord(entry)) {
       const loadedJob = {
         ...normaliseJob(entry),
-        director: currentJobDirector.value || null,
+        director: directorName || null,
       }
       if (isRunningJobStatus(loadedJob.status)) {
         const runtimeStatus = await Promise.allSettled([director.call('status director')])
+        if (scope !== currentScope()) return
         jobData.value = runtimeStatus[0].status === 'fulfilled'
           ? overlayRuntimeStatuses([loadedJob], runtimeStatus[0].value?.running)[0]
           : loadedJob
@@ -341,11 +542,15 @@ async function loadJob() {
   if (logRes.status === 'fulfilled') {
     const raw = logRes.value
     if (Array.isArray(raw?.joblog)) {
+      rawJobLog.value = raw.joblog
       logLines.value = raw.joblog
         .map(l => `${(l.time ?? '').trim()} ${(l.logtext ?? '').trimEnd()}`.trim())
         .join('\n')
     } else if (typeof raw === 'string') {
+      rawJobLog.value = [{ logtext: raw }]
       logLines.value = raw
+    } else {
+      rawJobLog.value = []
     }
   }
 
@@ -374,11 +579,24 @@ async function loadJob() {
   }
 }
 
-watch(() => `${currentJobId.value}\u0000${requestedDirector.value}`, async () => {
+// Live FD and SD counters belong to the job and Director on screen.
+const liveProgress = createLiveProgress()
+const fdRunning = ref(null)
+const sdRunning = ref(null)
+
+function resetLive() {
+  liveProgress.reset(currentScope())
+  fdRunning.value = null
+  sdRunning.value = null
+}
+
+watch(scopeKey, async () => {
+  resetLive()
   loading.value = true
   error.value = null
   jobData.value = null
   logLines.value = ''
+  rawJobLog.value = []
   volumes.value = []
   volumeDetailsByName.value = {}
   try {
@@ -392,13 +610,21 @@ watch(() => `${currentJobId.value}\u0000${requestedDirector.value}`, async () =>
 
 // ── computed ──────────────────────────────────────────────────────────────────
 const job = computed(() => jobData.value)
+const hasValidJob = computed(() => isValidJobRecord(job.value))
 const isRestoreJob = computed(() => resolveJobTypeCode(job.value?.type) === 'R')
 const showVolumesCard = computed(() => !isRestoreJob.value || volumes.value.length > 0)
+
+const storageEvents = computed(() => parseJobStorageEvents(rawJobLog.value))
+const showStorageCard = computed(() => (
+  storageEvents.value.candidates !== null || Boolean(storageEvents.value.finalStorage)
+))
 
 const volumeCols = computed(() => [
   { name: 'volumename', label: 'Volume',
     field: 'volumename', align: 'left', sortable: true,
     headerClasses: 'text-weight-bold' },
+  { name: 'storage', label: 'Storage',
+    field: 'storage', align: 'left', sortable: true },
   { name: 'segments', label: 'Segments',
     field: 'segments', align: 'right', sortable: true },
 ].map((col) => ({
@@ -444,30 +670,126 @@ const highlightedLines = computed(() => {
   })
 })
 
+// ── outcome & throughput ──────────────────────────────────────────────────────
+const outcome = computed(() => {
+  return jobOutcome(job.value, rawJobLog.value)
+})
+
+const outcomeChipProps = computed(() => {
+  switch (outcome.value.state) {
+    case 'ok':
+      return { color: 'green', textColor: 'white', icon: 'check_circle' }
+    case 'warning':
+      return { color: 'amber', textColor: 'black', icon: 'warning' }
+    case 'failed':
+      return { color: 'red', textColor: 'white', icon: 'error' }
+    case 'canceled':
+      return { color: 'grey', textColor: 'white', icon: 'cancel' }
+    case 'running':
+      return { color: 'blue', textColor: 'white', icon: 'sync' }
+    case 'waiting':
+      return { color: 'light-blue', textColor: 'white', icon: 'hourglass_empty' }
+    default:
+      return { color: 'grey', textColor: 'white', icon: 'help_outline' }
+  }
+})
+
+const canRestoreFromThisJob = computed(() => {
+  if (!job.value) return false
+  return canRestoreFromJob(
+    { ...job.value, state: outcome.value.state },
+    acl.commands
+  )
+})
+
+const restoreFromJobQuery = computed(() => {
+  return buildRestoreFromJobQuery(job.value, currentJobDirector.value)
+})
+
+const showReasonLines = computed(() => {
+  return (
+    (outcome.value.state === 'warning' ||
+      outcome.value.state === 'failed' ||
+      outcome.value.state === 'canceled') &&
+    outcome.value.reasonLines?.length > 0
+  )
+})
+
+const shownProgress = computed(() => displayProgress({
+  job: job.value,
+  running: isRunning.value,
+  fd: fdRunning.value,
+  sd: sdRunning.value,
+}))
+const displayThroughputFiles = computed(() => shownProgress.value.files)
+const displayThroughputBytes = computed(() => shownProgress.value.bytes)
+
+const displayThroughputRate = computed(() => {
+  const r = finalRate(job.value)
+  if (r == null) return '—'
+  return `${formatBytes(r)}/s`
+})
+
+async function pollRunningProgress() {
+  if (!job.value || !isRunning.value) return
+  const jobId = job.value.id
+  const ticket = liveProgress.ticket()
+
+  const client = job.value.client
+  if (client) {
+    try {
+      const text = await director.rawCall(`status client=${quoteDirectorString(client)}`)
+      if (typeof text === 'string') {
+        const sample = parseFdRunning(text, jobId)
+        if (liveProgress.accept(ticket, 'fd', sample)) fdRunning.value = sample
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const storage = job.value.storage ?? storageEvents.value?.finalStorage ?? storageEvents.value?.selected
+  if (storage) {
+    try {
+      const text = await director.rawCall(`status storage=${quoteDirectorString(storage)}`)
+      if (typeof text === 'string') {
+        const sample = parseSdRunning(text, jobId)
+        if (liveProgress.accept(ticket, 'sd', sample)) sdRunning.value = sample
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const progressPoller = createPoller(pollRunningProgress, 5000)
+
 // ── auto-refresh for running jobs ─────────────────────────────────────────────
 const isRunning = computed(() => isRunningJobStatus(job.value?.status))
 
-let _pollTimer = null
-
-function startPolling() {
-  stopPolling()
-  _pollTimer = setInterval(async () => {
-    if (!isRunning.value) { stopPolling(); return }
-    await loadJob()
-  }, 5000)
-}
-
-function stopPolling() {
-  clearInterval(_pollTimer)
-  _pollTimer = null
-}
+const jobPoller = createPoller(async () => {
+  if (!isRunning.value) {
+    jobPoller.stop()
+    return
+  }
+  await loadJob()
+}, 5000)
 
 watch(isRunning, (running) => {
-  if (running) startPolling()
-  else stopPolling()
+  if (running) {
+    jobPoller.start()
+    progressPoller.start()
+  } else {
+    jobPoller.stop()
+    progressPoller.stop()
+    resetLive()
+  }
 }, { immediate: true })
 
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  jobPoller.stop()
+  progressPoller.stop()
+})
 
 // ── actions ───────────────────────────────────────────────────────────────────
 function escapeHtml(value) {
