@@ -57,6 +57,22 @@ describe('validateJobForm', () => {
     expect(validateJobForm({ ...form, [field]: 'unknown' }, lists)).toHaveProperty(field)
   })
 
+  it('requires Messages without a JobDefs and lets a JobDefs supply them', () => {
+    expect(validateJobForm({ ...form, jobdefs: '', messages: '' }, lists)).toHaveProperty('messages')
+    expect(validateJobForm({ ...form, jobdefs: '', messages: null }, lists)).toHaveProperty('messages')
+    expect(validateJobForm({ ...form, jobdefs: '', messages: 'unknown' }, lists)).toHaveProperty('messages')
+    expect(validateJobForm({ ...form, jobdefs: '', messages: 'Standard' }, lists)).not.toHaveProperty('messages')
+    expect(validateJobForm({ ...form, messages: '' }, lists)).not.toHaveProperty('messages')
+    expect(validateJobForm({ ...form, messages: null }, lists)).not.toHaveProperty('messages')
+    // a Messages value that is given must still exist
+    expect(validateJobForm({ ...form, messages: 'unknown' }, lists)).toHaveProperty('messages')
+  })
+
+  it('sends no Messages argument when the JobDefs supplies them', () => {
+    expect(buildConfigureAddJobCommand({ ...form, messages: '' })).not.toContain('messages=')
+    expect(buildConfigureAddJobCommand({ ...form, messages: null })).not.toContain('messages=')
+  })
+
   it.each(['jobdefs', 'schedule'])('validates optional %s against its resource list', field => {
     expect(validateJobForm({ ...form, [field]: 'unknown' }, lists)).toHaveProperty(field)
   })
