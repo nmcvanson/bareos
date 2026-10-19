@@ -59,6 +59,47 @@
           </div>
         </div>
         <q-space />
+        <div class="row items-center q-gutter-sm">
+          <q-btn
+            outline
+            no-caps
+            icon="edit"
+            :label="t('Update status')"
+            :disable="!canUpdate || actionBusy"
+            data-testid="volume-action-update-status"
+            @click="openUpdateStatusDialog"
+          />
+          <q-btn
+            outline
+            no-caps
+            color="warning"
+            icon="delete_sweep"
+            :label="t('Prune')"
+            :disable="!canPrune || actionBusy"
+            data-testid="volume-action-prune"
+            @click="openConfirmDialog('prune')"
+          />
+          <q-btn
+            outline
+            no-caps
+            color="negative"
+            icon="delete_forever"
+            :label="t('Purge')"
+            :disable="!canPurge || actionBusy"
+            data-testid="volume-action-purge"
+            @click="openConfirmDialog('purge')"
+          />
+          <q-btn
+            outline
+            no-caps
+            color="negative"
+            icon="delete"
+            :label="t('Delete')"
+            :disable="!canDelete || actionBusy"
+            data-testid="volume-action-delete"
+            @click="openConfirmDialog('delete')"
+          />
+        </div>
       </div>
 
       <!-- ── Two-column layout ─────────────────────────────────────────── -->
@@ -229,24 +270,117 @@
         </div>
       </div>
     </template>
+
+    <!-- Update Status Dialog -->
+    <q-dialog v-model="statusDlg.open" data-testid="volume-status-dialog">
+      <q-card style="min-width: 360px">
+        <q-card-section class="panel-header row items-center">
+          <div class="text-h6">{{ t('Update Volume Status') }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" :disable="actionBusy" v-close-popup />
+        </q-card-section>
+        <q-card-section>
+          <div class="text-body2 q-mb-md">
+            {{ t('Select new status for volume "{name}":', { name: vol?.volumename }) }}
+          </div>
+          <q-select
+            v-model="statusDlg.status"
+            :options="VOLUME_STATUS_OPTIONS"
+            :label="t('Volume status')"
+            outlined
+            dense
+            data-testid="volume-status-select"
+          />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps :label="t('Cancel')" :disable="actionBusy" v-close-popup />
+          <q-btn
+            color="primary"
+            no-caps
+            :label="t('Update')"
+            :loading="actionBusy"
+            :disable="!statusDlg.status || actionBusy"
+            data-testid="volume-status-submit"
+            @click="executeUpdateStatus"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Destructive Action Confirmation Dialog -->
+    <q-dialog v-model="confirmDlg.open" persistent data-testid="volume-confirm-dialog">
+      <q-card style="min-width: 400px; max-width: 600px">
+        <q-card-section class="panel-header row items-center">
+          <div class="text-h6">{{ confirmDlg.title }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" :disable="actionBusy" v-close-popup />
+        </q-card-section>
+        <q-card-section>
+          <div class="text-body1 q-mb-sm">{{ confirmDlg.message }}</div>
+          <div class="text-caption text-negative">{{ confirmDlg.lostText }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps :label="t('Cancel')" :disable="actionBusy" v-close-popup />
+          <q-btn
+            :color="confirmDlg.color"
+            no-caps
+            :label="confirmDlg.confirmLabel"
+            :loading="actionBusy"
+            :disable="actionBusy"
+            data-testid="volume-confirm-submit"
+            @click="executeConfirmedAction"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Director Reply Dialog -->
+    <q-dialog v-model="replyDlg.open" persistent data-testid="director-reply-dialog">
+      <q-card style="min-width: 480px; max-width: 800px">
+        <q-card-section class="panel-header row items-center">
+          <div class="text-h6">{{ replyDlg.title }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" @click="closeReplyDialog" />
+        </q-card-section>
+        <q-card-section>
+          <pre class="console-output" data-testid="director-reply-text">{{ replyDlg.text }}</pre>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps :label="t('Close')" color="primary" @click="closeReplyDialog" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { switchActiveDirector } from '../composables/useDirectorSession.js'
 import { useAuthStore } from '../stores/auth.js'
 import { useDirectorStore } from '../stores/director.js'
+import { useDirectorAclStore } from '../stores/directorAcl.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { usePersistedTablePagination } from '../composables/usePersistedTablePagination.js'
+import { actionAllowed } from '../utils/acl.js'
 import { quoteDirectorString } from '../utils/directorStrings.js'
 import { buildDirectorPageQuery } from '../utils/director.js'
 import { buildJobDetailsQuery, resolveJobDetailsQuery } from '../utils/jobs.js'
 import { formatBytes, formatDuration } from '../mock/index.js'
 import { formatNumber } from '../utils/locales.js'
 import { buildPoolDetailsQuery } from '../utils/pools.js'
+import {
+  VOLUME_STATUS_OPTIONS,
+  buildDeleteVolumeCommand,
+  buildPruneVolumeCommand,
+  buildPurgeVolumeCommand,
+  buildUpdateVolumeStatusCommand,
+  captureVolumeActionTarget,
+  formatDirectorReply,
+  parseDirectorActionReply,
+} from '../utils/volumeActions.js'
+import { createActionTokenGuard } from '../utils/actionToken.js'
 import {
   buildAutochangerSelectionQuery,
   buildStoragesTabQuery,
@@ -262,10 +396,194 @@ import {
 } from '../utils/volumes.js'
 
 const route      = useRoute()
+const router     = useRouter()
 const auth       = useAuthStore()
 const director   = useDirectorStore()
+const acl        = useDirectorAclStore()
 const settings   = useSettingsStore()
 const { t } = useI18n()
+const actionBusy = ref(false)
+
+const canUpdate = computed(() => actionAllowed(acl.commands, 'update'))
+const canPrune  = computed(() => actionAllowed(acl.commands, 'prune'))
+const canPurge  = computed(() => actionAllowed(acl.commands, 'purge'))
+const canDelete = computed(() => actionAllowed(acl.commands, 'delete'))
+
+onMounted(() => {
+  acl.ensureLoaded().catch(() => {})
+})
+
+const statusDlg = ref({
+  open: false,
+  status: 'Append',
+})
+
+const confirmDlg = ref({
+  open: false,
+  actionType: '',
+  target: null,
+  token: null,
+  title: '',
+  message: '',
+  lostText: '',
+  confirmLabel: '',
+  color: 'negative',
+})
+
+const replyDlg = ref({
+  open: false,
+  title: '',
+  text: '',
+})
+
+// One token per confirmation; a scope or Director change invalidates it for good.
+const confirmGuard = createActionTokenGuard()
+const statusGuard = createActionTokenGuard()
+const activeDirectorName = () => auth.user?.director || settings.directorName || ''
+const volumeScope = () => `${volumeName.value}\u0000${currentVolumeDirector.value}`
+
+async function closeReplyDialog() {
+  const { navigateTo, token } = replyDlg.value
+  replyDlg.value.open = false
+  replyDlg.value.navigateTo = null
+  if (navigateTo && confirmGuard.isCurrent(token, volumeScope())) await router.push(navigateTo)
+}
+
+function openUpdateStatusDialog() {
+  statusDlg.value = {
+    open: true,
+    status: vol.value?.volstatus && VOLUME_STATUS_OPTIONS.includes(vol.value.volstatus)
+      ? vol.value.volstatus
+      : 'Append',
+  }
+}
+
+async function executeUpdateStatus() {
+  if (!statusDlg.value.status || actionBusy.value || !canUpdate.value) return
+  const target = captureVolumeActionTarget(volumeName.value, currentVolumeDirector.value, activeDirectorName())
+  const token = statusGuard.open(target, volumeScope(), activeDirectorName())
+  const status = statusDlg.value.status
+  const isCurrent = () => statusGuard.isCurrent(token, volumeScope())
+  actionBusy.value = true
+  try {
+    await ensureVolumeDirector()
+    if (!canUpdate.value || !statusGuard.canWrite(token, volumeScope(), activeDirectorName())) return
+    const cmd = buildUpdateVolumeStatusCommand(token.target.volume, status)
+    statusGuard.consume(token)
+    const reply = await director.call(cmd)
+    const result = parseDirectorActionReply(reply)
+    statusDlg.value.open = false
+    replyDlg.value = {
+      open: true,
+      title: result.ok ? t('Update Volume Status') : t('Update Status Failed'),
+      text: result.text,
+    }
+    if (result.ok && isCurrent()) await loadVolume()
+  } catch (err) {
+    replyDlg.value = {
+      open: true,
+      title: t('Update Status Failed'),
+      text: formatDirectorReply(err),
+    }
+  } finally {
+    actionBusy.value = false
+  }
+}
+
+function openConfirmDialog(actionType) {
+  if (actionBusy.value || !({ prune: canPrune.value, purge: canPurge.value, delete: canDelete.value })[actionType]) return
+  const target = captureVolumeActionTarget(volumeName.value, currentVolumeDirector.value, activeDirectorName())
+  const token = confirmGuard.open(target, volumeScope(), activeDirectorName())
+  const name = target.volume
+  if (actionType === 'prune') {
+    confirmDlg.value = {
+      open: true,
+      actionType: 'prune',
+      target,
+      token,
+      title: t('Prune Volume'),
+      message: t('Are you sure you want to prune volume "{name}"?', { name }),
+      lostText: t('Catalog records for expired jobs on this volume will be removed.'),
+      confirmLabel: t('Prune'),
+      color: 'warning',
+    }
+  } else if (actionType === 'purge') {
+    confirmDlg.value = {
+      open: true,
+      actionType: 'purge',
+      target,
+      token,
+      title: t('Purge Volume'),
+      message: t('Are you sure you want to purge volume "{name}"?', { name }),
+      lostText: t('All catalog job and file records for this volume will be permanently removed, making its data inaccessible.'),
+      confirmLabel: t('Purge'),
+      color: 'negative',
+    }
+  } else if (actionType === 'delete') {
+    confirmDlg.value = {
+      open: true,
+      actionType: 'delete',
+      target,
+      token,
+      title: t('Delete Volume'),
+      message: t('Are you sure you want to delete volume "{name}"?', { name }),
+      lostText: t('The volume and its records will be permanently deleted from the catalog.'),
+      confirmLabel: t('Delete'),
+      color: 'negative',
+    }
+  }
+}
+
+async function executeConfirmedAction() {
+  const type = confirmDlg.value.actionType
+  const token = confirmDlg.value.token
+  const isCurrent = () => confirmDlg.value.open && confirmGuard.isCurrent(token, volumeScope())
+  const permitted = () => ({ prune: canPrune.value, purge: canPurge.value, delete: canDelete.value })[type] === true
+  if (!type || actionBusy.value || !isCurrent() || !permitted()) return
+  const target = token.target
+  actionBusy.value = true
+  try {
+    await ensureVolumeDirector()
+    if (!isCurrent() || !permitted() || !confirmGuard.canWrite(token, volumeScope(), activeDirectorName())) return
+    let cmd = ''
+    let title = ''
+    if (type === 'prune') {
+      cmd = buildPruneVolumeCommand(target.volume)
+      title = t('Prune Volume')
+    } else if (type === 'purge') {
+      cmd = buildPurgeVolumeCommand(target.volume)
+      title = t('Purge Volume')
+    } else if (type === 'delete') {
+      cmd = buildDeleteVolumeCommand(target.volume)
+      title = t('Delete Volume')
+    }
+    confirmGuard.consume(token)
+    const reply = await director.call(cmd)
+    if (!isCurrent()) return
+    const result = parseDirectorActionReply(reply)
+    confirmDlg.value.open = false
+    replyDlg.value = {
+      open: true,
+      title: result.ok ? title : t('Action Failed'),
+      text: result.text,
+      token,
+      navigateTo: result.ok && type === 'delete' ? backLocation.value : null,
+    }
+    if (result.ok && type !== 'delete') {
+      await loadVolume()
+    }
+  } catch (err) {
+    if (!isCurrent()) return
+    replyDlg.value = {
+      open: true,
+      title: t('Action Failed'),
+      text: formatDirectorReply(err),
+    }
+  } finally {
+    actionBusy.value = false
+  }
+}
+
 const jobsPagination = usePersistedTablePagination('volume-details.jobs', {
   rowsPerPage: 15,
   sortBy: 'jobid',
@@ -278,6 +596,17 @@ const requestedDirector = computed(() => (
 const currentVolumeDirector = computed(() => (
   requestedDirector.value || auth.user?.director || settings.directorName || ''
 ))
+
+// A change of volume or Director invalidates a pending confirmation for good;
+// only the page switching to the target's own Director leaves it valid.
+watch([volumeName, currentVolumeDirector, activeDirectorName], () => {
+  confirmGuard.observe(volumeScope(), activeDirectorName())
+  statusGuard.observe(volumeScope(), activeDirectorName())
+  if (confirmGuard.isCurrent(confirmDlg.value.token, volumeScope())) return
+  confirmDlg.value.open = false
+  confirmDlg.value.target = null
+  confirmDlg.value.token = null
+}, { flush: 'sync' })
 const autochangerOrigin = computed(() => resolveAutochangerSelectionQuery(route.query))
 const jobOrigin = computed(() => resolveVolumeDetailsJobOrigin(route.query))
 const poolOrigin = computed(() => resolveVolumeDetailsPoolOrigin(route.query))
@@ -397,7 +726,8 @@ async function ensureVolumeDirector() {
     return
   }
 
-  await switchActiveDirector(requestedDirector.value)
+  // The command list belongs to the Director; reload it after switching.
+  if (await switchActiveDirector(requestedDirector.value)) await acl.refresh()
 }
 
 async function loadVolume() {
