@@ -23,7 +23,7 @@
               Job {{ currentJobId }}
             </template>
           </div>
-          <q-spinner v-if="isRunning" color="primary" size="18px" :title="t('Auto-refreshing…')" />
+          <q-spinner v-if="isActive" color="primary" size="18px" :title="t('Auto-refreshing…')" />
         </div>
       </div>
 
@@ -336,6 +336,8 @@ import {
   resolveJobDetailsVolumeOrigin,
   resolveJobsListQuery,
   mergeJobMediaByVolume,
+  isActiveJobStatus,
+  buildJobDefaultsCommand,
 } from '../utils/jobs.js'
 import { resolveJobTypeCode } from '../utils/jobTypes.js'
 import { buildVolumeDetailsQuery } from '../utils/volumes.js'
@@ -345,7 +347,7 @@ import JobTypeBadge from '../components/JobTypeBadge.vue'
 import VolumeNameLink from '../components/VolumeNameLink.vue'
 import { parseJobStorageEvents } from '../utils/jobStorageEvents.js'
 import { jobOutcome } from '../utils/jobOutcome.js'
-import { parseFdRunning, parseSdRunning, finalRate } from '../utils/jobProgress.js'
+import { parseFdRunning, parseSdRunning, finalRate, sdStatusCandidates, storageConnected } from '../utils/jobProgress.js'
 import { createPoller } from '../utils/poller.js'
 import { createInflightGuard } from '../utils/inflightGuard.js'
 import { useJobScope } from '../utils/jobScope.js'
@@ -583,9 +585,11 @@ async function loadJobNow() {
 const liveProgress = createLiveProgress()
 const fdRunning = ref(null)
 const sdRunning = ref(null)
+let configuredStorage = null
 
 function resetLive() {
   liveProgress.reset(currentScope())
+  configuredStorage = null
   fdRunning.value = null
   sdRunning.value = null
 }
@@ -720,6 +724,7 @@ const shownProgress = computed(() => displayProgress({
   running: isRunning.value,
   fd: fdRunning.value,
   sd: sdRunning.value,
+  last: liveProgress.last,
 }))
 const displayThroughputFiles = computed(() => shownProgress.value.files)
 const displayThroughputBytes = computed(() => shownProgress.value.bytes)
@@ -729,6 +734,28 @@ const displayThroughputRate = computed(() => {
   if (r == null) return '—'
   return `${formatBytes(r)}/s`
 })
+
+// The job's configured Storage (from .defaults), fetched once per job page.
+async function loadConfiguredStorage(ticket) {
+  if (configuredStorage) return configuredStorage
+  const name = job.value?.name
+  const names = []
+  if (name) {
+    try {
+      const res = await director.call(buildJobDefaultsCommand(name))
+      const raw = (res?.defaults ?? res?.result?.defaults ?? res ?? {}).storage
+      for (const item of Array.isArray(raw) ? raw : [raw]) {
+        if (typeof item === 'string' && item.trim()) names.push(item.trim())
+      }
+    } catch {
+      // the configured storage is only a hint
+    }
+  }
+  if (ticket.scope === liveProgress.ticket().scope && ticket.epoch === liveProgress.ticket().epoch) {
+    configuredStorage = names
+  }
+  return names
+}
 
 async function pollRunningProgress() {
   if (!job.value || !isRunning.value) return
@@ -748,35 +775,45 @@ async function pollRunningProgress() {
     }
   }
 
-  const storage = job.value.storage ?? storageEvents.value?.finalStorage ?? storageEvents.value?.selected
-  if (storage) {
+  // Ask a Storage Daemon only after the Director has connected to one.
+  if (!storageConnected(rawJobLog.value)) return
+  const configured = await loadConfiguredStorage(ticket)
+  let answered = false
+  let found = false
+  for (const storage of sdStatusCandidates(job.value, storageEvents.value, configured)) {
     try {
       const text = await director.rawCall(`status storage=${quoteDirectorString(storage)}`)
-      if (typeof text === 'string') {
-        const sample = parseSdRunning(text, jobId)
-        if (liveProgress.accept(ticket, 'sd', sample)) sdRunning.value = sample
-      }
+      if (typeof text !== 'string') continue
+      answered = true
+      const sample = parseSdRunning(text, jobId)
+      if (!sample) continue
+      found = true
+      if (liveProgress.accept(ticket, 'sd', sample)) sdRunning.value = sample
+      break
     } catch {
-      // ignore
+      // try the next storage
     }
   }
+  // A Storage Daemon that no longer lists the job leaves no old rate on screen.
+  if (answered && !found && liveProgress.accept(ticket, 'sd', null)) sdRunning.value = null
 }
 
 const progressPoller = createPoller(pollRunningProgress, 5000)
 
 // ── auto-refresh for running jobs ─────────────────────────────────────────────
 const isRunning = computed(() => isRunningJobStatus(job.value?.status))
+const isActive = computed(() => isActiveJobStatus(job.value?.status))
 
 const jobPoller = createPoller(async () => {
-  if (!isRunning.value) {
+  if (!isActive.value) {
     jobPoller.stop()
     return
   }
   await loadJob()
 }, 5000)
 
-watch(isRunning, (running) => {
-  if (running) {
+watch(isActive, (active) => {
+  if (active) {
     jobPoller.start()
     progressPoller.start()
   } else {

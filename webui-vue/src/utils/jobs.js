@@ -818,6 +818,13 @@ export function resolveJobDetailsDashboardOrigin(query) {
 
 const TERMINAL_JOB_STATUSES = new Set(['T', 'W', 'E', 'e', 'f', 'A'])
 
+// A job still to be followed: any known status except the terminal ones.
+export function isActiveJobStatus(status) {
+  if (typeof status !== 'string' || !status.trim()) return false
+  const code = status.trim()
+  return !TERMINAL_JOB_STATUSES.has(code) && code !== 'D' && code !== 'I'
+}
+
 export function isFinishedJobStatus(status) {
   if (typeof status !== 'string') {
     return false

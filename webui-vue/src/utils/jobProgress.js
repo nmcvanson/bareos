@@ -139,3 +139,35 @@ export function finalRate(job) {
 
   return bytes / seconds
 }
+
+// Storages to ask for a running job's SD counters, only those that took the
+// job: the final and dispatched member, the failover target, then the
+// configured storage. The first member tried counts only when none refused.
+export function sdStatusCandidates(job, events, configured = []) {
+  const skipped = new Set((events?.attempts ?? [])
+    .filter(attempt => attempt?.outcome === 'refused' || attempt?.outcome === 'skipped-disabled')
+    .map(attempt => attempt.storage))
+  const names = [
+    events?.finalStorage,
+    events?.dispatchedTo,
+    events?.failedOverTo,
+    job?.storage,
+    ...(Array.isArray(configured) ? configured : [configured]),
+    skipped.size === 0 ? events?.selected : null,
+  ]
+  const seen = new Set()
+  const out = []
+  for (const name of names) {
+    if (typeof name !== 'string' || !name.trim() || seen.has(name) || skipped.has(name)) continue
+    seen.add(name)
+    out.push(name)
+  }
+  return out
+}
+
+// True once the job log shows the Director connected to a Storage Daemon, so a
+// member the Director is still trying is not asked for status.
+export function storageConnected(logEntries) {
+  const entries = Array.isArray(logEntries) ? logEntries : []
+  return entries.some(entry => /Connected Storage daemon at /.test(String(entry?.logtext ?? entry ?? '')))
+}
