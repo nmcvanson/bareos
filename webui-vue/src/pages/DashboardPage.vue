@@ -22,6 +22,149 @@
   <q-page class="q-pa-md">
     <DirectorErrorsBanner :errors="directorErrors" />
 
+    <!-- ── Step R4 New Cards ──────────────────────────────────────────────── -->
+    <div class="row q-col-gutter-md q-mb-md">
+      <!-- 1. Last 24 hours card -->
+      <div class="col-12 col-md-4">
+        <q-card flat bordered class="bareos-panel fit" data-testid="card-last-24h">
+          <q-card-section class="panel-header row items-center">
+            <q-icon name="history" size="xs" class="q-mr-xs" />
+            <span>{{ t('Last 24 hours') }}</span>
+          </q-card-section>
+          <q-card-section>
+            <div class="row q-col-gutter-sm text-center">
+              <div class="col-3">
+                <router-link
+                  :to="{ name: 'jobs', query: withJobsStatusFilterQuery({}, 'T') }"
+                  class="text-decoration-none"
+                >
+                  <StatNumber
+                    :value="outcomeCounts24h.ok"
+                    :label="t('OK')"
+                    color="positive"
+                    data-testid="last-24h-count-ok"
+                  />
+                </router-link>
+              </div>
+              <div class="col-3">
+                <router-link
+                  :to="{ name: 'jobs', query: withJobsStatusFilterQuery({}, 'W') }"
+                  class="text-decoration-none"
+                >
+                  <StatNumber
+                    :value="outcomeCounts24h.warning"
+                    :label="t('Warning')"
+                    color="warning"
+                    data-testid="last-24h-count-warning"
+                  />
+                </router-link>
+              </div>
+              <div class="col-3">
+                <router-link
+                  :to="{ name: 'jobs', query: withJobsStatusFilterQuery({}, 'f') }"
+                  class="text-decoration-none"
+                >
+                  <StatNumber
+                    :value="outcomeCounts24h.failed"
+                    :label="t('Failed')"
+                    color="negative"
+                    data-testid="last-24h-count-failed"
+                  />
+                </router-link>
+              </div>
+              <div class="col-3">
+                <router-link
+                  :to="{ name: 'jobs', query: withJobsStatusFilterQuery({}, 'A') }"
+                  class="text-decoration-none"
+                >
+                  <StatNumber
+                    :value="outcomeCounts24h.canceled"
+                    :label="t('Canceled')"
+                    color="grey-7"
+                    data-testid="last-24h-count-canceled"
+                  />
+                </router-link>
+              </div>
+            </div>
+          </q-card-section>
+        </q-card>
+      </div>
+
+      <!-- 2. Failed jobs card -->
+      <div class="col-12 col-md-4">
+        <q-card flat bordered class="bareos-panel fit" data-testid="card-failed-jobs">
+          <q-card-section class="panel-header row items-center">
+            <q-icon name="error_outline" size="xs" class="q-mr-xs" />
+            <span>{{ t('Failed jobs') }}</span>
+          </q-card-section>
+          <q-card-section class="q-pa-none" style="max-height: 220px; overflow-y: auto">
+            <div v-if="failedJobs24h.length === 0" class="q-pa-md text-grey text-caption text-center">
+              {{ t('No failed jobs in the last 24 hours.') }}
+            </div>
+            <q-list v-else separator dense>
+              <q-item v-for="job in failedJobs24h" :key="jobReasonScopeKey(job)" class="q-py-xs">
+                <q-item-section>
+                  <q-item-label class="row items-center no-wrap">
+                    <a href="#" class="text-primary text-weight-medium ellipsis" @click.prevent="openJobDetails(job)">
+                      {{ job.name }}
+                    </a>
+                    <span class="text-grey-7 text-caption q-ml-xs">#{{ jobId(job) }}</span>
+                    <q-space />
+                    <JobStatusBadge :status="jobStatus(job)" size="xs" />
+                  </q-item-label>
+                  <q-item-label caption class="text-negative ellipsis" :title="failedJobReasons[jobReasonScopeKey(job)] || ''">
+                    {{ failedJobReasons[jobReasonScopeKey(job)] || t('Loading reason…') }}
+                  </q-item-label>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </q-card-section>
+        </q-card>
+      </div>
+
+      <!-- 3. Components card -->
+      <div class="col-12 col-md-4">
+        <q-card flat bordered class="bareos-panel fit" data-testid="card-components">
+          <q-card-section class="panel-header row items-center justify-between">
+            <div class="row items-center">
+              <q-icon name="dns" size="xs" class="q-mr-xs" />
+              <span>{{ t('Components') }}</span>
+            </div>
+            <q-btn
+              color="primary"
+              dense
+              size="sm"
+              icon="sensors"
+              :label="t('Probe now')"
+              :loading="probingComponents"
+              data-testid="dashboard-probe-now-btn"
+              @click="runComponentsProbe"
+            />
+          </q-card-section>
+          <q-card-section style="max-height: 220px; overflow-y: auto">
+            <div v-if="allComponentCards.length === 0" class="text-grey text-caption text-center q-py-sm">
+              {{ t('No components found.') }}
+            </div>
+            <div v-else class="row q-gutter-xs items-center">
+              <q-chip
+                v-for="c in allComponentCards"
+                :key="c.id"
+                dense
+                size="sm"
+                :color="c.color"
+                :text-color="c.textColor"
+                :icon="c.icon"
+                :data-testid="'dashboard-component-chip-' + c.id"
+              >
+                {{ c.label }}
+                <q-tooltip>{{ c.tooltip }}</q-tooltip>
+              </q-chip>
+            </div>
+          </q-card-section>
+        </q-card>
+      </div>
+    </div>
+
     <div class="row q-col-gutter-md">
       <!-- Left column: 8/12 -->
       <div class="col-12 col-md-8">
@@ -300,6 +443,15 @@ import DirectorErrorsBanner from '../components/DirectorErrorsBanner.vue'
 import JobStatusBadge from '../components/JobStatusBadge.vue'
 import JobLevelBadge from '../components/JobLevelBadge.vue'
 import StatNumber from '../components/StatNumber.vue'
+import { jobOutcome } from '../utils/jobOutcome.js'
+import { createJobReasonCache, jobReasonScopeKey } from '../utils/jobReasonCache.js'
+import {
+  extractStorageList,
+  extractClientList,
+  groupStorageDaemons,
+  probeComponents,
+} from '../utils/componentProbe.js'
+import { directorCollection } from '../composables/useDirectorFetch.js'
 
 const auth = useAuthStore()
 const director = useDirectorStore()
@@ -634,6 +786,250 @@ function jobBytes(row) { return fmtBytes(row.bytes ?? 0) }
 function jobId(row) {
   return row.id ?? row.jobid
 }
+
+// ── Step R4 logic ────────────────────────────────────────────────────────────
+const directorName = computed(() => {
+  return auth.user?.director || settings.directorName || director.currentDirector || 'Director'
+})
+
+const outcomeCounts24h = computed(() => {
+  const counts = {
+    ok: 0,
+    warning: 0,
+    failed: 0,
+    canceled: 0,
+    running: 0,
+    waiting: 0,
+  }
+  for (const j of past24hJobs.value) {
+    const { state } = jobOutcome(j)
+    if (counts[state] !== undefined) {
+      counts[state]++
+    }
+  }
+  return counts
+})
+
+const failedJobs24h = computed(() => {
+  return past24hJobs.value
+    .filter((j) => {
+      const { state } = jobOutcome(j)
+      return state === 'failed' || state === 'canceled'
+    })
+    .sort((a, b) => {
+      const timeA = a.starttime ? new Date(a.starttime.replace(' ', 'T')).getTime() : 0
+      const timeB = b.starttime ? new Date(b.starttime.replace(' ', 'T')).getTime() : 0
+      if (timeA !== timeB) return timeB - timeA
+      return (Number(b.id || b.jobid) || 0) - (Number(a.id || a.jobid) || 0)
+    })
+    .slice(0, 5)
+})
+
+const failedJobReasons = ref({})
+const loadingJobLogs = ref(false)
+const reasonCache = createJobReasonCache({
+  switchDirector: row => switchActiveDirector(row.director),
+  call: command => director.call(command),
+  fallbackDirector: () => auth.user?.director || '',
+  onUpdate: (key, value) => {
+    if (!value.loading) failedJobReasons.value = {
+      ...failedJobReasons.value,
+      [key]: value.error || value.reasons[0] || value.termination || t('No specific error reason in log'),
+    }
+  },
+})
+onUnmounted(() => reasonCache.dispose())
+
+async function fetchFailedJobReasons() {
+  const jobsToFetch = failedJobs24h.value.filter(job => jobId(job))
+  if (jobsToFetch.length === 0) return
+
+  loadingJobLogs.value = true
+  try {
+    await Promise.allSettled(jobsToFetch.map(job => reasonCache.load(job)))
+  } finally {
+    loadingJobLogs.value = false
+  }
+}
+
+watch(failedJobs24h, () => {
+  fetchFailedJobReasons()
+}, { immediate: true })
+
+// Components probe & card
+const componentStorages = ref([])
+const componentClients = ref([])
+const componentProbeResults = ref([])
+const probingComponents = ref(false)
+
+async function loadComponentResources() {
+  try {
+    const [storagesRes, clientsRes] = await Promise.all([
+      director.call('show storages').catch(() => ({})),
+      director.call('show clients').catch(() => ({})),
+    ])
+
+    let sList = extractStorageList(storagesRes)
+    if (sList.length === 0) {
+      try {
+        const dotStorages = await director.call('.storages')
+        sList = directorCollection(dotStorages?.storages ?? dotStorages)
+      } catch {}
+    }
+    componentStorages.value = sList
+
+    let cList = extractClientList(clientsRes)
+    if (cList.length === 0) {
+      try {
+        const dotClients = await director.call('.clients')
+        cList = extractClientList(dotClients)
+      } catch {}
+    }
+    componentClients.value = cList
+  } catch {}
+}
+
+async function runComponentsProbe() {
+  if (probingComponents.value) return
+  probingComponents.value = true
+  try {
+    if (componentStorages.value.length === 0 || componentClients.value.length === 0) {
+      await loadComponentResources()
+    }
+    const probed = await probeComponents(director, {
+      storages: componentStorages.value,
+      clients: componentClients.value,
+      probeDirector: true,
+    })
+    componentProbeResults.value = probed
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err?.message ?? String(err) })
+  } finally {
+    probingComponents.value = false
+  }
+}
+
+onMounted(() => {
+  loadComponentResources().catch(() => {})
+})
+
+const allComponentCards = computed(() => {
+  const items = []
+
+  // Director
+  const dirProbe = componentProbeResults.value.find(p => p.kind === 'director')
+  const dirLabel = `${t('Director')}: ${dirProbe?.name || directorName.value}`
+  if (!dirProbe) {
+    items.push({
+      id: 'director',
+      label: dirLabel,
+      color: 'grey-6',
+      textColor: 'white',
+      icon: 'help_outline',
+      tooltip: t('Not probed'),
+    })
+  } else if (dirProbe.reachable) {
+    items.push({
+      id: 'director',
+      label: dirLabel,
+      color: 'positive',
+      textColor: 'white',
+      icon: 'check_circle',
+      tooltip: dirProbe.header?.version
+        ? t('Reachable (v{version})', { version: dirProbe.header.version })
+        : t('Reachable'),
+    })
+  } else {
+    items.push({
+      id: 'director',
+      label: dirLabel,
+      color: 'negative',
+      textColor: 'white',
+      icon: 'error',
+      tooltip: dirProbe.error || t('Down'),
+    })
+  }
+
+  // Storage Daemons
+  const groupedSDs = groupStorageDaemons(componentStorages.value)
+  for (const sd of groupedSDs) {
+    const p = componentProbeResults.value.find(pr => pr.kind === 'storage' && (pr.key === sd.key || pr.id === sd.key))
+    const sdLabel = `SD: ${p?.name || sd.key}`
+    if (!p) {
+      items.push({
+        id: sd.key,
+        label: sdLabel,
+        color: 'grey-6',
+        textColor: 'white',
+        icon: 'help_outline',
+        tooltip: t('Not probed'),
+      })
+    } else if (p.reachable) {
+      items.push({
+        id: sd.key,
+        label: sdLabel,
+        color: 'positive',
+        textColor: 'white',
+        icon: 'check_circle',
+        tooltip: p.header?.version
+          ? t('Reachable (v{version})', { version: p.header.version })
+          : t('Reachable'),
+      })
+    } else {
+      items.push({
+        id: sd.key,
+        label: sdLabel,
+        color: 'negative',
+        textColor: 'white',
+        icon: 'error',
+        tooltip: p.error || t('Down'),
+      })
+    }
+  }
+
+  // Clients
+  const clientList = Array.isArray(componentClients.value)
+    ? componentClients.value
+    : directorCollection(componentClients.value)
+  for (const cl of clientList) {
+    const clName = typeof cl === 'string' ? cl : cl?.name
+    if (!clName) continue
+    const p = componentProbeResults.value.find(pr => pr.kind === 'client' && pr.id === clName)
+    const clLabel = `Client: ${clName}`
+    if (!p) {
+      items.push({
+        id: clName,
+        label: clLabel,
+        color: 'grey-6',
+        textColor: 'white',
+        icon: 'help_outline',
+        tooltip: t('Not probed'),
+      })
+    } else if (p.reachable) {
+      items.push({
+        id: clName,
+        label: clLabel,
+        color: 'positive',
+        textColor: 'white',
+        icon: 'check_circle',
+        tooltip: p.header?.version
+          ? t('Reachable (v{version})', { version: p.header.version })
+          : t('Reachable'),
+      })
+    } else {
+      items.push({
+        id: clName,
+        label: clLabel,
+        color: 'negative',
+        textColor: 'white',
+        icon: 'error',
+        tooltip: p.error || t('Down'),
+      })
+    }
+  }
+
+  return items
+})
 </script>
 
 <style scoped>
