@@ -21,6 +21,11 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  isFinishedJobStatus,
+  canRestoreFromJob,
+  isValidJobRecord,
+  formatJobDetailsTitle,
+  buildRestoreFromJobQuery,
   buildCancelJobCommand,
   buildJobDefaultsCommand,
   buildJobDetailsQuery,
@@ -625,4 +630,119 @@ describe('jobs filter helpers', () => {
     expect(resolveJobDetailsDashboardOrigin({ dashboardOrigin: '0' })).toBe(false)
     expect(resolveJobDetailsDashboardOrigin({})).toBe(false)
   })
+
+  describe('isFinishedJobStatus', () => {
+    it('returns true only for terminal statuses T, W, E, e, f, A', () => {
+      const terminalStatuses = ['T', 'W', 'E', 'e', 'f', 'A']
+      for (const status of terminalStatuses) {
+        expect(isFinishedJobStatus(status)).toBe(true)
+        expect(isFinishedJobStatus(` ${status} `)).toBe(true)
+      }
+    })
+
+    it('returns false for running, waiting, blocked, or other non-terminal statuses', () => {
+      const nonTerminalStatuses = ['R', 'C', 'B', 'M', 'm', 's', 'F', 'S', 'd', '']
+      for (const status of nonTerminalStatuses) {
+        expect(isFinishedJobStatus(status)).toBe(false)
+      }
+      expect(isFinishedJobStatus(null)).toBe(false)
+      expect(isFinishedJobStatus(undefined)).toBe(false)
+      expect(isFinishedJobStatus(123)).toBe(false)
+    })
+  })
+
+  describe('canRestoreFromJob', () => {
+    it('returns true for a backup job that ended OK or with warnings', () => {
+      const okJob = { id: 10, type: 'Backup', jobstatus: 'T', client: 'client-fd' }
+      expect(canRestoreFromJob(okJob)).toBe(true)
+
+      const warningJob = { jobid: 11, type: 'B', jobstatus: 'W', client: 'client-fd' }
+      expect(canRestoreFromJob(warningJob)).toBe(true)
+
+      const outcomeStateJob = { id: 12, type: 'B', state: 'ok', client: 'client-fd' }
+      expect(canRestoreFromJob(outcomeStateJob)).toBe(true)
+    })
+
+    it('returns false for non-backup job types', () => {
+      expect(canRestoreFromJob({ id: 10, type: 'Restore', jobstatus: 'T', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'R', jobstatus: 'T', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'Admin', jobstatus: 'T', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'Verify', jobstatus: 'T', client: 'client-fd' })).toBe(false)
+    })
+
+    it('returns false for jobs with failed, canceled, or running status', () => {
+      expect(canRestoreFromJob({ id: 10, type: 'B', jobstatus: 'E', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'B', jobstatus: 'f', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'B', jobstatus: 'A', client: 'client-fd' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'B', jobstatus: 'R', client: 'client-fd' })).toBe(false)
+    })
+
+    it('checks restore action permission against commands ACL', () => {
+      const okJob = { id: 10, type: 'B', jobstatus: 'T', client: 'client-fd' }
+      const allowedCommands = { restore: { permission: true } }
+      const deniedCommands = { restore: { permission: false } }
+
+      expect(canRestoreFromJob(okJob, allowedCommands)).toBe(true)
+      expect(canRestoreFromJob(okJob, deniedCommands)).toBe(false)
+      expect(canRestoreFromJob(okJob, null)).toBe(true)
+      expect(canRestoreFromJob(okJob, undefined)).toBe(true)
+    })
+
+    it('returns false when client or id is missing', () => {
+      expect(canRestoreFromJob({ type: 'B', jobstatus: 'T' })).toBe(false)
+      expect(canRestoreFromJob({ id: 10, type: 'B', jobstatus: 'T' })).toBe(false)
+      expect(canRestoreFromJob({ client: 'client-fd', type: 'B', jobstatus: 'T' })).toBe(false)
+      expect(canRestoreFromJob(null)).toBe(false)
+    })
+  })
+
+  describe('buildRestoreFromJobQuery', () => {
+    it('builds query with client and jobid', () => {
+      expect(buildRestoreFromJobQuery({ id: 42, client: 'my-client' })).toEqual({
+        client: 'my-client',
+        jobid: '42',
+      })
+      expect(buildRestoreFromJobQuery({ jobid: 42, client: 'my-client' }, 'dir-1')).toEqual({
+        client: 'my-client',
+        jobid: '42',
+        director: 'dir-1',
+      })
+      expect(buildRestoreFromJobQuery(null)).toEqual({})
+    })
+  })
+
+  describe('isValidJobRecord', () => {
+    it('returns true when job record has valid jobid or id', () => {
+      expect(isValidJobRecord({ id: 1101, name: 'backup-client' })).toBe(true)
+      expect(isValidJobRecord({ jobid: '1101', name: 'backup-client' })).toBe(true)
+      expect(isValidJobRecord({ jobid: 42 })).toBe(true)
+    })
+
+    it('returns false for empty object, non-objects, or records without valid positive id', () => {
+      expect(isValidJobRecord({})).toBe(false)
+      expect(isValidJobRecord(null)).toBe(false)
+      expect(isValidJobRecord(undefined)).toBe(false)
+      expect(isValidJobRecord({ id: 0 })).toBe(false)
+      expect(isValidJobRecord({ id: -1 })).toBe(false)
+      expect(isValidJobRecord({ id: 'abc' })).toBe(false)
+      expect(isValidJobRecord({ name: 'test' })).toBe(false)
+    })
+  })
+
+  describe('formatJobDetailsTitle', () => {
+    it('formats title with job id and name when valid', () => {
+      expect(formatJobDetailsTitle({ id: 1101, name: 'backup-client' }, '1101')).toBe('Job #1101 — backup-client')
+      expect(formatJobDetailsTitle({ jobid: 42, name: 'my-job' })).toBe('Job #42 — my-job')
+      expect(formatJobDetailsTitle({ id: 10 })).toBe('Job #10')
+    })
+
+    it('falls back to route id without NaN when job is missing or invalid', () => {
+      expect(formatJobDetailsTitle({}, '1101')).toBe('Job 1101')
+      expect(formatJobDetailsTitle(null, '1105')).toBe('Job 1105')
+      expect(formatJobDetailsTitle(undefined, '1111')).toBe('Job 1111')
+      expect(formatJobDetailsTitle({ id: NaN }, '1101')).toBe('Job 1101')
+      expect(formatJobDetailsTitle(null)).toBe('Job')
+    })
+  })
 })
+

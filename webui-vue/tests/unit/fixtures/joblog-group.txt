@@ -1,0 +1,367 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+list joblog jobid=828
+Automatically selected Catalog: MyCatalog
+Using Catalog "MyCatalog"
+ 2026-10-08 08:44:51 lab-dir JobId 828: Storage group: 2 candidates, using "File1a" (Job resource, policy ListedOrder).
+ 2026-10-08 08:44:53 lab-dir JobId 828: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-08 08:44:53 lab-dir JobId 828: Start Backup JobId 828, Job=backup-group.2026-10-08_08.44.51_18
+ 2026-10-08 08:44:53 lab-dir JobId 828: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:53 lab-dir JobId 828:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:53 lab-sd1 JobId 828: Using just in time reservation for job 828
+ 2026-10-08 08:44:53 lab-dir JobId 828: Using Device "JustInTime Device" to write.
+ 2026-10-08 08:44:53 lab-dir JobId 828: Connected Client: fd1 at lab-fd1:9102, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:53 lab-dir JobId 828:  Handshake: Immediate TLS 
+ 2026-10-08 08:44:53 lab-dir JobId 828:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:54 fd1 JobId 828: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:54 fd1 JobId 828:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-08 08:44:54 fd1 JobId 828: Extended attribute support is enabled
+ 2026-10-08 08:44:54 lab-sd1 JobId 828: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-08 08:44:54 lab-sd1 JobId 828: JustInTime Reservation: Finding drive to reserve.
+ 2026-10-08 08:44:54 lab-sd1 JobId 828: Using Device "FileStorage1a" (/srv/bareos/a) to write.
+ 2026-10-08 08:44:54 fd1 JobId 828: ACL support is enabled
+ 2026-10-08 08:44:54 fd1 JobId 828: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-08 08:44:54 lab-sd1 JobId 828: Moving to end of data on volume "Full-0290"
+ 2026-10-08 08:44:54 lab-sd1 JobId 828: Ready to append to end of Volume "Full-0290" size=96835566
+ 2026-10-08 08:44:55 lab-sd1 JobId 828: Releasing device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-08 08:44:55 lab-sd1 JobId 828: Elapsed time=00:00:01, Transfer rate=314.8 M Bytes/second
+ 2026-10-08 08:44:55 lab-dir JobId 828: Insert of attributes batch table with 2036 entries start
+ 2026-10-08 08:44:55 lab-dir JobId 828: Insert of attributes batch table done
+ 2026-10-08 08:44:55 lab-dir JobId 828: Bareos lab-dir 25.1.1 (14Sep25):
+  OS Information:         Ubuntu 24.04.5 LTS
+  JobId:                  828
+  Job:                    backup-group.2026-10-08_08.44.51_18
+  Backup Level:           Full
+  Client:                 "fd1" 25.1.1 (14Sep25) Ubuntu 24.04.5 LTS,ubuntu
+  FileSet:                "LabData" 2026-09-24 15:43:03
+  Pool:                   "Full" (From Job resource)
+  Catalog:                "MyCatalog" (From Client resource)
+  Storage:                "File1a" (From Job resource)
+  Scheduled time:         08-Oct-2026 08:44:51
+  Start time:             08-Oct-2026 08:44:54
+  End time:               08-Oct-2026 08:44:55
+  Elapsed time:           1 sec
+  Priority:               10
+  Allow Mixed Priority:   no
+  FD Files Written:       2,036
+  SD Files Written:       2,036
+  FD Bytes Read:          314,613,788 (314.6 MB)
+  FD Bytes Written:       314,613,788 (314.6 MB)
+  SD Bytes Written:       314,840,759 (314.8 MB)
+  Rate:                   314613.8 KB/s
+  Software Compression:   None
+  VSS:                    no
+  Encryption:             no
+  Accurate:               no
+  Volume name(s):         Full-0290
+  Volume Session Id:      39
+  Volume Session Time:    1791421424
+  Last Volume Bytes:      411,774,747 (411.7 MB)
+  Non-fatal FD errors:    0
+  SD Errors:              0
+  FD termination status:  OK
+  SD termination status:  OK
+  Bareos binary info:     Self-compiled: Get professional support from https://www.bareos.com
+  Job triggered by:       User
+  Termination:            Backup OK
+
+You have messages.
+list joblog jobid=283
+ 2026-10-02 10:30:27 lab-dir JobId 283: Storage group: 2 candidates, using "File2" (Job resource, policy ListedOrder).
+ 2026-10-02 10:30:29 lab-dir JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-02 10:30:29 lab-dir JobId 283: Start Backup JobId 283, Job=backup-failover-demo.2026-10-02_10.30.27_21
+ 2026-10-02 10:30:39 lab-dir JobId 283: Warning: lib/bsock_tcp.cc:171 Could not connect to Storage daemon on lab-sd2:9103. ERR=Connection refused
+Retrying ...
+ 2026-10-02 10:30:52 lab-dir JobId 283: Warning: lib/bsock_tcp.cc:179 Unable to connect to Storage daemon on lab-sd2:9103. ERR=Connection refused
+ 2026-10-02 10:30:52 lab-dir JobId 283: Warning: Storage group: "File2" could not take the job, trying "File1a".
+ 2026-10-02 10:30:52 lab-dir JobId 283: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 lab-dir JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: Using just in time reservation for job 283
+ 2026-10-02 10:30:52 lab-dir JobId 283: Using Device "JustInTime Device" to write.
+ 2026-10-02 10:30:52 lab-dir JobId 283: Storage group: failed over to "File1a" after 2 attempts.
+ 2026-10-02 10:30:52 lab-dir JobId 283: Connected Client: fd1 at lab-fd1:9102, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 lab-dir JobId 283:  Handshake: Immediate TLS 
+ 2026-10-02 10:30:52 lab-dir JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 fd1 JobId 283: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 fd1 JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-02 10:30:52 fd1 JobId 283: Extended attribute support is enabled
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: JustInTime Reservation: Finding drive to reserve.
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: Using Device "FileStorage1a" (/srv/bareos/a) to write.
+ 2026-10-02 10:30:52 fd1 JobId 283: ACL support is enabled
+ 2026-10-02 10:30:52 fd1 JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: Moving to end of data on volume "Full-0075"
+ 2026-10-02 10:30:52 lab-sd1 JobId 283: Ready to append to end of Volume "Full-0075" size=865125992
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: User defined maximum volume capacity 1,073,741,824 exceeded on device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: End of medium on Volume "Full-0075" Bytes=1,072,744,040 Blocks=1,026 at 02-Oct-2026 10:30.
+ 2026-10-02 10:30:53 lab-dir JobId 283: Created new Volume "Full-0077" in catalog.
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: Labeled new Volume "Full-0077" on device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: Moving to end of data on volume "Full-0077"
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: Ready to append to end of Volume "Full-0077" size=193
+ 2026-10-02 10:30:53 lab-sd1 JobId 283: New volume "Full-0077" mounted on device "FileStorage1a" (/srv/bareos/a) at 02-Oct-2026 10:30.
+ 2026-10-02 10:30:54 lab-sd1 JobId 283: Releasing device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-02 10:30:54 lab-sd1 JobId 283: Elapsed time=00:00:02, Transfer rate=157.4 M Bytes/second
+ 2026-10-02 10:30:54 lab-dir JobId 283: Insert of attributes batch table with 2036 entries start
+ 2026-10-02 10:30:54 lab-dir JobId 283: Insert of attributes batch table done
+ 2026-10-02 10:30:54 lab-dir JobId 283: Bareos lab-dir 25.1.1 (14Sep25):
+  OS Information:         Ubuntu 24.04.5 LTS
+  JobId:                  283
+  Job:                    backup-failover-demo.2026-10-02_10.30.27_21
+  Backup Level:           Full
+  Client:                 "fd1" 25.1.1 (14Sep25) Ubuntu 24.04.5 LTS,ubuntu
+  FileSet:                "LabData" 2026-09-24 15:43:03
+  Pool:                   "Full" (From Job resource)
+  Catalog:                "MyCatalog" (From Client resource)
+  Storage:                "File1a" (From Job resource)
+  Scheduled time:         02-Oct-2026 10:30:27
+  Start time:             02-Oct-2026 10:30:52
+  End time:               02-Oct-2026 10:30:54
+  Elapsed time:           2 secs
+  Priority:               10
+  Allow Mixed Priority:   no
+  FD Files Written:       2,036
+  SD Files Written:       2,036
+  FD Bytes Read:          314,613,788 (314.6 MB)
+  FD Bytes Written:       314,613,788 (314.6 MB)
+  SD Bytes Written:       314,840,759 (314.8 MB)
+  Rate:                   157306.9 KB/s
+  Software Compression:   None
+  VSS:                    no
+  Encryption:             no
+  Accurate:               no
+  Volume name(s):         Full-0075|Full-0077
+  Volume Session Id:      1
+  Volume Session Time:    1790911712
+  Last Volume Bytes:      107,321,358 (107.3 MB)
+  Non-fatal FD errors:    0
+  SD Errors:              0
+  FD termination status:  OK
+  SD termination status:  OK
+  Bareos binary info:     Self-compiled: Get professional support from https://www.bareos.com
+  Job triggered by:       User
+  Termination:            Backup OK
+
+.api 2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "api": 2
+  }
+}list joblog jobid=283
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "joblog": [
+      {
+        "time": "2026-10-02 10:30:27",
+        "logtext": "lab-dir JobId 283: Storage group: 2 candidates, using \"File2\" (Job resource, policy ListedOrder).\n"
+      },
+      {
+        "time": "2026-10-02 10:30:29",
+        "logtext": "lab-dir JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-02 10:30:29",
+        "logtext": "lab-dir JobId 283: Start Backup JobId 283, Job=backup-failover-demo.2026-10-02_10.30.27_21\n"
+      },
+      {
+        "time": "2026-10-02 10:30:39",
+        "logtext": "lab-dir JobId 283: Warning: lib/bsock_tcp.cc:171 Could not connect to Storage daemon on lab-sd2:9103. ERR=Connection refused\nRetrying ...\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Warning: lib/bsock_tcp.cc:179 Unable to connect to Storage daemon on lab-sd2:9103. ERR=Connection refused\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Warning: Storage group: \"File2\" could not take the job, trying \"File1a\".\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: Using just in time reservation for job 283\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Using Device \"JustInTime Device\" to write.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Storage group: failed over to \"File1a\" after 2 attempts.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283: Connected Client: fd1 at lab-fd1:9102, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283:  Handshake: Immediate TLS \n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-dir JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "fd1 JobId 283: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "fd1 JobId 283:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "fd1 JobId 283: Extended attribute support is enabled\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: JustInTime Reservation: Finding drive to reserve.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: Using Device \"FileStorage1a\" (/srv/bareos/a) to write.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "fd1 JobId 283: ACL support is enabled\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "fd1 JobId 283: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: Moving to end of data on volume \"Full-0075\"\n"
+      },
+      {
+        "time": "2026-10-02 10:30:52",
+        "logtext": "lab-sd1 JobId 283: Ready to append to end of Volume \"Full-0075\" size=865125992\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: User defined maximum volume capacity 1,073,741,824 exceeded on device \"FileStorage1a\" (/srv/bareos/a).\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: End of medium on Volume \"Full-0075\" Bytes=1,072,744,040 Blocks=1,026 at 02-Oct-2026 10:30.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-dir JobId 283: Created new Volume \"Full-0077\" in catalog.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: Labeled new Volume \"Full-0077\" on device \"FileStorage1a\" (/srv/bareos/a).\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: Moving to end of data on volume \"Full-0077\"\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: Ready to append to end of Volume \"Full-0077\" size=193\n"
+      },
+      {
+        "time": "2026-10-02 10:30:53",
+        "logtext": "lab-sd1 JobId 283: New volume \"Full-0077\" mounted on device \"FileStorage1a\" (/srv/bareos/a) at 02-Oct-2026 10:30.\n"
+      },
+      {
+        "time": "2026-10-02 10:30:54",
+        "logtext": "lab-sd1 JobId 283: Releasing device \"FileStorage1a\" (/srv/bareos/a).\n"
+      },
+      {
+        "time": "2026-10-02 10:30:54",
+        "logtext": "lab-sd1 JobId 283: Elapsed time=00:00:02, Transfer rate=157.4 M Bytes/second\n"
+      },
+      {
+        "time": "2026-10-02 10:30:54",
+        "logtext": "lab-dir JobId 283: Insert of attributes batch table with 2036 entries start\n"
+      },
+      {
+        "time": "2026-10-02 10:30:54",
+        "logtext": "lab-dir JobId 283: Insert of attributes batch table done\n"
+      },
+      {
+        "time": "2026-10-02 10:30:54",
+        "logtext": "lab-dir JobId 283: Bareos lab-dir 25.1.1 (14Sep25):\n  OS Information:         Ubuntu 24.04.5 LTS\n  JobId:                  283\n  Job:                    backup-failover-demo.2026-10-02_10.30.27_21\n  Backup Level:           Full\n  Client:                 \"fd1\" 25.1.1 (14Sep25) Ubuntu 24.04.5 LTS,ubuntu\n  FileSet:                \"LabData\" 2026-09-24 15:43:03\n  Pool:                   \"Full\" (From Job resource)\n  Catalog:                \"MyCatalog\" (From Client resource)\n  Storage:                \"File1a\" (From Job resource)\n  Scheduled time:         02-Oct-2026 10:30:27\n  Start time:             02-Oct-2026 10:30:52\n  End time:               02-Oct-2026 10:30:54\n  Elapsed time:           2 secs\n  Priority:               10\n  Allow Mixed Priority:   no\n  FD Files Written:       2,036\n  SD Files Written:       2,036\n  FD Bytes Read:          314,613,788 (314.6 MB)\n  FD Bytes Written:       314,613,788 (314.6 MB)\n  SD Bytes Written:       314,840,759 (314.8 MB)\n  Rate:                   157306.9 KB/s\n  Software Compression:   None\n  VSS:                    no\n  Encryption:             no\n  Accurate:               no\n  Volume name(s):         Full-0075|Full-0077\n  Volume Session Id:      1\n  Volume Session Time:    1790911712\n  Last Volume Bytes:      107,321,358 (107.3 MB)\n  Non-fatal FD errors:    0\n  SD Errors:              0\n  FD termination status:  OK\n  SD termination status:  OK\n  Bareos binary info:     Self-compiled: Get professional support from https://www.bareos.com\n  Job triggered by:       User\n  Termination:            Backup OK\n\n"
+      }
+    ]
+  }
+}list jobmedia jobid=283
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobmedia": [
+      {
+        "jobid": "283",
+        "volumename": "Full-0075",
+        "firstindex": "1",
+        "lastindex": "21"
+      },
+      {
+        "jobid": "283",
+        "volumename": "Full-0077",
+        "firstindex": "21",
+        "lastindex": "2036"
+      }
+    ]
+  }
+}list volumes jobid=283
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "volumes": [
+      {
+        "volumename": "Full-0075"
+      },
+      {
+        "volumename": "Full-0077"
+      }
+    ]
+  }
+}help disable
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "disable": {
+      "command": "disable",
+      "description": "Disable a job/client/schedule/storage",
+      "arguments": "job=<job-name> client=<client-name> schedule=<schedule-name> storage=<storage-name>",
+      "permission": true
+    }
+  }
+}help configure
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "configure": {
+      "command": "configure",
+      "description": "Configure director resources",
+      "arguments": "add client name=<NAME> [description=<STRING>] [protocol=<AUTH_PROTOCOL_TYPE>] [authtype=<AUTH_TYPE>] address=<STRING> [lanaddress=<STRING>] [port=<PINT32>] [username=<STRING>] password=<AUTOPASSWORD> [catalog=<RES>] [passive=<BOOLEAN>] [connectionfromdirectortoclient=<BOOLEAN>] [connectionfromclienttodirector=<BOOLEAN>] [enabled=<BOOLEAN>] [hardquota=<SIZE64>] [softquota=<SIZE64>] [softquotagraceperiod=<TIME>] [strictquotas=<BOOLEAN>] [quotaincludefailedjobs=<BOOLEAN>] [heartbeatinterval=<TIME>] [maximumconcurrentjobs=<PINT32>] [maximumbandwidthperjob=<SPEED>] [ndmploglevel=<PINT32>] [ndmpblocksize=<SIZE32>] [ndmpuselmdb=<BOOLEAN>] [tlsenable=<BOOLEAN>] [tlsrequire=<BOOLEAN>] [tlscipherlist=<STRING>] [tlsciphersuites=<STRING>] [tlsdhfile=<DIRECTORY>] [tlsprotocol=<STRING>] [tlsverifypeer=<BOOLEAN>] [tlscacertificatefile=<DIRECTORY>] [tlscacertificatedir=<DIRECTORY>] [tlscertificaterevocationlist=<DIRECTORY>] [tlscertificate=<DIRECTORY>] [tlskey=<DIRECTORY>] [tlsallowedcn=<STRING_LIST>] | add jobdefs name=<NAME> [description=<STRING>] type=<JOB_TYPE> [protocol=<PROTOCOL_TYPE>] [backupformat=<STRING>] [level=<BACKUP_LEVEL>] messages=<RES> [storage=<RESOURCE_LIST>] [storagegrouppolicy=<STRING>] pool=<RES> [fullbackuppool=<RES>] [virtualfullbackuppool=<RES>] [incrementalbackuppool=<RES>] [differentialbackuppool=<RES>] [nextpool=<RES>] [client=<RES>] [fileset=<RES>] [schedule=<RES>] [jobtoverify=<RES>] [catalog=<RES>] [jobdefs=<RES>] [run=<STRING_LIST>] [where=<DIRECTORY>] [regexwhere=<STRING>] [stripprefix=<STRING>] [addprefix=<STRING>] [addsuffix=<STRING>] [bootstrap=<DIRECTORY>] [writebootstrap=<DIRECTORY_OR_COMMAND>] [replace=<REPLACE_OPTION>] [maximumbandwidth=<SPEED>] [maxrunschedtime=<TIME>] [maxruntime=<TIME>] [fullmaxruntime=<TIME>] [incrementalmaxruntime=<TIME>] [differentialmaxruntime=<TIME>] [maxwaittime=<TIME>] [maxstartdelay=<TIME>] [maxfullinterval=<TIME>] [maxvirtualfullinterval=<TIME>] [maxdiffinterval=<TIME>] [prefixlinks=<BOOLEAN>] [prunejobs=<BOOLEAN>] [prunefiles=<BOOLEAN>] [prunevolumes=<BOOLEAN>] [purgemigrationjob=<BOOLEAN>] [enabled=<BOOLEAN>] [spoolattributes=<BOOLEAN>] [spooldata=<BOOLEAN>] [spoolsize=<SIZE64>] [rerunfailedlevels=<BOOLEAN>] [prefermountedvolumes=<BOOLEAN>] [runbeforejob=<RUNSCRIPT_SHORT>] [runafterjob=<RUNSCRIPT_SHORT>] [runafterfailedjob=<RUNSCRIPT_SHORT>] [clientrunbeforejob=<RUNSCRIPT_SHORT>] [clientrunafterjob=<RUNSCRIPT_SHORT>] [maximumconcurrentjobs=<PINT32>] [rescheduleonerror=<BOOLEAN>] [rescheduleinterval=<TIME>] [rescheduletimes=<PINT32>] [priority=<PINT32>] [allowmixedpriority=<BOOLEAN>] [selectionpattern=<STRING>] [selectiontype=<MIGRATION_TYPE>] [accurate=<BOOLEAN>] [allowduplicatejobs=<BOOLEAN>] [cancellowerlevelduplicates=<BOOLEAN>] [cancelqueuedduplicates=<BOOLEAN>] [cancelrunningduplicates=<BOOLEAN>] [savefilehistory=<BOOLEAN>] [filehistorysize=<SIZE64>] [fdpluginoptions=<STRING_LIST>] [sdpluginoptions=<STRING_LIST>] [dirpluginoptions=<STRING_LIST>] [maxconcurrentcopies=<PINT32>] [alwaysincremental=<BOOLEAN>] [alwaysincrementaljobretention=<TIME>] [alwaysincrementalkeepnumber=<PINT32>] [alwaysincrementalmaxfullage=<TIME>] [maxfullconsolidations=<PINT32>] [runonincomingconnectinterval=<TIME>] | add job name=<NAME> [description=<STRING>] type=<JOB_TYPE> [protocol=<PROTOCOL_TYPE>] [backupformat=<STRING>] [level=<BACKUP_LEVEL>] messages=<RES> [storage=<RESOURCE_LIST>] [storagegrouppolicy=<STRING>] pool=<RES> [fullbackuppool=<RES>] [virtualfullbackuppool=<RES>] [incrementalbackuppool=<RES>] [differentialbackuppool=<RES>] [nextpool=<RES>] [client=<RES>] [fileset=<RES>] [schedule=<RES>] [jobtoverify=<RES>] [catalog=<RES>] [jobdefs=<RES>] [run=<STRING_LIST>] [where=<DIRECTORY>] [regexwhere=<STRING>] [stripprefix=<STRING>] [addprefix=<STRING>] [addsuffix=<STRING>] [bootstrap=<DIRECTORY>] [writebootstrap=<DIRECTORY_OR_COMMAND>] [replace=<REPLACE_OPTION>] [maximumbandwidth=<SPEED>] [maxrunschedtime=<TIME>] [maxruntime=<TIME>] [fullmaxruntime=<TIME>] [incrementalmaxruntime=<TIME>] [differentialmaxruntime=<TIME>] [maxwaittime=<TIME>] [maxstartdelay=<TIME>] [maxfullinterval=<TIME>] [maxvirtualfullinterval=<TIME>] [maxdiffinterval=<TIME>] [prefixlinks=<BOOLEAN>] [prunejobs=<BOOLEAN>] [prunefiles=<BOOLEAN>] [prunevolumes=<BOOLEAN>] [purgemigrationjob=<BOOLEAN>] [enabled=<BOOLEAN>] [spoolattributes=<BOOLEAN>] [spooldata=<BOOLEAN>] [spoolsize=<SIZE64>] [rerunfailedlevels=<BOOLEAN>] [prefermountedvolumes=<BOOLEAN>] [runbeforejob=<RUNSCRIPT_SHORT>] [runafterjob=<RUNSCRIPT_SHORT>] [runafterfailedjob=<RUNSCRIPT_SHORT>] [clientrunbeforejob=<RUNSCRIPT_SHORT>] [clientrunafterjob=<RUNSCRIPT_SHORT>] [maximumconcurrentjobs=<PINT32>] [rescheduleonerror=<BOOLEAN>] [rescheduleinterval=<TIME>] [rescheduletimes=<PINT32>] [priority=<PINT32>] [allowmixedpriority=<BOOLEAN>] [selectionpattern=<STRING>] [selectiontype=<MIGRATION_TYPE>] [accurate=<BOOLEAN>] [allowduplicatejobs=<BOOLEAN>] [cancellowerlevelduplicates=<BOOLEAN>] [cancelqueuedduplicates=<BOOLEAN>] [cancelrunningduplicates=<BOOLEAN>] [savefilehistory=<BOOLEAN>] [filehistorysize=<SIZE64>] [fdpluginoptions=<STRING_LIST>] [sdpluginoptions=<STRING_LIST>] [dirpluginoptions=<STRING_LIST>] [maxconcurrentcopies=<PINT32>] [alwaysincremental=<BOOLEAN>] [alwaysincrementaljobretention=<TIME>] [alwaysincrementalkeepnumber=<PINT32>] [alwaysincrementalmaxfullage=<TIME>] [maxfullconsolidations=<PINT32>] [runonincomingconnectinterval=<TIME>] | add storage name=<NAME> [description=<STRING>] [protocol=<AUTH_PROTOCOL_TYPE>] [authtype=<AUTH_TYPE>] address=<STRING> [lanaddress=<STRING>] [port=<PINT32>] [username=<STRING>] password=<AUTOPASSWORD> device=<DEVICE> mediatype=<STRNAME> [autochanger=<BOOLEAN>] [enabled=<BOOLEAN>] [allowcompression=<BOOLEAN>] [heartbeatinterval=<TIME>] [cachestatusinterval=<TIME>] [maximumconcurrentjobs=<PINT32>] [maximumconcurrentreadjobs=<PINT32>] [pairedstorage=<RES>] [maximumbandwidthperjob=<SPEED>] [ndmpchangerdevice=<STRNAME>] [tlsenable=<BOOLEAN>] [tlsrequire=<BOOLEAN>] [tlscipherlist=<STRING>] [tlsciphersuites=<STRING>] [tlsdhfile=<DIRECTORY>] [tlsprotocol=<STRING>] [tlsverifypeer=<BOOLEAN>] [tlscacertificatefile=<DIRECTORY>] [tlscacertificatedir=<DIRECTORY>] [tlscertificaterevocationlist=<DIRECTORY>] [tlscertificate=<DIRECTORY>] [tlskey=<DIRECTORY>] [tlsallowedcn=<STRING_LIST>] | add catalog name=<NAME> [description=<STRING>] [dbaddress=<STRING>] [dbport=<PINT32>] [dbpassword=<AUTOPASSWORD>] dbuser=<STRING> dbname=<STRING> [dbsocket=<STRING>] [reconnect=<BOOLEAN>] [exitonfatal=<BOOLEAN>] [minconnections=<PINT32>] [maxconnections=<PINT32>] [incconnections=<PINT32>] [idletimeout=<PINT32>] [validatetimeout=<PINT32>] | add schedule name=<NAME> [description=<STRING>] [run=<SCHEDULE_RUN_COMMAND>] [enabled=<BOOLEAN>] | add fileset name=<NAME> [description=<STRING>] [ignorefilesetchanges=<BOOLEAN>] [enablevss=<BOOLEAN>] | add pool name=<NAME> [description=<STRING>] [pooltype=<POOLTYPE>] [labelformat=<STRNAME>] [cleaningprefix=<STRNAME>] [usecatalog=<BOOLEAN>] [purgeoldestvolume=<BOOLEAN>] [actiononpurge=<ACTION_ON_PURGE>] [recycleoldestvolume=<BOOLEAN>] [recyclecurrentvolume=<BOOLEAN>] [maximumvolumes=<PINT32>] [maximumvolumejobs=<PINT32>] [maximumvolumefiles=<PINT32>] [maximumvolumebytes=<SIZE64>] [catalogfiles=<BOOLEAN>] [volumeretention=<TIME>] [volumeuseduration=<TIME>] [migrationtime=<TIME>] [migrationhighbytes=<SIZE64>] [migrationlowbytes=<SIZE64>] [nextpool=<RES>] [storage=<RESOURCE_LIST>] [storagegrouppolicy=<STRING>] [autoprune=<BOOLEAN>] [recycle=<BOOLEAN>] [recyclepool=<RES>] [scratchpool=<RES>] [catalog=<RES>] [minimumblocksize=<SIZE32>] [maximumblocksize=<SIZE32>] | add messages [name=<NAME>] [description=<STRING>] [mailcommand=<STRING>] [operatorcommand=<STRING>] [timestampformat=<STRING>] [syslog=<MESSAGES>] [mail=<MESSAGES>] [mailonerror=<MESSAGES>] [mailonsuccess=<MESSAGES>] [file=<MESSAGES>] [append=<MESSAGES>] [stdout=<MESSAGES>] [stderr=<MESSAGES>] [director=<MESSAGES>] [console=<MESSAGES>] [operator=<MESSAGES>] [catalog=<MESSAGES>] | add counter name=<NAME> [description=<STRING>] [minimum=<INT32>] [maximum=<PINT32>] [wrapcounter=<RES>] [catalog=<RES>] | add profile name=<NAME> [description=<STRING>] [jobacl=<ACL>] [clientacl=<ACL>] [storageacl=<ACL>] [scheduleacl=<ACL>] [poolacl=<ACL>] [commandacl=<ACL>] [filesetacl=<ACL>] [catalogacl=<ACL>] [whereacl=<ACL>] [pluginoptionsacl=<ACL>] | add console name=<NAME> [description=<STRING>] password=<AUTOPASSWORD> [jobacl=<ACL>] [clientacl=<ACL>] [storageacl=<ACL>] [scheduleacl=<ACL>] [poolacl=<ACL>] [commandacl=<ACL>] [filesetacl=<ACL>] [catalogacl=<ACL>] [whereacl=<ACL>] [pluginoptionsacl=<ACL>] [profile=<RESOURCE_LIST>] [usepamauthentication=<BOOLEAN>] [tlsenable=<BOOLEAN>] [tlsrequire=<BOOLEAN>] [tlscipherlist=<STRING>] [tlsciphersuites=<STRING>] [tlsdhfile=<DIRECTORY>] [tlsprotocol=<STRING>] [tlsverifypeer=<BOOLEAN>] [tlscacertificatefile=<DIRECTORY>] [tlscacertificatedir=<DIRECTORY>] [tlscertificaterevocationlist=<DIRECTORY>] [tlscertificate=<DIRECTORY>] [tlskey=<DIRECTORY>] [tlsallowedcn=<STRING_LIST>] | add user name=<NAME> [description=<STRING>] [jobacl=<ACL>] [clientacl=<ACL>] [storageacl=<ACL>] [scheduleacl=<ACL>] [poolacl=<ACL>] [commandacl=<ACL>] [filesetacl=<ACL>] [catalogacl=<ACL>] [whereacl=<ACL>] [pluginoptionsacl=<ACL>] [profile=<RESOURCE_LIST>] | export client=<client>",
+      "permission": true
+    }
+  }
+}
