@@ -1,0 +1,519 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+.api 2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "api": 2
+  }
+}show job=backup-group
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": {
+      "backup-group": {
+        "name": "backup-group",
+        "storage": [
+          "File1a",
+          "File1b"
+        ],
+        "storagegrouppolicy": "ListedOrder",
+        "jobdefs": "DefaultJob"
+      }
+    }
+  }
+}show job=backup-s3-failover
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": {
+      "backup-s3-failover": {
+        "name": "backup-s3-failover",
+        "storage": [
+          "File2",
+          "S3"
+        ],
+        "storagegrouppolicy": "ListedOrder",
+        "pool": "HybridPool",
+        "jobdefs": "DefaultJob"
+      }
+    }
+  }
+}show pool=GroupPool
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "pools": {
+      "GroupPool": {
+        "name": "GroupPool",
+        "labelformat": "Group-",
+        "maximumvolumes": 100,
+        "maximumvolumebytes": "1 g",
+        "storage": [
+          "File2",
+          "File1a"
+        ],
+        "storagegrouppolicy": "ListedOrder"
+      }
+    }
+  }
+}show storage=File2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "storages": {
+      "File2": {
+        "name": "File2",
+        "address": "lab-sd2",
+        "password": "[md5]redacted",
+        "device": [
+          "FileStorage2"
+        ],
+        "mediatype": "File",
+        "maximumconcurrentjobs": 10
+      }
+    }
+  }
+}show storage=S3
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "storages": {
+      "S3": {
+        "name": "S3",
+        "address": "lab-sd3",
+        "password": "[md5]redacted",
+        "device": [
+          "S3Storage"
+        ],
+        "mediatype": "S3"
+      }
+    }
+  }
+}.defaults job=backup-group
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "defaults": {
+      "job": "backup-group",
+      "pool": "Full",
+      "messages": "Standard",
+      "client": "fd1",
+      "storage": "File1a",
+      "where": "",
+      "level": "Full",
+      "type": "Backup",
+      "fileset": "LabData",
+      "enabled": 1,
+      "catalog": "MyCatalog"
+    }
+  }
+}list storages
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "storages": [
+      {
+        "storageid": "58",
+        "name": "s3b-sd1-c138m2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "59",
+        "name": "s3b-sd2-a138n",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "60",
+        "name": "s3b-sd2-a138p",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "1",
+        "name": "File3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "2",
+        "name": "File2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "3",
+        "name": "File1b",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "4",
+        "name": "File1a",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "54",
+        "name": "s3b-sd1-ts15n",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "55",
+        "name": "s3b-sd1-ts15p",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "25",
+        "name": "s3b-h2a",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "26",
+        "name": "s3b-h2b",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "28",
+        "name": "s3b-tf2z",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "27",
+        "name": "s3b-tf2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "29",
+        "name": "s3b-m1z-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "30",
+        "name": "s3b-m1m-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "31",
+        "name": "s3b-m1a-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "32",
+        "name": "s3b-m1s-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "33",
+        "name": "s3b-m1r-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "64",
+        "name": "s3b-bench-sd1",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "65",
+        "name": "s3b-bench-sd2",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "34",
+        "name": "s3b-m1l-1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "35",
+        "name": "s3b-m1z-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "5",
+        "name": "S3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "24",
+        "name": "s3b-tf1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "21",
+        "name": "s3b-fb1",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "22",
+        "name": "s3b-fb2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "23",
+        "name": "s3b-fb3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "6",
+        "name": "s3b-sd1-d",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "7",
+        "name": "s3b-sd2-d",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "8",
+        "name": "s3b-sd3-d",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "9",
+        "name": "s3b-sd1-d120",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "10",
+        "name": "s3b-sd2-d120",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "11",
+        "name": "s3b-sd3-d120",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "12",
+        "name": "s3b-sd1-t1",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "13",
+        "name": "s3b-sd2-t1",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "14",
+        "name": "s3b-sd3-t1",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "15",
+        "name": "s3b-sd1-t2",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "16",
+        "name": "s3b-sd2-t2",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "17",
+        "name": "s3b-sd3-t2",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "18",
+        "name": "s3b-sd1-t3",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "66",
+        "name": "s3b-bench-sd3",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "36",
+        "name": "s3b-m1m-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "37",
+        "name": "s3b-m1a-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "38",
+        "name": "s3b-m1s-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "39",
+        "name": "s3b-m1r-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "40",
+        "name": "s3b-m1l-2",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "41",
+        "name": "s3b-m1z-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "42",
+        "name": "s3b-m1m-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "43",
+        "name": "s3b-m1a-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "44",
+        "name": "s3b-m1s-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "45",
+        "name": "s3b-m1r-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "46",
+        "name": "s3b-m1l-3",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "19",
+        "name": "s3b-sd2-t3",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "20",
+        "name": "s3b-sd3-t3",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "47",
+        "name": "s3b-sd1-dp",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "48",
+        "name": "s3b-sd1-t1p",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "49",
+        "name": "s3b-sd1-t3p",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "50",
+        "name": "s3b-sd1-dn",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "51",
+        "name": "s3b-sd1-t3n",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "52",
+        "name": "s3b-sd1-xp",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "53",
+        "name": "s3b-sd1-xn",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "61",
+        "name": "s3b-live-sd1",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "62",
+        "name": "s3b-live-sd2",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "63",
+        "name": "s3b-live-sd3",
+        "autochanger": "1"
+      },
+      {
+        "storageid": "56",
+        "name": "s3b-sd1-c138n",
+        "autochanger": "0"
+      },
+      {
+        "storageid": "57",
+        "name": "s3b-sd1-c138m0",
+        "autochanger": "0"
+      }
+    ]
+  }
+}status storage=S3
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {}
+}list jobs job=backup-group last
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": [
+      {
+        "jobid": "828",
+        "name": "backup-group",
+        "client": "fd1",
+        "starttime": "2026-10-08 08:44:54",
+        "duration": "00:00:01",
+        "type": "B",
+        "level": "F",
+        "jobfiles": "2036",
+        "jobbytes": "314613788",
+        "jobstatus": "T"
+      }
+    ]
+  }
+}list jobs job=backup-failover-demo
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": [
+      {
+        "jobid": "281",
+        "name": "backup-failover-demo",
+        "client": "fd1",
+        "starttime": "2026-10-02 10:27:42",
+        "duration": "00:00:02",
+        "type": "B",
+        "level": "F",
+        "jobfiles": "2036",
+        "jobbytes": "314613788",
+        "jobstatus": "T"
+      },
+      {
+        "jobid": "283",
+        "name": "backup-failover-demo",
+        "client": "fd1",
+        "starttime": "2026-10-02 10:30:52",
+        "duration": "00:00:02",
+        "type": "B",
+        "level": "F",
+        "jobfiles": "2036",
+        "jobbytes": "314613788",
+        "jobstatus": "T"
+      }
+    ]
+  }
+}
