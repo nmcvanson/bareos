@@ -28,15 +28,14 @@ import {
   fulfilledDirectorValues,
   runDirectorAggregates,
 } from './directorAggregateRunner.js'
+import { markConfiguredClients } from '../utils/clients.js'
 
-function decorateClients(entries, enabledMap, director) {
-  return directorCollection(entries).map((entry) => {
-    const client = normaliseClient({
-      ...entry,
-      enabled: enabledMap[entry.name] ?? true,
-    })
+function decorateClients(entries, dotResult, director) {
+  return markConfiguredClients(directorCollection(entries), dotResult).map((entry) => {
+    const client = normaliseClient(entry)
     return {
       ...client,
+      configured: entry.configured,
       director,
       scopeKey: `${director}:${client.name}`,
     }
@@ -58,16 +57,12 @@ export async function fetchAggregatedClients(credentials, directors) {
   const results = await runDirectorAggregates(credentials, directors, async ({ client, director }) => {
     const [listResult, dotResult] = await Promise.all([
       client.call('llist clients'),
-      client.call('.clients'),
+      client.call('.clients').catch(() => null),
     ])
-
-    const enabledMap = Object.fromEntries(
-      directorCollection(dotResult?.clients).map(item => [item.name, item.enabled])
-    )
 
     return {
       director,
-      clients: decorateClients(listResult?.clients, enabledMap, director),
+      clients: decorateClients(listResult?.clients, dotResult, director),
     }
   })
 

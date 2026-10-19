@@ -24,10 +24,15 @@
           <q-card-section class="panel-header row items-center">
             <span>{{ t('Client List') }}</span>
             <q-space />
+            <q-toggle v-model="showUnconfigured" dense color="white" keep-color class="q-mr-sm"
+                      data-testid="clients-show-unconfigured" :label="t('Show clients without configuration')" />
             <q-btn flat round dense icon="refresh" color="white" @click="refresh" />
           </q-card-section>
           <q-card-section class="q-pa-none">
             <q-banner v-if="error" dense class="bg-negative text-white">{{ error }}</q-banner>
+            <q-banner v-if="configurationUnknown" dense class="bg-warning text-black" data-testid="clients-unfiltered-notice">
+              {{ t('The configured client list could not be read, so all catalog clients are shown.') }}
+            </q-banner>
             <div v-if="clientsListScopeDirector" class="q-px-md q-pt-sm">
               <q-chip
                 removable
@@ -40,7 +45,7 @@
                 {{ t('Director') }}: {{ clientsListScopeDirector }}
               </q-chip>
             </div>
-            <q-table :rows="clients" :columns="columns" row-key="scopeKey" dense flat :loading="loading" v-model:pagination="clientsPagination">
+            <q-table :rows="shownClients" :columns="columns" row-key="scopeKey" dense flat :loading="loading" v-model:pagination="clientsPagination">
               <template #body-cell-name="props">
                 <q-td :props="props">
                   <a href="#" class="text-primary" @click.prevent="openClientDetails(props.row)">
@@ -85,12 +90,13 @@
               </template>
               <template #body-cell-enabled="props">
                 <q-td :props="props" class="text-center">
-                    <q-badge :color="props.value ? 'positive' : 'negative'" :label="props.value ? t('Enabled') : t('Disabled')" />
+                    <span v-if="props.row.configured === false" class="text-grey-7">{{ t('Not configured') }}</span>
+                    <q-badge v-else :color="props.value ? 'positive' : 'negative'" :label="props.value ? t('Enabled') : t('Disabled')" />
                 </q-td>
               </template>
               <template #body-cell-actions="props">
                 <q-td :props="props" class="text-center">
-                   <q-btn flat round dense size="sm"
+                   <q-btn v-if="props.row.configured !== false" flat round dense size="sm"
                           :icon="props.row.enabled ? 'pause' : 'play_arrow'"
                           :color="props.row.enabled ? 'orange-10' : 'positive'"
                           :title="props.row.enabled ? t('Disable') : t('Enable')"
@@ -147,7 +153,10 @@ import { fetchAggregatedClients } from '../composables/clientsAggregate.js'
 import { useDirectorScope } from '../composables/useDirectorScope.js'
 import {
   buildClientDetailsQuery,
+  clientConfigurationUnknown,
+  markConfiguredClients,
   resolveClientsScopeDirector,
+  visibleClients,
   withClientsScopeDirectorQuery,
 } from '../utils/clients.js'
 import { quoteDirectorString } from '../utils/directorStrings.js'
@@ -179,6 +188,7 @@ const clientsPagination = usePersistedTablePagination('clients.list', {
 })
 
 const rawClients = ref([])
+const showUnconfigured = ref(false)
 const loading    = ref(false)
 const error      = ref(null)
 const directorErrors = ref([])
@@ -239,14 +249,11 @@ async function refresh() {
     await ensureSingleScopeDirector()
     const [listResult, dotResult] = await Promise.all([
       director.call('llist clients'),
-      director.call('.clients'),
+      director.call('.clients').catch(() => null),
     ])
     const list = directorCollection(listResult?.clients)
-    const dot = directorCollection(dotResult?.clients)
-    const enabledMap = Object.fromEntries(dot.map(c => [c.name, c.enabled]))
-    rawClients.value = list.map(c => ({
+    rawClients.value = markConfiguredClients(list, dotResult).map(c => ({
       ...c,
-      enabled: enabledMap[c.name] ?? true,
       director: currentDirector,
       scopeKey: `${currentDirector}:${c.name}`,
     }))
@@ -268,10 +275,14 @@ const clients = computed(() => directorCollection(rawClients.value).map((entry) 
   const client = normaliseClient(entry)
   return {
     ...client,
+    configured: entry.configured ?? null,
     director: entry.director,
     scopeKey: entry.scopeKey ?? `${entry.director ?? ''}:${client.name}`,
   }
 }))
+
+const shownClients = computed(() => visibleClients(clients.value, showUnconfigured.value))
+const configurationUnknown = computed(() => clientConfigurationUnknown(clients.value))
 
 function osIcon(client)  { return osIconName(client)  }
 function osColor(client) { return osIconColor(client) }
