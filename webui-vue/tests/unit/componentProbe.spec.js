@@ -19,7 +19,10 @@
    02110-1301, USA.
 */
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { parse } from '@babel/parser'
+import componentsPage from '../../src/pages/ComponentsPage.vue?raw'
+import dashboardPage from '../../src/pages/DashboardPage.vue?raw'
 import clientFixture from './fixtures/show-clients.json'
 import {
   groupStorageDaemons,
@@ -117,6 +120,7 @@ describe('groupStorageDaemons', () => {
 })
 
 describe('probeComponents', () => {
+  afterEach(() => vi.useRealTimers())
   const dirBanner = `1000 OK: my-dir Version: 25.1.1 (14 September 2025)
 Daemon started 19-Oct-26 00:43. Jobs: run=12, running=2
 `
@@ -127,6 +131,169 @@ Device "StorageDevice" (/var/bareos/storage) is not open.
   const fdBanner = `1000 OK: my-fd Version: 25.1.1 (14 September 2025)
 Daemon started 19-Oct-26 00:44. Jobs: run=3 running=0
 `
+
+  it.each([
+    ['Components', componentsPage, 'probeAll'],
+    ['Dashboard', dashboardPage, 'runComponentsProbe'],
+  ])('%s applies cards before the pending storage call ends', async (name, source, handlerName) => {
+    vi.useFakeTimers()
+    const script = source.split('<script setup>')[1].split('</script>')[0]
+    const node = parse(script, { sourceType: 'module' }).program.body.find(node =>
+      node.type === 'FunctionDeclaration' && node.id.name === handlerName)
+    const environment = {
+      probing: { value: false }, probingComponents: { value: false },
+      rawStorages: { value: [{ name: 'Stopped' }] }, rawClients: { value: [{ name: 'client' }] },
+      componentStorages: { value: [{ name: 'Stopped' }] }, componentClients: { value: [{ name: 'client' }] },
+      probeResults: { value: { director: null, storages: {}, clients: {} } },
+      componentProbeResults: { value: [] }, pageError: { value: null },
+      auth: { user: { director: 'dirA' } }, $q: { notify: vi.fn() }, loadComponentResources: vi.fn(), probeComponents,
+      director: { rawCall: command => command.startsWith('status storage=') ? new Promise(() => {})
+        : Promise.resolve(command === 'status director' ? dirBanner : fdBanner) },
+    }
+    const handler = new Function(...Object.keys(environment), script.slice(node.start, node.end) + `; return ${handlerName}`)(...Object.values(environment))
+    const pending = handler()
+    await vi.advanceTimersByTimeAsync(0)
+    if (name === 'Components') {
+      expect(environment.probeResults.value.director.reachable).toBe(true)
+      expect(environment.probeResults.value.clients.client.reachable).toBe(true)
+      expect(environment.probeResults.value.storages).toEqual({})
+    } else {
+      expect(environment.componentProbeResults.value.map(result => result.kind)).toEqual(['director', 'client'])
+    }
+    await vi.advanceTimersByTimeAsync(20_000)
+    await pending
+    const storage = name === 'Components'
+      ? Object.values(environment.probeResults.value.storages)[0]
+      : environment.componentProbeResults.value.find(result => result.kind === 'storage')
+    expect(storage).toMatchObject({ reachable: false, error: 'No answer within 20 s' })
+    expect(environment.probing.value).toBe(false)
+    expect(environment.probingComponents.value).toBe(false)
+    expect(environment.pageError.value).toBe(null)
+    expect(environment.$q.notify).not.toHaveBeenCalled()
+  })
+
+  it('publishes each result before a stopped SD times out, then moves to the next SD and ends', async () => {
+    vi.useFakeTimers()
+    let resolveStopped
+    const stopped = new Promise(resolve => { resolveStopped = resolve })
+    const onResult = vi.fn()
+    const director = { rawCall: vi.fn(command => {
+      if (command === 'status director') return Promise.resolve(dirBanner)
+      if (command.startsWith('status client=')) return Promise.resolve(fdBanner)
+      if (command === 'status storage="Stopped"') return stopped
+      return Promise.resolve(sdBanner)
+    }) }
+    const pending = probeComponents(director, {
+      clients: [{ name: 'client' }],
+      storages: [{ name: 'Stopped', address: 'stopped' }, { name: 'Healthy', address: 'healthy' }],
+      onResult,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onResult.mock.calls.map(([result]) => result.kind)).toEqual(['director', 'client'])
+    expect(director.rawCall.mock.calls.map(([command]) => command)).toEqual([
+      'status director', 'status client="client"', 'status storage="Stopped"',
+    ])
+    await vi.advanceTimersByTimeAsync(19_999)
+    expect(onResult).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    const results = await pending
+    expect(results).toHaveLength(4)
+    expect(results[2]).toMatchObject({ storageName: 'Stopped', reachable: false, error: 'No answer within 20 s' })
+    expect(results[3]).toMatchObject({ storageName: 'Healthy', reachable: true })
+    expect(onResult.mock.calls.map(([result]) => result)).toEqual(results)
+    expect(vi.getTimerCount()).toBe(0)
+    resolveStopped(sdBanner)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onResult).toHaveBeenCalledTimes(4)
+    expect(results[2].reachable).toBe(false)
+  })
+
+  it.each(['status director', 'status client="client"'])('limits a pending %s before moving on', async blockedCommand => {
+    vi.useFakeTimers()
+    const pending = probeComponents({ rawCall: command => command === blockedCommand
+      ? new Promise(() => {}) : Promise.resolve(fdBanner) }, {
+      clients: [{ name: 'client' }], storages: [{ name: 'storage' }],
+    })
+    await vi.advanceTimersByTimeAsync(20_000)
+    const results = await pending
+    expect(results).toHaveLength(3)
+    expect(results.find(result => result.error === 'No answer within 20 s')).toBeDefined()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('sends one status storage for repeated probes of a silent SD and sends again after it settles', async () => {
+    vi.useFakeTimers()
+    let settle
+    const silent = new Promise(resolve => { settle = resolve })
+    const director = { rawCall: vi.fn(() => silent) }
+    const options = { probeDirector: false, storages: [{ name: 'Stopped', address: 'stopped' }] }
+    const first = probeComponents(director, options)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect((await first)[0].error).toBe('No answer within 20 s')
+    const later = []
+    for (let i = 0; i < 5; i++) {
+      const run = probeComponents(director, options)
+      await vi.advanceTimersByTimeAsync(20_000)
+      later.push((await run)[0])
+    }
+    expect(director.rawCall).toHaveBeenCalledTimes(1)
+    expect(later.every(r => r.reachable === false && r.error === 'Previous probe is still waiting for an answer')).toBe(true)
+    settle(sdBanner)
+    await vi.advanceTimersByTimeAsync(0)
+    const after = probeComponents(director, options)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(director.rawCall).toHaveBeenCalledTimes(2)
+    await after
+  })
+
+  it('lets a new probe take the answer of the pending call within its own limit', async () => {
+    vi.useFakeTimers()
+    let settle
+    const silent = new Promise(resolve => { settle = resolve })
+    const director = { rawCall: vi.fn(() => silent) }
+    const options = { probeDirector: false, storages: [{ name: 'Slow', address: 'slow' }] }
+    const first = probeComponents(director, options)
+    await vi.advanceTimersByTimeAsync(20_000)
+    await first
+    const second = probeComponents(director, options)
+    await vi.advanceTimersByTimeAsync(5_000)
+    settle(sdBanner)
+    const results = await second
+    expect(director.rawCall).toHaveBeenCalledTimes(1)
+    expect(results[0]).toMatchObject({ reachable: true })
+  })
+
+  it('does not reuse a pending call made under another Director name on the same store object', async () => {
+    vi.useFakeTimers()
+    let settleA
+    const answerA = new Promise(resolve => { settleA = resolve })
+    const store = { rawCall: vi.fn(() => (store.current === 'dirA' ? answerA : Promise.resolve(sdBanner))) }
+    const base = { probeDirector: false, storages: [{ name: 'File', address: 'sd' }] }
+    store.current = 'dirA'
+    const first = probeComponents(store, { ...base, directorName: 'dirA' })
+    await vi.advanceTimersByTimeAsync(20_000)
+    await first
+    store.current = 'dirB'
+    const second = await probeComponents(store, { ...base, directorName: 'dirB' })
+    expect(store.rawCall).toHaveBeenCalledTimes(2)
+    expect(second[0]).toMatchObject({ reachable: true })
+    store.current = 'dirA'
+    const again = probeComponents(store, { ...base, directorName: 'dirA' })
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect((await again)[0].error).toBe('Previous probe is still waiting for an answer')
+    expect(store.rawCall).toHaveBeenCalledTimes(2)
+    settleA(sdBanner)
+  })
+
+  it('shows a Director failure reply that arrives just after 15 s verbatim', async () => {
+    vi.useFakeTimers()
+    const reply = 'Failed to connect to Client client.'
+    const director = { rawCall: vi.fn(() => new Promise(resolve => setTimeout(() => resolve(reply), 15_050))) }
+    const run = probeComponents(director, { probeDirector: false, clients: [{ name: 'client' }] })
+    await vi.advanceTimersByTimeAsync(15_050)
+    const results = await run
+    expect(results[0]).toMatchObject({ kind: 'client', reachable: false, error: reply })
+  })
 
   it('probes Director, Clients, then Storage Daemons sequentially', async () => {
     const callLog = []
