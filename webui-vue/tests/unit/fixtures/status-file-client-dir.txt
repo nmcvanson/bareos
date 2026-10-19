@@ -1,0 +1,110 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+status storage=File1a
+Connecting to Storage daemon File1a at lab-sd1:9103
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+
+lab-sd1 Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS 
+Daemon started 19-Oct-26 00:44. Jobs: run=0, running=0, self-compiled binary
+ Sizes: boffset_t=8 size_t=8 int32_t=4 int64_t=8 bwlimit=0kB/s
+
+There are WARNINGS for this storagedaemon's configuration!
+See output of 'bareos-sd -t' for details.
+
+Job inventory:
+
+No Jobs running.
+====
+
+Jobs waiting to reserve a drive:
+====
+
+Terminated Jobs:
+ JobId  Level    Files      Bytes   Status   Finished        Name 
+===================================================================
+  1102  Full        303    13.53 M  OK       18-Oct-26 22:35 demo-local-docs
+  1110  Full        303    13.53 M  OK       19-Oct-26 00:30 demo-local-docs
+====
+
+Device status:
+
+Device "FileStorage1a" (/srv/bareos/a) is not open.
+==
+====
+
+Used Volume status:
+====
+
+====
+
+You have messages.
+status client=fd1
+Connecting to Client fd1 at lab-fd1:9102
+Probing client protocol... (result will be saved until config reload) Handshake: Immediate TLS, Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+
+fd1 Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+Daemon started 19-Oct-26 00:44. Jobs: run=0 running=0, self-compiled binary
+ Sizeof: boffset_t=8 size_t=8 debug=0 trace=0 bwlimit=0kB/s
+
+There are WARNINGS for this filedaemon's configuration!
+See output of 'bareos-fd -t' for details.
+
+Running Jobs:
+lab-dir (director) connected at: 19-Oct-26 00:51
+No Jobs running.
+====
+
+Terminated Jobs:
+ JobId  Level    Files      Bytes   Status   Finished        Name 
+======================================================================
+  1102  Full        303    13.49 M  OK       18-Oct-26 22:35 demo-local-docs
+  1103  Full         41    104.8 M  OK       18-Oct-26 22:37 demo-s3-backup
+  1104  Full         41    104.8 M  OK       19-Oct-26 00:08 demo-s3-backup
+  1105  Full         41    104.8 M  OK       19-Oct-26 00:11 demo-s3-backup
+  1106  Full         41    104.8 M  OK       19-Oct-26 00:28 demo-local-projects
+  1107  Full        303    13.49 M  OK       19-Oct-26 00:28 demo-local-docs
+  1108  Full         41    104.8 M  OK       19-Oct-26 00:29 demo-s3-group
+  1109  Full         41    104.8 M  OK       19-Oct-26 00:29 demo-s3-group
+  1110  Full        303    13.49 M  OK       19-Oct-26 00:30 demo-local-docs
+  1111  Full        303    13.49 M  OK       19-Oct-26 00:30 web-demo1
+====
+status director
+lab-dir Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+Daemon started 19-Oct-26 00:43. Jobs: run=0, running=0 db:postgresql, self-compiled binary
+
+Scheduled Jobs:
+Level          Type     Pri  Scheduled          Name               Volume
+===================================================================================
+Incremental    Backup    10  19-Oct-26 21:10    backup-webui-demo  Full-0286
+====
+
+Running Jobs:
+Console connected at 19-Oct-26 00:51
+No Jobs running.
+====
+
+Terminated Jobs:
+ JobId  Level    Files      Bytes   Status   Finished        Name 
+====================================================================
+  1102  Full        303    13.49 M  OK       18-Oct-26 22:35 demo-local-docs
+  1103  Full         41    104.8 M  OK       18-Oct-26 22:37 demo-s3-backup
+  1104  Full         41    104.8 M  OK       19-Oct-26 00:08 demo-s3-backup
+  1105  Full         41    104.8 M  OK       19-Oct-26 00:11 demo-s3-backup
+  1106  Full         41    104.8 M  OK       19-Oct-26 00:28 demo-local-projects
+  1107  Full        303    13.49 M  OK       19-Oct-26 00:28 demo-local-docs
+  1108  Full         41    104.8 M  OK       19-Oct-26 00:29 demo-s3-group
+  1109  Full         41    104.8 M  OK       19-Oct-26 00:29 demo-s3-group
+  1110  Full        303    13.49 M  OK       19-Oct-26 00:30 demo-local-docs
+  1111  Full        303    13.49 M  OK       19-Oct-26 00:30 web-demo1
+
+
+Client Initiated Connections (waiting for jobs):
+Connect time        Protocol            Authenticated       Name                                    
+====================================================================================================
+====

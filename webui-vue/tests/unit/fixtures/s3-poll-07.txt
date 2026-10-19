@@ -1,0 +1,63 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+status storage=S3-sd3
+Connecting to Storage daemon S3-sd3 at lab-sd3:9103
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+
+lab-sd3 Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS 
+Daemon started 18-Oct-26 22:33. Jobs: run=0, running=1, self-compiled binary
+ Sizes: boffset_t=8 size_t=8 int32_t=4 int64_t=8 bwlimit=0kB/s
+
+There are WARNINGS for this storagedaemon's configuration!
+See output of 'bareos-sd -t' for details.
+
+Job inventory:
+
+JobId=1101 Level=Full Type=Backup Name=demo-s3-backup Status=OK
+Writing: Volume="demo-s3-0307"
+    pool="DemoS3Pool" device="S3Demo" (bucket-bareos)
+    spooling=0 despooling=0 despool_wait=0
+    Files=41 Bytes=104,862,357 AveBytes/sec=5,243,117 LastBytes/sec=0
+    FDReadSeqNo=9 in_msg=8 out_msg=9 fd=6
+
+====
+
+Jobs waiting to reserve a drive:
+====
+
+Terminated Jobs:
+====
+
+Device status:
+
+Device "S3Demo" (bucket-bareos) is mounted with:
+    Volume:      demo-s3-0307
+    Pool:        DemoS3Pool
+    Media type:  S3Demo3
+Last upload succeeded 0 s ago.
+Inflight chunks: 2
+Pending IO flush requests:
+   /demo-s3-0307/0009 - 10485760 (try=0)
+   /demo-s3-0307/0010 - 14748 (try=0)
+Chunks: received 12, uploaded 8, pending 4 (queued 2, uploading 2, kept 0), waiting for retry 0, oldest pending 11 s.
+Upload: 8 chunks, 73400525 bytes; failed tries 0, retried tries 0.
+Download: 1 objects, 205 bytes, failed 0; transport retries 0.
+    Total Bytes=104,872,348 Blocks=102 Bytes/block=1,028,160
+    Positioned at File=0 Block=104,872,347
+==
+====
+
+Used Volume status:
+demo-s3-0307 on device "S3Demo" (bucket-bareos)
+    Reader=0 writers=1 reserves=0 volinuse=1
+====
+
+====
+
+You have messages.
