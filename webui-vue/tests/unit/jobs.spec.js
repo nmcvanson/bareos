@@ -21,6 +21,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  isActiveJobStatus,
   isFinishedJobStatus,
   canRestoreFromJob,
   isValidJobRecord,
@@ -746,3 +747,18 @@ describe('jobs filter helpers', () => {
   })
 })
 
+
+describe('isActiveJobStatus', () => {
+  it('follows a job from waiting to running and stops at a terminal status', () => {
+    const seen = ['C', 'R', 'T'].map(isActiveJobStatus)
+    expect(seen).toEqual([true, true, false])
+  })
+
+  it.each(['T', 'W', 'E', 'e', 'f', 'A', 'D', 'I', '', null, undefined])('does not follow %s', status => {
+    expect(isActiveJobStatus(status)).toBe(false)
+  })
+
+  it.each(['R', 'l', 'C', 'F', 'S', 'm', 'M', 's', 'j', 'c', 'd', 't', 'p', 'q', 'a', 'L', 'B'])('follows %s', status => {
+    expect(isActiveJobStatus(status)).toBe(true)
+  })
+})

@@ -26,6 +26,8 @@ import {
   finalRate,
   parseDurationSeconds,
   parseNumberWithCommas,
+  sdStatusCandidates,
+  storageConnected,
 } from '../../src/utils/jobProgress.js'
 
 describe('parseFdRunning', () => {
@@ -225,5 +227,54 @@ describe('parseNumberWithCommas', () => {
   it('returns 0 for non-numeric or empty string', () => {
     expect(parseNumberWithCommas('')).toBe(0)
     expect(parseNumberWithCommas(null)).toBe(0)
+  })
+})
+
+describe('Storage Daemon counters of a real status storage text', () => {
+  const realSdStatus = `Job inventory:
+
+JobId=1101 Level=Full Type=Backup Name=some-job Status=Running
+Writing: Volume="vol-0307"
+    pool="SomePool" device="Dev1" (bucket)
+    spooling=0 despooling=0 despool_wait=0
+    Files=27 Bytes=73,141,427 AveBytes/sec=14,628,285 LastBytes/sec=5,243,114
+    FDReadSeqNo=6 in_msg=6 out_msg=5 fd=6
+
+====
+`
+
+  it('reads the average and last rate from the Running line shape', () => {
+    expect(parseSdRunning(realSdStatus, 1101)).toEqual({
+      files: 27, bytes: 73141427, aveBytesPerSec: 14628285, lastBytesPerSec: 5243114,
+    })
+  })
+
+  it('after a failover asks only the member that took the job, never a refused or disabled one', () => {
+    const events = {
+      selected: 'SD1', failedOverTo: 'SD2', finalStorage: null, dispatchedTo: null,
+      attempts: [{ storage: 'SD1', outcome: 'refused' }, { storage: 'SD3', outcome: 'skipped-disabled' }, { storage: 'SD2', outcome: 'used' }],
+    }
+    expect(sdStatusCandidates({ storage: 'SD1' }, events, ['SD1', 'SD3'])).toEqual(['SD2'])
+  })
+
+  it('sees a connected Storage daemon only from its log line', () => {
+    const selection = [{ logtext: ' 2026-10-19 08:40:00 dir JobId 5: Storage group: 2 candidates, using "SD1" (Job, policy ListedOrder).\n' }]
+    expect(storageConnected(selection)).toBe(false)
+    expect(storageConnected([])).toBe(false)
+    expect(storageConnected(undefined)).toBe(false)
+    const connected = [...selection, { logtext: ' 2026-10-19 08:40:02 dir JobId 5: Connected Storage daemon at sd2:9103, encryption: TLS\n' }]
+    expect(storageConnected(connected)).toBe(true)
+  })
+
+  it('uses the configured storage of a single-storage job that has no storage lines', () => {
+    expect(sdStatusCandidates({}, { attempts: [], selected: null }, ['S3-sd3'])).toEqual(['S3-sd3'])
+  })
+
+  it('orders the storages to ask: dispatched first, no duplicates, no empty names', () => {
+    const events = { finalStorage: null, dispatchedTo: 'B', selected: 'A', attempts: [{ storage: 'A', outcome: 'used' }] }
+    expect(sdStatusCandidates({ storage: 'A' }, events)).toEqual(['B', 'A'])
+    expect(sdStatusCandidates({}, null, ['Cfg', 'B'])).toEqual(['Cfg', 'B'])
+    expect(sdStatusCandidates({ storage: '' }, null)).toEqual([])
+    expect(sdStatusCandidates({ storage: 'Only' }, undefined)).toEqual(['Only'])
   })
 })
