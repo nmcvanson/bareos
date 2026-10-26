@@ -44,6 +44,7 @@ Vendor:     The Bareos Team
 %define enable_grpc 1
 %define enable_barri 1
 %define enable_incus 1
+%define enable_openstack 1
 
 # cmake build directory
 %define CMAKE_BUILDDIR       cmake-build
@@ -453,6 +454,15 @@ Requires:      bareos-filedaemon-python-plugin = %{version}
 Suggests:      bareos-filedaemon-python3-plugin = %{version}
 %endif
 
+%if 0%{?enable_openstack}
+%package       filedaemon-openstack-python-plugin
+Summary:       OpenStack Python plugin for Bareos File daemon
+Group:         Productivity/Archiving/Backup
+Requires:      bareos-filedaemon = %{version}
+Requires:      bareos-filedaemon-python3-plugin = %{version}
+Requires:      python3-openstacksdk
+%endif
+
 %package       storage-python3-plugin
 Summary:       Python plugin for Bareos Storage daemon
 Group:         Productivity/Archiving/Backup
@@ -574,6 +584,13 @@ This package contains the Bareos Recovery Imager (barri) command line tool
 %{dscr}
 
 This package contains the incus plugin for the file daemon
+%endif
+
+%if 0%{?enable_openstack}
+%description filedaemon-openstack-python-plugin
+%{dscr}
+
+This package contains the OpenStack python plugin for the file daemon
 %endif
 
 
@@ -981,6 +998,8 @@ ls -la %{buildroot}/%{library_dir}
 %if ! 0%{?python_plugins}
 rm -f %{buildroot}/%{plugin_dir}/python-*.so
 rm -f %{buildroot}/%{plugin_dir}/*.py*
+rm -rf %{buildroot}/%{plugin_dir}/bareos_openstack
+rm -f %{buildroot}/%{_sbindir}/bareos-openstack-tool
 rm -f %{buildroot}/%{_sysconfdir}/%{name}/bareos-dir.d/plugin-python-ldap.conf
 %endif
 
@@ -1427,6 +1446,15 @@ mkdir -p %{?buildroot}/%{_libdir}/bareos/plugins/vmware_plugin
 %files barri-cli
 %defattr(-, root, root)
 %{_bindir}/barri-cli
+%endif
+
+%if 0%{?enable_openstack}
+%files filedaemon-openstack-python-plugin
+%defattr(-, root, root)
+%{plugin_dir}/bareos-fd-openstack.py*
+%dir %{plugin_dir}/bareos_openstack
+%{plugin_dir}/bareos_openstack/*
+%{_sbindir}/bareos-openstack-tool
 %endif
 
 %files director-python3-plugin
