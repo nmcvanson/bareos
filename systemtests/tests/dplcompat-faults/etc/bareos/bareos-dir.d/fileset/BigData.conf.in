@@ -1,0 +1,9 @@
+FileSet {
+  Name = "BigData"
+  Include {
+    Options {
+      Signature = XXH128
+    }
+    File = "@tmpdir@/bigdata"
+  }
+}

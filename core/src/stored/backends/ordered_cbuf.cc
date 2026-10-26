@@ -2,7 +2,7 @@
    BAREOS® - Backup Archiving REcovery Open Sourced
 
    Copyright (C) 2016-2017 Planets Communications B.V.
-   Copyright (C) 2017-2024 Bareos GmbH & Co. KG
+   Copyright (C) 2017-2026 Bareos GmbH & Co. KG
 
    This program is Free Software; you can redistribute it and/or
    modify it under the terms of version three of the GNU Affero General Public
@@ -69,22 +69,38 @@ void ordered_circbuf::destroy()
   }
 }
 
-// Enqueue a new item into the ordered circular buffer.
+/* Enqueue a new item into the ordered circular buffer. A full buffer is
+ * waited for without limit, or until full_wait_until (then NULL is returned
+ * and was_full set), or not at all with ignore_full. */
 void* ordered_circbuf::enqueue(void* data,
                                uint32_t data_size,
                                int compare(ocbuf_item*, ocbuf_item*),
                                void update(void*, void*),
                                bool use_reserved_slot,
-                               bool no_signal)
+                               bool no_signal,
+                               const struct timespec* full_wait_until,
+                               bool* was_full,
+                               bool ignore_full)
 {
   struct ocbuf_item *new_item, *item;
 
+  if (was_full) { *was_full = false; }
   if (pthread_mutex_lock(&lock_) != 0) { return NULL; }
 
   // See if we should use a reserved slot and there are actually slots reserved.
-  if (!use_reserved_slot || !reserved_) {
+  if (!ignore_full && (!use_reserved_slot || !reserved_)) {
     // Wait while the buffer is full.
-    while (full()) { pthread_cond_wait(&notfull_, &lock_); }
+    while (full()) {
+      if (!full_wait_until) {
+        pthread_cond_wait(&notfull_, &lock_);
+      } else if (pthread_cond_timedwait(&notfull_, &lock_, full_wait_until)
+                     == ETIMEDOUT
+                 && full()) {
+        if (was_full) { *was_full = true; }
+        pthread_mutex_unlock(&lock_);
+        return NULL;
+      }
+    }
   }
 
   /* Decrease the number of reserved slots if we should use a reserved slot.

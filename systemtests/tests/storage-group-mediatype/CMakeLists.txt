@@ -21,3 +21,10 @@ get_filename_component(BASENAME ${CMAKE_CURRENT_BINARY_DIR} NAME)
 # IGNORE_CONFIG_WARNINGS: requires directives 'Maximum Block Size (Sd ->
 # Device)' and 'Maximum Concurrent Jobs (Sd -> Device)'
 create_systemtest(${SYSTEMTEST_PREFIX} ${BASENAME} IGNORE_CONFIG_WARNINGS)
+# Five scheduled starts and thirteen throttled dispatch backups supplement the
+# original binding/restore cases. Keep their bounded polls intact.
+if(TEST ${SYSTEMTEST_PREFIX}${BASENAME}:${BASENAME})
+  set_tests_properties(
+    ${SYSTEMTEST_PREFIX}${BASENAME}:${BASENAME} PROPERTIES TIMEOUT 600
+  )
+endif()

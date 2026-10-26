@@ -94,4 +94,61 @@ TEST(ConfigParser_SD, CFG_TYPE_STR_VECTOR_OF_DIRS)
 }
 #endif
 
+/* Parses the Maximum Append Queue Size fixture of the given suffix; the
+ * resource is left in my_config for the caller to read. */
+static bool ParseAppendQueueConfig(const char* suffix)
+{
+  OSDependentInit();
+
+#if HAVE_WIN32
+  WSA_Init();
+#endif
+
+  InitMsg(nullptr, nullptr);
+
+  std::string path_to_config = std::string(
+                                   "configs/bareos-configparser-tests/"
+                                   "bareos-sd-MaximumAppendQueueSize")
+                               + suffix + std::string(".conf");
+  my_config = InitSdConfig(path_to_config.c_str(), M_INFO);
+  return my_config->ParseConfig();
+}
+
+static void EndAppendQueueConfig()
+{
+  TermMsg();
+  delete my_config;
+  my_config = nullptr;
+}
+
+TEST(ConfigParser_SD, MaximumAppendQueueSize)
+{
+  ASSERT_TRUE(ParseAppendQueueConfig(""));
+  auto* res
+      = static_cast<StorageResource*>(my_config->GetNextRes(R_STORAGE, NULL));
+  EXPECT_EQ(res->max_append_queue_size, 64ull * 1024 * 1024);
+  EndAppendQueueConfig();
+}
+
+TEST(ConfigParser_SD, MaximumAppendQueueSize_default_is_unbounded)
+{
+  ASSERT_TRUE(ParseAppendQueueConfig("-default"));
+  auto* res
+      = static_cast<StorageResource*>(my_config->GetNextRes(R_STORAGE, NULL));
+  EXPECT_EQ(res->max_append_queue_size, 0u);
+  EndAppendQueueConfig();
+}
+
+TEST(ConfigParser_SD, MaximumAppendQueueSize_rejects_negative)
+{
+  EXPECT_FALSE(ParseAppendQueueConfig("-negative"));
+  EndAppendQueueConfig();
+}
+
+TEST(ConfigParser_SD, MaximumAppendQueueSize_rejects_junk)
+{
+  EXPECT_FALSE(ParseAppendQueueConfig("-junk"));
+  EndAppendQueueConfig();
+}
+
 }  // namespace storagedaemon

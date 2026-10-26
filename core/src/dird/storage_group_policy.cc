@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "include/bareos.h"
@@ -63,8 +64,7 @@ class StorageGroupPolicy {
  public:
   virtual ~StorageGroupPolicy() = default;
   virtual void Order(std::vector<StorageResource*>& candidates,
-                     JobControlRecord* jcr)
-      = 0;
+                     JobControlRecord* jcr) = 0;
 };
 
 /**
@@ -83,20 +83,25 @@ class ListedOrderPolicy : public StorageGroupPolicy {
  * configured order, which is what makes the policy degrade gracefully to
  * ListedOrder on an idle installation rather than to an arbitrary order.
  *
- * The counts are read one at a time, each under the queue mutex, so the set
- * is not a consistent snapshot. That is fine: this is an ordering hint, and
- * the queue re-checks the limit when the job is dispatched.
+ * The counts are an ordering hint. Read each once before sorting so that
+ * concurrent job completions cannot change the comparator's ordering.
+ * Slot acquisition checks the current limit again.
  */
 class LeastUsedPolicy : public StorageGroupPolicy {
  public:
   void Order(std::vector<StorageResource*>& candidates,
              JobControlRecord*) override
   {
-    std::stable_sort(candidates.begin(), candidates.end(),
-                     [](StorageResource* lhs, StorageResource* rhs) {
-                       return GetStorageNumConcurrentJobs(lhs)
-                              < GetStorageNumConcurrentJobs(rhs);
+    std::vector<std::pair<StorageResource*, int>> counts;
+    for (auto* store : candidates) {
+      counts.emplace_back(store, GetStorageNumConcurrentJobs(store));
+    }
+    std::stable_sort(counts.begin(), counts.end(),
+                     [](const auto& lhs, const auto& rhs) {
+                       return lhs.second < rhs.second;
                      });
+    std::transform(counts.begin(), counts.end(), candidates.begin(),
+                   [](const auto& entry) { return entry.first; });
   }
 };
 
@@ -225,6 +230,67 @@ int ApplyStorageGroupPolicy(JobControlRecord* jcr)
   SetCurrentWstorage(jcr, list->first());
 
   return list->size();
+}
+
+bool TryAcquireWriteStorageSlot(JobControlRecord* jcr)
+{
+  if (!jcr || !jcr->dir_impl->res.write_storage) { return false; }
+
+  auto* list = jcr->dir_impl->res.write_storage_list;
+  if (!jcr->dir_impl->uses_storage_group || !JobMayUseStorageGroup(jcr)
+      || jcr->dir_impl->IgnoreStorageConcurrency || !list || list->size() < 2
+      || ResolveStorageGroupPolicy(jcr->dir_impl->res.job,
+                                   jcr->dir_impl->res.pool, nullptr)
+             != StorageGroupPolicyType::kLeastUsed) {
+    return IncWriteStore(jcr);
+  }
+
+  const auto current = ToVector(list);
+  std::vector<StorageResource*> ordered;
+  // Start from declaration order so ties do not depend on an earlier snapshot.
+  auto* configured
+      = jcr->dir_impl->res.pool ? jcr->dir_impl->res.pool->storage : nullptr;
+  if (!configured && jcr->dir_impl->res.job) {
+    configured = jcr->dir_impl->res.job->storage;
+  }
+  if (configured) {
+    for (auto* store : configured) {
+      if (std::find(current.begin(), current.end(), store) != current.end()) {
+        ordered.push_back(store);
+      }
+    }
+  }
+  for (auto* store : current) {
+    if (std::find(ordered.begin(), ordered.end(), store) == ordered.end()) {
+      ordered.push_back(store);
+    }
+  }
+
+  // Keep the existing all-disabled fallback, but omit disabled members when
+  // another member is enabled. Do not mutate the job's list on a failed try.
+  const bool has_enabled
+      = std::any_of(ordered.begin(), ordered.end(),
+                    [](StorageResource* store) { return store->enabled; });
+  if (has_enabled) {
+    ordered.erase(
+        std::remove_if(ordered.begin(), ordered.end(),
+                       [](StorageResource* store) { return !store->enabled; }),
+        ordered.end());
+  }
+  MakePolicy(StorageGroupPolicyType::kLeastUsed)->Order(ordered, jcr);
+
+  auto* previous = jcr->dir_impl->res.write_storage;
+  for (auto selected = ordered.begin(); selected != ordered.end(); ++selected) {
+    if (!SetCurrentWstorage(jcr, *selected) || !IncWriteStore(jcr)) {
+      continue;
+    }
+    std::rotate(ordered.begin(), selected, selected + 1);
+    RebuildAlist(list, ordered);
+    return true;
+  }
+
+  SetCurrentWstorage(jcr, previous);
+  return false;
 }
 
 } /* namespace directordaemon */

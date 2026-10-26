@@ -37,6 +37,7 @@
 #include "dird/job.h"
 #include "dird/jobq.h"
 #include "dird/storage.h"
+#include "dird/storage_group_policy.h"
 #include "lib/berrno.h"
 #include "lib/thread_specific_data.h"
 #include "dird/jcr_util.h"
@@ -737,7 +738,7 @@ static bool AcquireResources(JobControlRecord* jcr)
   }
 
   if (jcr->dir_impl->res.write_storage) {
-    if (!IncWriteStore(jcr)) {
+    if (!TryAcquireWriteStorageSlot(jcr)) {
       DecReadStore(jcr);
       jcr->setJobStatusWithPriorityCheck(JS_WaitStoreRes);
 
@@ -765,6 +766,17 @@ static bool AcquireResources(JobControlRecord* jcr)
   }
 
   jcr->dir_impl->acquired_resource_locks = true;
+
+  if (jcr->dir_impl->uses_storage_group && JobMayUseStorageGroup(jcr)
+      && !jcr->dir_impl->IgnoreStorageConcurrency
+      && jcr->dir_impl->res.write_storage
+      && ResolveStorageGroupPolicy(jcr->dir_impl->res.job,
+                                   jcr->dir_impl->res.pool, nullptr)
+             == StorageGroupPolicyType::kLeastUsed) {
+    // Delivery happens in the worker, after the job queue lock is released.
+    Qmsg(jcr, M_INFO, 0, T_("Storage group: dispatching to \"%s\".\n"),
+         jcr->dir_impl->res.write_storage->resource_name_);
+  }
 
   return true;
 }

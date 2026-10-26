@@ -94,6 +94,7 @@ BuildRequires: glibc
 BuildRequires: glibc-devel
 BuildRequires: libacl-devel
 BuildRequires: libcap-devel
+BuildRequires: libcurl-devel
 BuildRequires: libstdc++-devel
 BuildRequires: libtirpc-devel
 BuildRequires: logrotate

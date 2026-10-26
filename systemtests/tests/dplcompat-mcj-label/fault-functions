@@ -1,0 +1,298 @@
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# Helpers of the dplcompat-mcj-label testrunners; sourced after "functions".
+# The fault switches are files read by etc/bareos/fault-wrapper.sh. The
+# testrunners set $log before they call the scenarios.
+
+fault_dir="${tmp}/faults"
+mcjdata_dir="${tmp}/mcjdata"
+mcjcal_dir="${tmp}/mcjcal"
+chunk_size=10485760
+
+faults_clear()
+{
+  mkdir -p "${fault_dir}"
+  rm -f "${fault_dir}/fail-uploads" "${fault_dir}/fail-uploads-until" \
+    "${fault_dir}/list-empty-after-ok" "${fault_dir}/fail-uploads-once" \
+    "${fault_dir}/fail-list-once" "${fault_dir}/slow-uploads"
+}
+
+# Every upload waits the given number of seconds.
+fault_slow_uploads()
+{
+  mkdir -p "${fault_dir}"
+  echo "$1" >"${fault_dir}/slow-uploads"
+}
+
+# $1 MB of incompressible data for the McjData fileset.
+setup_mcjdata()
+{
+  mkdir -p "${mcjdata_dir}"
+  if [ ! -f "${mcjdata_dir}/random.bin" ]; then
+    dd if=/dev/urandom of="${mcjdata_dir}/random.bin" bs=1M count="$1" 2>/dev/null
+  fi
+}
+
+# 2 MB of incompressible data for the SmallData fileset.
+setup_smalldata()
+{
+  mkdir -p "${tmp}/smalldata"
+  if [ ! -f "${tmp}/smalldata/random.bin" ]; then
+    dd if=/dev/urandom of="${tmp}/smalldata/random.bin" bs=1M count=2 2>/dev/null
+  fi
+}
+
+# Output of one bconsole command.
+console_output()
+{
+  "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" <<<"$1"
+}
+
+# Prints the JobId of the last "run" in a log file.
+queued_jobid()
+{
+  grep 'Job queued. JobId=' "$1" | tail -n 1 | sed -n -e 's/^.*JobId=//p'
+}
+
+# Status letter the catalog holds for a job.
+job_status()
+{
+  local output
+  output=$(console_output ".api 2
+.sql query=\"SELECT jobstatus FROM job WHERE jobid=$1;\"")
+  "${AWK}" '/"jobstatus":/ {gsub("[\",\\r]","",$2); print $2}' <<<"${output}"
+}
+
+# Waits until the job ended (T, W, E, f, A); fails after $2 seconds.
+wait_job_ended()
+{
+  local jobid="$1" timeout="$2" start=${SECONDS} status
+  while ((SECONDS - start < timeout)); do
+    status=$(job_status "${jobid}")
+    case "${status}" in
+      T | W | E | f | A) return 0 ;;
+      *) sleep 1 ;;
+    esac
+  done
+  return 1
+}
+
+# Bytes the catalog holds for a volume.
+volume_bytes()
+{
+  local output
+  output=$(console_output ".api 2
+.sql query=\"SELECT volbytes FROM media WHERE volumename='$1';\"")
+  "${AWK}" '/"volbytes":/ {gsub("[\",\\r]","",$2); print $2}' <<<"${output}"
+}
+
+# Status the catalog holds for a volume.
+volume_status()
+{
+  local output
+  output=$(console_output ".api 2
+.sql query=\"SELECT volstatus FROM media WHERE volumename='$1';\"")
+  "${AWK}" '/"volstatus":/ {gsub("[\",\r]","",$2); print $2}' <<<"${output}"
+}
+
+# Bytes the store holds for a volume: the sum of its chunk files.
+bucket_bytes()
+{
+  local total=0 f
+  for f in "${archivedir}/$1".*; do
+    [ -f "$f" ] && total=$((total + $(wc -c <"$f")))
+  done
+  echo "${total}"
+}
+
+label_volume()
+{
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+label volume=$1 storage=$2 pool=$3
+quit
+END_OF_DATA
+  run_bconsole
+}
+
+# Starts a backup job on a storage and pool; sets started_jobid.
+start_backup()
+{
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=$1 storage=$2 pool=$3 yes
+quit
+END_OF_DATA
+  run_bconsole
+  started_jobid=$(queued_jobid "$log")
+}
+
+# Waits until the wrapper stored volume $1 chunk $2; records an error after
+# $3 seconds.
+wait_for_upload()
+{
+  local volume="$1" chunk="$2" timeout="$3" start=${SECONDS}
+  until grep -q "^${volume}.${chunk} ok " "${fault_dir}/upload.log" 2>/dev/null; do
+    if ((SECONDS - start > timeout)); then
+      set_error "chunk ${chunk} of ${volume} was not stored within ${timeout} s"
+      return 0
+    fi
+    sleep 0.2
+  done
+}
+
+# Waits for the jobs (canceled after 300 s), clears the faults, prints messages.
+finish_jobs()
+{
+  local jobid
+  for jobid in "$@"; do
+    if ! wait_job_ended "${jobid}" 300; then
+      set_error "job ${jobid} did not end within 300 s, canceled"
+      console_output "cancel jobid=${jobid}" >>"$log" || :
+    fi
+  done
+  faults_clear
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+messages
+quit
+END_OF_DATA
+  run_bconsole
+}
+
+# Records an error unless the job ended OK; restores it and compares the
+# sha256 of its file in $2 with the restored one.
+check_job()
+{
+  local jobid="$1" source="$2" name="$3" status original restored
+  status=$(job_status "${jobid}")
+  echo "${name} (job ${jobid}): status ${status}" >>"$log"
+  if [ "${status}" != "T" ] && [ "${status}" != "W" ]; then
+    set_error "${name} (job ${jobid}) did not end OK, status ${status}"
+    return 0
+  fi
+  cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+restore jobid=${jobid} client=bareos-fd where=$RestoreDirectory/${jobid} all done yes
+wait
+messages
+quit
+END_OF_DATA
+  run_bconsole
+  original=$(sha256sum "${source}/random.bin" | "${AWK}" '{print $1}')
+  restored=$(sha256sum "$RestoreDirectory/${jobid}${source}/random.bin" \
+    | "${AWK}" '{print $1}' || :)
+  echo "${name}: sha256 original ${original}, restored ${restored:-none}" \
+    >>"$log"
+  if [ "${original}" != "${restored}" ]; then
+    set_error "${name} (job ${jobid}) ended OK but its restore differs"
+  fi
+}
+
+# A second job joins while the first one writes past the first chunk. Both
+# must end OK and restore byte-identical. $1 storage, $2 pool, $3 volume.
+join_scenario()
+{
+  local storage="$1" pool="$2" volume="$3" big_jobid small_jobid
+  label_volume "${volume}" "${storage}" "${pool}"
+  # Every upload takes a second, so the first job runs for a while.
+  fault_slow_uploads 1
+  start_backup backup-mcj-big "${storage}" "${pool}"
+  big_jobid="${started_jobid}"
+  wait_for_upload "${volume}" 0001 120
+  start_backup backup-mcj-small "${storage}" "${pool}"
+  small_jobid="${started_jobid}"
+  finish_jobs "${big_jobid}" "${small_jobid}"
+  check_job "${big_jobid}" "${mcjdata_dir}" "first job"
+  check_job "${small_jobid}" "${tmp}/smalldata" "second job"
+}
+
+# Finds the payload of the calibration job that leaves exactly $1 bytes in its
+# volume (sets tuned_payload): the volume holds the label, the payload and
+# the records around it. Trial volumes are named $2-NNNN and set to Used.
+tune_payload()
+{
+  local target="$1" prefix="$2" storage="$3" pool="$4"
+  local payload=$((target - 214 - 4096)) trial=0 volume bytes
+  mkdir -p "${mcjcal_dir}"
+  while ((trial < 8)); do
+    trial=$((trial + 1))
+    head -c "${payload}" /dev/urandom >"${mcjcal_dir}/random.bin"
+    volume=$(printf "%s-%04d" "${prefix}" "${trial}")
+    label_volume "${volume}" "${storage}" "${pool}"
+    start_backup backup-mcj-cal "${storage}" "${pool}"
+    if ! wait_job_ended "${started_jobid}" 120; then
+      set_error "calibration job ${started_jobid} did not end"
+      return 1
+    fi
+    sleep 1
+    console_output "update volume=${volume} volstatus=Used" >>"$log"
+    bytes=$(volume_bytes "${volume}")
+    echo "tune trial ${trial}: payload ${payload}, ${volume} holds ${bytes} bytes, target ${target}" >>"$log"
+    if [ "${bytes}" = "${target}" ]; then
+      tuned_payload="${payload}"
+      return 0
+    fi
+    payload=$((payload + target - bytes))
+  done
+  set_error "no payload leaves exactly ${target} bytes in a volume"
+  return 1
+}
+
+# The volume is exactly two full chunks long when the first job starts on it;
+# a second job joins after the first one stored its first new chunk. Both must
+# end OK and restore byte-identical, and so must the job that filled the volume.
+# $1 storage, $2 pool, $3 volume, $4 prefix of the trial volumes; $3 and $4
+# must have the same length because the volume label holds its name.
+boundary_scenario()
+{
+  local storage="$1" pool="$2" volume="$3" prefix="$4"
+  local target=$((2 * chunk_size)) fill_jobid big_jobid small_jobid bytes stored
+  local status
+  tune_payload "${target}" "${prefix}" "${storage}" "${pool}" || return 0
+  head -c "${tuned_payload}" /dev/urandom >"${mcjcal_dir}/random.bin"
+  label_volume "${volume}" "${storage}" "${pool}"
+  start_backup backup-mcj-cal "${storage}" "${pool}"
+  fill_jobid="${started_jobid}"
+  wait_job_ended "${fill_jobid}" 120 || set_error "job ${fill_jobid} did not end"
+  sleep 1
+  bytes=$(volume_bytes "${volume}")
+  stored=$(bucket_bytes "${volume}")
+  echo "${volume}: catalog ${bytes} bytes, store ${stored} bytes" >>"$log"
+  if [ "${bytes}" != "${target}" ] || [ "${stored}" != "${target}" ]; then
+    set_error "${volume} is not two full chunks long"
+    return 0
+  fi
+  fault_slow_uploads 1
+  start_backup backup-mcj-big "${storage}" "${pool}"
+  big_jobid="${started_jobid}"
+  wait_for_upload "${volume}" 0002 60
+  start_backup backup-mcj-small "${storage}" "${pool}"
+  small_jobid="${started_jobid}"
+  finish_jobs "${big_jobid}" "${small_jobid}"
+  status=$(volume_status "${volume}")
+  echo "${volume}: status ${status}" >>"$log"
+  if [ "${status}" = "Error" ]; then
+    set_error "${volume} was marked in error by a job that joined it"
+  fi
+  check_job "${fill_jobid}" "${mcjcal_dir}" "job that filled the volume"
+  check_job "${big_jobid}" "${mcjdata_dir}" "first job"
+  check_job "${small_jobid}" "${tmp}/smalldata" "second job"
+}

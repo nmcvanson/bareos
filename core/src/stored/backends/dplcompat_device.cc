@@ -23,16 +23,23 @@
 #include "include/bareos.h"
 
 #include "stored/stored.h"
+#include "stored/device_control_record.h"
 #include "stored/sd_backends.h"
 #include "chunked_device.h"
 #include "lib/edit.h"
+#include "lib/thread_specific_data.h"
 #include "dplcompat_device.h"
 
-#include <string>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <fmt/format.h>
 #include <gsl/gsl>
 #include "util.h"
+#ifdef HAVE_DPLCOMPAT_NATIVE
+#  include "s3_native_store.h"
+#endif
 
 namespace utl = backends::util;
 using namespace std::literals::string_literals;
@@ -42,9 +49,7 @@ static constexpr int debug_info = 100;
 static constexpr int debug_trace = 120;
 
 std::string get_chunk_name(storagedaemon::chunk_io_request* request)
-{
-  return fmt::format(FMT_STRING("{:04d}"), request->chunk);
-}
+{ return fmt::format(FMT_STRING("{:04d}"), request->chunk); }
 bool is_chunk_name(const std::string& name)
 {
   if (name.length() != 4) { return false; }
@@ -55,9 +60,14 @@ bool is_chunk_name(const std::string& name)
 }
 
 static const utl::options option_defaults{
-    {"chunksize", "10 MB"}, {"iothreads", "0"},       {"ioslots", "10"},
-    {"retries", "0"},       {"program_timeout", "0"},  // default in
-                                                       // crud_storage
+    {"chunksize", "10 MB"},
+    {"iothreads", "0"},
+    {"ioslots", "10"},
+    {"retries", "0"},
+    {"program_timeout", "0"},  // default in
+                               // crud_storage
+    {"flush_timeout", "1800"},
+    {"transport", "program"},
 };
 
 void throw_if_junk(const std::string& str, size_t pos = 0)
@@ -92,32 +102,22 @@ template <typename T> void convert_value(T&, const std::string&) = delete;
 template <>
 [[maybe_unused]] void convert_value<>(unsigned long long& to,
                                       const std::string& from)
-{
-  to = stoull_notrailing(from);
-}
+{ to = stoull_notrailing(from); }
 
 template <>
 [[maybe_unused]] void convert_value<>(unsigned long& to,
                                       const std::string& from)
-{
-  to = stoul_notrailing(from);
-}
+{ to = stoul_notrailing(from); }
 
 template <> void convert_value<>(uint8_t& to, const std::string& from)
-{
-  to = gsl::narrow<uint8_t>(stoul_notrailing(from));
-}
+{ to = gsl::narrow<uint8_t>(stoul_notrailing(from)); }
 
 template <> void convert_value<>(uint32_t& to, const std::string& from)
-{
-  to = gsl::narrow<uint32_t>(stoul_notrailing(from));
-}
+{ to = gsl::narrow<uint32_t>(stoul_notrailing(from)); }
 
 
 template <> void convert_value<>(std::string& to, const std::string& from)
-{
-  to = from;
-}
+{ to = from; }
 
 void convert_size(uint64_t& to, const std::string& from)
 {
@@ -182,6 +182,92 @@ template <typename T> auto get_size_converter(const std::string& key, T& target)
   };
 }
 
+// Transport "program": options program and program_timeout, then the options
+// the wrapper program says it supports.
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeProgramStore(
+    utl::options& options)
+{
+  std::string program;
+  uint32_t program_timeout{0};
+
+  if (auto conversion_result
+      = tl::expected<utl::options*, std::string>{&options}
+            .and_then(get_value_converter("program", program))
+            .and_then(get_value_converter("program_timeout", program_timeout));
+      !conversion_result) {
+    return tl::unexpected(conversion_result.error());
+  }
+
+  if (program.empty()) {
+    return tl::unexpected("Option 'program' is required\n"s);
+  }
+
+  auto storage = std::make_unique<CrudStorage>();
+  if (auto result = storage->set_program(program); !result) {
+    return tl::unexpected(result.error());
+  }
+
+  if (program_timeout > 0) {
+    storage->set_program_timeout(std::chrono::seconds{program_timeout});
+  }
+
+  if (auto supported_options = storage->get_supported_options()) {
+    for (const auto& option_name : *supported_options) {
+      if (auto value = fetch_value(options, option_name);
+          value && !storage->set_option(option_name, *value)) {
+        return tl::unexpected(
+            fmt::format(FMT_STRING("Error setting option '{}' to '{}'\n"),
+                        option_name, *value));
+      }
+    }
+  } else {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
+                    supported_options.error().message));
+  }
+  return std::unique_ptr<ObjectStore>(std::move(storage));
+}
+
+#ifdef HAVE_DPLCOMPAT_NATIVE
+// Transport "native": the options named by the store, set one by one; the S3
+// credentials come only from the s3cfg file the store reads itself.
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeNativeStore(
+    utl::options& options)
+{
+  for (const char* required : {"s3cfg", "bucket"}) {
+    if (options.count(required) == 0) {
+      return tl::unexpected(fmt::format(
+          FMT_STRING("Option '{}' is required for transport 'native'\n"),
+          required));
+    }
+  }
+
+  auto storage = std::make_unique<S3NativeStore>();
+  auto supported_options = storage->get_supported_options();
+  if (!supported_options) {
+    return tl::unexpected(
+        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
+                    supported_options.error().message));
+  }
+  for (const auto& option_name : *supported_options) {
+    if (auto value = fetch_value(options, option_name); value) {
+      if (auto result = storage->set_option(option_name, *value); !result) {
+        return tl::unexpected(
+            fmt::format(FMT_STRING("Error setting option '{}' to '{}': {}\n"),
+                        option_name, *value, result.error().message));
+      }
+    }
+  }
+  return std::unique_ptr<ObjectStore>(std::move(storage));
+}
+#else
+tl::expected<std::unique_ptr<ObjectStore>, std::string> MakeNativeStore(
+    utl::options&)
+{
+  return tl::unexpected(
+      "dplcompat was built without the native S3 transport\n"s);
+}
+#endif
 
 }  // namespace
 
@@ -207,6 +293,9 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
                                       std::get<utl::error>(res)));
   }
   auto options = std::get<utl::options>(res);
+  // The program options are meaningless for the native transport.
+  const bool program_option_given
+      = options.count("program") > 0 || options.count("program_timeout") > 0;
 
   // apply default values
   options.merge(utl::options(option_defaults));
@@ -214,48 +303,46 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
   for (const auto& [key, value] : options) {
     utl::Dfmt(debug_trace, FMT_STRING("'{}' = '{}'"), key, value);
   }
-  std::string program;
-  uint32_t program_timeout{0};
+  std::string transport;
 
   if (auto conversion_result
       = tl::expected<utl::options*, std::string>{&options}
+            .and_then(get_value_converter("transport", transport))
             .and_then(get_value_converter("iothreads", io_threads_))
             .and_then(get_value_converter("ioslots", io_slots_))
             .and_then(get_value_converter("retries", retries_))
             .and_then(get_size_converter("chunksize", chunk_size_))
-            .and_then(get_value_converter("program", program))
-            .and_then(get_value_converter("program_timeout", program_timeout));
+            .and_then(get_value_converter("flush_timeout", flush_timeout_));
       !conversion_result) {
     return tl::unexpected(conversion_result.error());
   }
 
-  if (program.empty()) {
-    return tl::unexpected("Option 'program' is required\n"s);
+  if (flush_timeout_ == 0) {
+    return tl::unexpected("Option 'flush_timeout' must be at least 1\n"s);
   }
 
   utl::Dfmt(debug_trace, FMT_STRING("configured chunksize in bytes: {}"),
             chunk_size_);
 
-  if (auto result = m_storage.set_program(program); !result) { return result; }
-
-  if (program_timeout > 0) {
-    m_storage.set_program_timeout(std::chrono::seconds{program_timeout});
-  }
-
-  if (auto supported_options = m_storage.get_supported_options()) {
-    for (const auto& option_name : *supported_options) {
-      if (auto value = fetch_value(options, option_name);
-          value && !m_storage.set_option(option_name, *value)) {
-        return tl::unexpected(
-            fmt::format(FMT_STRING("Error setting option '{}' to '{}'\n"),
-                        option_name, *value));
-      }
+  tl::expected<std::unique_ptr<ObjectStore>, std::string> storage;
+  if (transport == "program") {
+    storage = MakeProgramStore(options);
+  } else if (transport == "native") {
+    if (program_option_given) {
+      return tl::unexpected(
+          "Options 'program' and 'program_timeout' cannot be used with "
+          "transport 'native'\n"s);
     }
+    // Only the default is left of it here.
+    options.erase("program_timeout");
+    storage = MakeNativeStore(options);
   } else {
-    return tl::unexpected(
-        fmt::format(FMT_STRING("Cannot get supported options.\nCause: {}\n"),
-                    supported_options.error()));
+    return tl::unexpected(fmt::format(
+        FMT_STRING("invalid argument '{}' for option 'transport': use "
+                   "'program' or 'native'\n"),
+        transport));
   }
+  if (!storage) { return tl::unexpected(storage.error()); }
 
   // OptionConsumer should have consumed all options at this point
   if (!options.empty()) {
@@ -265,13 +352,39 @@ tl::expected<void, std::string> DropletCompatibleDevice::setup_impl()
         fmt::format(FMT_STRING("Unknown options encountered: {}\n"),
                     option_names.Join(", ")));
   }
+  InstallStore(std::move(*storage));
   return {};
+}
+
+// True when the calling thread runs a job that was canceled; a failed job and
+// an io-thread (no job) are not.
+bool DropletCompatibleDevice::CallingJobCanceled()
+{
+  JobControlRecord* jcr = GetJcrFromThreadSpecificData();
+  return jcr != nullptr && jcr->getJobStatus() == JS_Canceled;
+}
+
+// Takes over the transport and lets it stop a request when the job is canceled.
+void DropletCompatibleDevice::InstallStore(std::unique_ptr<ObjectStore> store)
+{
+  m_storage = std::move(store);
+  m_storage->set_abort_check([] { return CallingJobCanceled(); });
 }
 
 bool DropletCompatibleDevice::CheckRemoteConnection()
 {
   Dmsg0(debug_trace, "CheckRemoteConnection called\n");
-  return setup() && m_storage.test_connection();
+  if (!setup()) { return false; }
+  const auto result = m_storage->test_connection();
+  if (!result) {
+    Mmsg(errmsg, T_("Cannot access backend on device %s: %s\n"), print_name(),
+         result.error().message.c_str());
+    dev_errno = EIO;
+    errno = EIO;
+    FailWriter(errmsg);
+    return false;
+  }
+  return true;
 }
 
 bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
@@ -286,11 +399,13 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   utl::Dfmt(debug_trace, FMT_STRING("Flushing chunk {}/{}"), obj_name,
             obj_chunk);
 
+  // Another thread uploads this chunk now: flagged on the request.
   auto inflight_lease = getInflightLease(request);
   if (!inflight_lease) {
     utl::Dfmt(debug_info,
               FMT_STRING("Could not acquire inflight lease for {}/{}"),
               obj_name, obj_chunk);
+    request->lease_conflict = true;
     return false;
   }
 
@@ -302,7 +417,7 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
    * chunk is reused in a next backup job. We only want the chunk with
    * the biggest amount of valid data to persist as we only append to
    * chunks. */
-  auto obj_stat = m_storage.stat(obj_name, obj_chunk);
+  auto obj_stat = m_storage->stat(obj_name, obj_chunk);
 
   if (obj_stat && obj_stat->size > request->wbuflen) {
     utl::Dfmt(
@@ -316,13 +431,33 @@ bool DropletCompatibleDevice::FlushRemoteChunk(chunk_io_request* request)
   auto obj_data = gsl::span{request->buffer, request->wbuflen};
   utl::Dfmt(debug_info, FMT_STRING("Uploading {} bytes of data"),
             request->wbuflen);
-  if (auto result = m_storage.upload(obj_name, obj_chunk, obj_data)) {
+  if (auto result = m_storage->upload(obj_name, obj_chunk, obj_data)) {
     return true;
   } else {
-    PmStrcpy(errmsg, result.error().c_str());
+    PmStrcpy(errmsg, result.error().message.c_str());
     dev_errno = EIO;
+    request->canceled = result.error().code == StoreErrc::kCanceled;
     return false;
   }
+}
+
+// Runs on a read-ahead worker: no device state is touched, only the transport.
+bool DropletCompatibleDevice::ReadAheadFetch(const char* volname,
+                                             uint16_t chunk,
+                                             char* buffer,
+                                             uint32_t size,
+                                             uint32_t* received,
+                                             std::string* error)
+{
+  const std::string part = fmt::format(FMT_STRING("{:04d}"), chunk);
+  auto result
+      = m_storage->download(volname, part, {buffer, size}, std::nullopt);
+  if (!result) {
+    *error = result.error().message;
+    return false;
+  }
+  *received = static_cast<uint32_t>(result->size_bytes());
+  return true;
 }
 
 // Internal method for reading a chunk from the remote backing store.
@@ -333,48 +468,83 @@ bool DropletCompatibleDevice::ReadRemoteChunk(chunk_io_request* request)
   utl::Dfmt(debug_trace, FMT_STRING("Reading chunk {}/{}"), obj_name.data(),
             obj_chunk.data());
 
-  // check object metadata
-  auto obj_stat = m_storage.stat(obj_name, obj_chunk);
-  if (!obj_stat) {
-    PmStrcpy(errmsg, obj_stat.error().c_str());
+  auto fail = [this, request](int error, const std::string& message) {
+    PmStrcpy(errmsg, message.c_str());
     Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EIO;
+    dev_errno = error;
+    // A deferred label GET must not become VOL_NO_LABEL and autolabel a
+    // healthy existing volume. The mount's failed-job guards stop that path.
+    const bool writer_open
+        = request->read_mode == ChunkReadMode::kMetadata && request->for_write;
+    if ((request->read_mode == ChunkReadMode::kRange || writer_open)
+        && error != ENOENT) {
+      FailWriter(errmsg);
+    }
     return false;
-  } else if (obj_stat->size > request->wbuflen) {
+  };
+
+  size_t object_size = request->object_size;
+  if (request->read_mode != ChunkReadMode::kRange) {
+    auto stat = m_storage->stat(obj_name, obj_chunk);
+    if (!stat) {
+      const int error = request->read_mode == ChunkReadMode::kMetadata
+                                && stat.error().code == StoreErrc::kNotFound
+                            ? ENOENT
+                            : EIO;
+      return fail(error, stat.error().message);
+    }
+    object_size = stat->size;
+  }
+  if (object_size > request->wbuflen) {
     Mmsg3(errmsg,
           T_("Failed to read %s (%zu) to big to fit in chunksize of %" PRIu32
              " bytes\n"),
-          obj_name.data(), obj_stat->size, request->wbuflen);
-    Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EINVAL;
-    return false;
+          obj_name.data(), object_size, request->wbuflen);
+    return fail(EINVAL, std::string{errmsg});
+  }
+  if (request->read_mode == ChunkReadMode::kMetadata) {
+    *request->rbuflen = object_size;
+    return true;
   }
 
-  if (auto obj_data = m_storage.download(obj_name, obj_chunk,
-                                         {request->buffer, obj_stat->size})) {
+  size_t begin = 0, length = object_size;
+  std::optional<ByteRange> range;
+  if (request->read_mode == ChunkReadMode::kRange) {
+    begin = request->read_offset;
+    length = request->read_length;
+    if (begin > object_size || length > object_size - begin || length == 0) {
+      return fail(EINVAL, "Invalid chunk read range");
+    }
+    range = ByteRange{begin, length};
+  }
+
+  if (auto obj_data = m_storage->download(
+          obj_name, obj_chunk, {request->buffer + begin, length}, range)) {
+    if (SupportsPartialRead() && obj_data->size_bytes() != length) {
+      return fail(EIO, "Chunk download is shorter than its metadata range");
+    }
     *request->rbuflen = obj_data->size_bytes();
     return true;
   } else {
-    PmStrcpy(errmsg, obj_data.error().c_str());
-    Dmsg1(debug_info, "%s", errmsg);
-    dev_errno = EIO;
-    return false;
+    // A range was requested only after successful metadata: even a GET 404
+    // is an error here, not an empty object or permission to create one.
+    return fail(EIO, obj_data.error().message);
   }
 }
 
 bool DropletCompatibleDevice::TruncateRemoteVolume(DeviceControlRecord*)
 {
   const char* vol_name = getVolCatName();
-  const auto chunk_map = m_storage.list(vol_name);
+  const auto chunk_map = m_storage->list(vol_name);
   if (!chunk_map) {
-    PmStrcpy(errmsg, chunk_map.error().c_str());
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
     dev_errno = EIO;
     return false;
   }
   for (const auto& [chunk_name, stat] : *chunk_map) {
     if (is_chunk_name(chunk_name)) {
-      if (auto res = m_storage.remove(vol_name, chunk_name); !res) {
-        PmStrcpy(errmsg, res.error().c_str());
+      if (auto res = m_storage->remove(vol_name, chunk_name); !res) {
+        PmStrcpy(errmsg, res.error().message.c_str());
         dev_errno = EIO;
         return false;
       }
@@ -383,13 +553,13 @@ bool DropletCompatibleDevice::TruncateRemoteVolume(DeviceControlRecord*)
   return true;
 }
 
-ssize_t DropletCompatibleDevice::RemoteVolumeSize()
+std::optional<ssize_t> DropletCompatibleDevice::RemoteVolumeSize()
 {
-  const auto chunk_map = m_storage.list(getVolCatName());
+  const auto chunk_map = m_storage->list(getVolCatName());
   if (!chunk_map) {
-    PmStrcpy(errmsg, chunk_map.error().c_str());
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
     dev_errno = EIO;
-    return false;
+    return std::nullopt;
   }
   if (chunk_map->empty()) { return -1; }
   ssize_t total_size{0};
@@ -400,9 +570,17 @@ ssize_t DropletCompatibleDevice::RemoteVolumeSize()
 }
 
 
-bool DropletCompatibleDevice::d_flush(DeviceControlRecord*)
+// Waits for the uploads; a failure is reported in the job's log.
+bool DropletCompatibleDevice::d_flush(DeviceControlRecord* dcr)
 {
-  return WaitUntilChunksWritten();
+  JobControlRecord* jcr = dcr ? dcr->jcr : nullptr;
+  std::string reason;
+  if (WaitUntilChunksWritten(
+          [jcr] { return jcr != nullptr && jcr->IsJobCanceled(); }, reason)) {
+    return true;
+  }
+  Jmsg(jcr, M_ERROR, 0, "%s", reason.c_str());
+  return false;
 };
 
 int DropletCompatibleDevice::d_open(const char* pathname, int flags, int mode)
@@ -415,25 +593,62 @@ int DropletCompatibleDevice::d_open(const char* pathname, int flags, int mode)
 }
 
 ssize_t DropletCompatibleDevice::d_read(int t_fd, void* buffer, size_t count)
-{
-  return ReadChunked(t_fd, buffer, count);
-}
+{ return ReadChunked(t_fd, buffer, count); }
 
 ssize_t DropletCompatibleDevice::d_write(int t_fd,
                                          const void* buffer,
                                          size_t count)
-{
-  return WriteChunked(t_fd, buffer, count);
-}
+{ return WriteChunked(t_fd, buffer, count); }
 
 int DropletCompatibleDevice::d_close(int) { return CloseChunk(); }
 
 int DropletCompatibleDevice::d_ioctl(int, ioctl_req_t, char*) { return -1; }
 
+// Number and size of every chunk of the volume in a fresh listing.
+std::optional<std::map<int, size_t>> DropletCompatibleDevice::ListChunkSizes()
+{
+  const auto chunk_map = m_storage->list(getVolCatName());
+  if (!chunk_map) {
+    PmStrcpy(errmsg, chunk_map.error().message.c_str());
+    dev_errno = EIO;
+    return std::nullopt;
+  }
+  std::map<int, size_t> sizes;
+  for (const auto& [name, stat] : *chunk_map) {
+    if (is_chunk_name(name)) { sizes[std::stoi(name)] = stat.size; }
+  }
+  return sizes;
+}
+
+// Whether the chunk is in a fresh listing of the volume.
+ChunkPresence DropletCompatibleDevice::RemoteChunkPresence(int chunk)
+{
+  const auto sizes = ListChunkSizes();
+  if (!sizes) { return ChunkPresence::kUnknown; }
+  return sizes->count(chunk) > 0 ? ChunkPresence::kPresent
+                                 : ChunkPresence::kAbsent;
+}
+
 boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
                                            boffset_t offset,
                                            int whence)
 {
+  // The end of the volume is decided under the chunk lock, so that no other
+  // thread of this daemon adds a chunk in between.
+  std::unique_lock<std::recursive_mutex> chunk_lock(chunk_mutex_,
+                                                    std::defer_lock);
+  if (whence == SEEK_END) { chunk_lock.lock(); }
+
+  // A refused seek keeps the position and drops the chunk, so that nothing
+  // trusts a failed load.
+  const boffset_t saved_offset = offset_;
+  auto refuse = [this, saved_offset](int error) {
+    offset_ = saved_offset;
+    InvalidateCurrentChunk();
+    errno = error;
+    return -1;
+  };
+
   switch (whence) {
     case SEEK_SET:
       offset_ = offset;
@@ -444,6 +659,7 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
     case SEEK_END: {
       ssize_t volumesize;
 
+      dev_errno = 0;
       volumesize = ChunkedVolumeSize();
 
       utl::Dfmt(debug_info, FMT_STRING("Current volumesize: {}"), volumesize);
@@ -451,23 +667,64 @@ boffset_t DropletCompatibleDevice::d_lseek(DeviceControlRecord*,
       if (volumesize >= 0) {
         offset_ = volumesize + offset;
       } else {
-        return -1;
+        if (dev_errno == EIO) {
+          PoolMem message(PM_MESSAGE);
+          Mmsg(message, T_("Cannot list volume %s on device %s: %s\n"),
+               getVolCatName(), print_name(), errmsg);
+          FailWriter(message.c_str());
+        }
+        return refuse(EIO);
       }
+      // The chunk with unflushed data holds the end; LoadChunk would drop it.
+      if (offset == 0 && CurrentChunkNeedsFlushing()) { return offset_; }
       break;
     }
     default:
-      return -1;
+      return refuse(EINVAL);
   }
 
-  if (!LoadChunk()) { return -1; }
+  if (!LoadChunk(whence == SEEK_END)) {
+    // A volume that ends after a full chunk has no chunk at its end yet.
+    if (whence != SEEK_END || offset != 0) { return refuse(EIO); }
+    // Chunks of this daemon that are still being uploaded are not listed yet.
+    std::string reason;
+    if (!WaitForPendingChunks([] { return CallingJobCanceled(); }, reason)) {
+      PmStrcpy(errmsg, reason.c_str());
+      return refuse(EIO);
+    }
+    // The end of a volume that cannot be read must fail the job: the mount
+    // would otherwise mark the healthy volume Error.
+    auto refuse_end = [this, &refuse] {
+      if (SupportsPartialRead()) {
+        PoolMem message(PM_MESSAGE);
+        Mmsg(message, T_("Cannot read the end of volume %s on device %s: %s\n"),
+             getVolCatName(), print_name(), errmsg);
+        FailWriter(message.c_str());
+      }
+      return refuse(EIO);
+    };
+    // A chunk in transit was missing from the size: size again, load the end.
+    const ssize_t waited_size = ChunkedVolumeSize();
+    if (waited_size < 0) { return refuse_end(); }
+    const bool moved = waited_size != offset_;
+    offset_ = waited_size;
+    // The failed load left the chunk position on the old end: load afresh.
+    if (moved) { InvalidateCurrentChunk(); }
+    if (!(moved && LoadChunk(true))) {
+      const auto sizes = ListChunkSizes();
+      if (!sizes) { return refuse_end(); }
+      if (!StartEmptyChunkAfterLast(*sizes)) {
+        // A damaged layout keeps the volume-Error handling of the mount.
+        return LayoutIsHealthy(*sizes) ? refuse_end() : refuse(EIO);
+      }
+    }
+  }
 
   return offset_;
 }
 
 bool DropletCompatibleDevice::d_truncate(DeviceControlRecord* dcr)
-{
-  return TruncateChunkedVolume(dcr);
-}
+{ return TruncateChunkedVolume(dcr); }
 
 REGISTER_SD_BACKEND(dplcompat, DropletCompatibleDevice)
 

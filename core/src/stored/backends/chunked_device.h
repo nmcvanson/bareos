@@ -2,7 +2,7 @@
    BAREOS® - Backup Archiving REcovery Open Sourced
 
    Copyright (C) 2015-2017 Planets Communications B.V.
-   Copyright (C) 2018-2024 Bareos GmbH & Co. KG
+   Copyright (C) 2018-2026 Bareos GmbH & Co. KG
 
    This program is Free Software; you can redistribute it and/or
    modify it under the terms of version three of the GNU Affero General Public
@@ -31,7 +31,20 @@
 #include <sys/types.h>
 #include "stored/dev.h"
 #include "ordered_cbuf.h"
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 template <typename T> class alist;
 
@@ -48,6 +61,9 @@ struct DeviceStatusInformation;
  * (write buffer is empty).
  */
 #define DEFAULT_RECHECK_INTERVAL_WRITE_BUFFER 10
+
+// Seconds without upload progress after which a flush wait fails.
+#define DEFAULT_FLUSH_TIMEOUT 1800
 
 /*
  * Chunk the volume into chunks of this size.
@@ -77,9 +93,44 @@ enum thread_wait_type
   WAIT_JOIN_THREAD    /* Perform a pthread_join() on exit. */
 };
 
+// Whether a chunk is in the volume's listing.
+enum class ChunkPresence
+{
+  kPresent,
+  kAbsent,
+  kUnknown  // the listing failed
+};
+
+// What the failed read of a chunk means for a restore.
+enum class ReadEnd
+{
+  kEndOfVolume,  // the volume ends before this chunk
+  kShortVolume,  // the catalog counts bytes the volume does not have
+  kReadError
+};
+
+/* A read that fails ends the volume only when the chunk is absent and starts
+ * at or after the catalog size of the volume; anything else is an error. */
+constexpr ReadEnd DecideReadEnd(ChunkPresence presence,
+                                uint64_t chunk_start,
+                                uint64_t volume_bytes)
+{
+  if (presence != ChunkPresence::kAbsent) { return ReadEnd::kReadError; }
+  return chunk_start >= volume_bytes ? ReadEnd::kEndOfVolume
+                                     : ReadEnd::kShortVolume;
+}
+
 struct thread_handle {
   thread_wait_type type; /* See WAIT_*_THREAD thread_wait_type enum */
   pthread_t thread_id;   /* Actual threadid */
+};
+
+// Upload requests are zero-initialized; their unused read mode stays Full.
+enum class ChunkReadMode
+{
+  kFull = 0,
+  kMetadata,
+  kRange
 };
 
 struct chunk_io_request {
@@ -90,12 +141,24 @@ struct chunk_io_request {
   uint32_t* rbuflen;   /* Size of the actual valid data in the chunk (Read) */
   uint8_t tries; /* Number of times the flush was tried to the backing store */
   bool release;  /* Should we release the data to which the buffer points ? */
+  int64_t retry_at_ms; /* Steady clock time (ms) before which no retry */
+  bool lease_conflict; /* Set by FlushRemoteChunk: chunk is being uploaded */
+  bool canceled;       /* Set by FlushRemoteChunk: the job was canceled */
+  ChunkReadMode read_mode{ChunkReadMode::kFull};
+  uint32_t read_offset{};
+  uint32_t read_length{};
+  uint32_t object_size{};  // known metadata size for a ranged read
+  bool for_write{};        // the device is open for writing
 };
+
+static_assert(std::is_trivially_copyable_v<chunk_io_request>);
 
 struct chunk_descriptor {
   ssize_t chunk_size;     /* Total size of the memory chunk */
   char* buffer;           /* Data */
-  uint32_t buflen;        /* Size of the actual valid data in the chunk */
+  uint32_t buflen;        /* Object size; loaded bytes may cover only a range */
+  uint32_t loaded_begin;  // valid bytes [loaded_begin, loaded_end) in buffer
+  uint32_t loaded_end;
   boffset_t start_offset; /* Start offset of the current chunk */
   boffset_t end_offset;   /* End offset of the current chunk */
   bool need_flushing; /* Data is dirty and needs flushing to backing store */
@@ -106,7 +169,62 @@ struct chunk_descriptor {
 
 class InflightChunkException : public std::exception {};
 
+// Outcome of queueing a chunk for upload.
+enum class EnqueueResult
+{
+  kQueued,
+  kKeptButRefused,  // queued past the capacity; the write must fail
+  kFailed           // not queued
+};
+
+/* A chunk of a device without io-threads that is not uploaded yet; it owns
+ * its buffer until an upload succeeds. */
+struct KeptChunk {
+  std::string volname;
+  uint16_t chunk{};
+  char* buffer{};
+  uint32_t buflen{};
+  uint8_t tries{};
+  int64_t retry_at_ms{};
+  bool uploading{};
+};
+
+// Snapshot of a device's upload progress, read by a waiting flush.
+struct UploadState {
+  uint64_t events{};       // finished upload tries
+  uint64_t done{};         // successful uploads
+  std::string last_error;  // of an upload or a size check
+  std::string readonly_reason;
+  int64_t outcome_ms{};       // steady clock of the last finished try, 0 = none
+  bool outcome_ok{};          // whether that try uploaded
+  std::string outcome_error;  // why it failed
+  // Counters since the daemon started, shown by the status.
+  uint64_t received_chunks{};  // chunks handed to the upload path
+  uint64_t uploaded_chunks{};  // uploaded chunks that hold data
+  uint64_t uploaded_bytes{};   // bytes of the uploaded chunks
+  uint64_t failed_tries{};     // upload tries that failed
+  uint64_t retried_tries{};    // upload tries that were not the first
+};
+
+/* One speculative read of a chunk after the current one of a read-only volume.
+ * Its worker fills buffer and reports by value; it never touches the device. */
+struct ReadAheadSlot {
+  std::string volname;
+  uint16_t chunk{};
+  char* buffer{};
+  uint32_t size{};  // capacity of buffer
+  std::atomic<bool> stop{false};
+  std::mutex mutex;
+  std::condition_variable finished_cv;
+  bool finished{};  // guarded by mutex
+  bool ok{};
+  uint32_t received{};
+  std::string error;
+  std::thread worker;
+};
+
 class ChunkedDevice : public Device {
+  friend class ChunkStateProbe;  // unit test of the chunk state
   class InflightLease {
     ChunkedDevice* m_device;
     chunk_io_request* m_request;
@@ -145,34 +263,89 @@ class ChunkedDevice : public Device {
   // Private Members
   bool io_threads_started_{};
   bool end_of_media_{};
-  bool readonly_{};
+  std::atomic<bool> readonly_{};
   uint8_t inflight_chunks_{};
   char* current_volname_{};
   ordered_circbuf* cb_{};
   alist<thread_handle*>* thread_ids_{};
   chunk_descriptor* current_chunk_{};
 
+  // Finished upload tries wake a waiting flush; guarded by upload_mutex_.
+  std::mutex upload_mutex_;
+  std::condition_variable upload_cv_;
+  UploadState upload_state_;
+  // Requests per volume that are queued or held by an io-thread.
+  std::map<std::string, int> pending_requests_;
+  // Per pending chunk: how many requests and when the first was counted.
+  std::map<std::pair<std::string, uint16_t>, std::pair<int, int64_t>>
+      pending_since_;
+  // Whole-object and ranged GETs made by the job thread and the read-ahead
+  // workers; shown by the status.
+  std::atomic<uint64_t> download_objects_{};
+  std::atomic<uint64_t> download_bytes_{};
+  std::atomic<uint64_t> download_failures_{};
+
+  // Chunks of blocking uploads still to be uploaded; guarded by kept_mutex_.
+  std::mutex kept_mutex_;
+  std::list<KeptChunk> kept_chunks_;
+  std::atomic<size_t> kept_count_{};
+  // Set when a refused seek dropped the current chunk: reads and writes fail
+  // until a seek loads a chunk or the device is opened again.
+  std::atomic<bool> chunk_dropped_{};
+
+  // Speculative reads ahead of a sequential restore; used by the job thread
+  // under chunk_mutex_ only. At most kReadAheadChunks buffers are in use.
+  static constexpr size_t kReadAheadChunks = 2;
+  std::vector<std::unique_ptr<ReadAheadSlot>> read_ahead_;
+
   // Private Methods
+  bool TakeReadAhead(uint16_t chunk);
+  void TopUpReadAhead();
+  std::vector<std::unique_ptr<ReadAheadSlot>>::iterator EraseReadAhead(
+      std::vector<std::unique_ptr<ReadAheadSlot>>::iterator it);
   char* allocate_chunkbuffer();
   void FreeChunkbuffer(char* buffer);
   void FreeChunkIoRequest(chunk_io_request* request);
-  bool StartIoThreads();
   void StopThreads();
-  bool EnqueueChunk(chunk_io_request* request);
+  EnqueueResult EnqueueChunk(chunk_io_request* request, std::string& refusal);
+  bool RequeueChunk(chunk_io_request* request);
   bool FlushChunk(bool release_chunk, bool move_to_next_chunk);
-  bool ReadChunk();
+  bool FlushChunkCopy(std::string& refusal);
+  bool ReadChunk(bool full = false);
+  bool EnsureChunkBytes(size_t offset, size_t count, bool full = false);
   bool is_written();
+  void NotifyUploadEvent(bool uploaded,
+                         const std::string& error,
+                         size_t bytes = 0,
+                         bool retry = false);
+  void SetLastError(const std::string& error);
+  void SetReadonly(const std::string& reason);
+  void ClearReadonlyIfDrained();
+  UploadState GetUploadState();
+  void CountPendingRequest(const char* volname, uint16_t chunk, int change);
+  void CountReceivedChunk(size_t bytes);
+  int64_t OldestPendingMs();
+  int PendingChunksOfVolume(const char* volname);
+  void KeepCurrentChunk(bool failed, const std::string& error);
+  bool UploadKeptChunk(std::list<KeptChunk>::iterator entry);
+  void TryKeptChunks(bool only_due, size_t limit = SIZE_MAX);
+  void ClearKeptReadonly();
 
  protected:
   // Protected Members
+  /* Guards current_chunk_; the release flush runs without the device lock.
+   * Lock order: device lock, chunk_mutex_, kept_mutex_, upload_mutex_. */
+  std::recursive_mutex chunk_mutex_;
   uint8_t io_threads_{};
   uint8_t io_slots_{};
   uint8_t retries_{};
+  uint32_t flush_timeout_{DEFAULT_FLUSH_TIMEOUT};
   uint64_t chunk_size_{};
   boffset_t offset_{};
   bool use_mmap_{};
 
   // Protected Methods
+  void FailWriter(const char* message);
   std::optional<InflightLease> getInflightLease(chunk_io_request* request);
   bool SetInflightChunk(chunk_io_request* request);
   void ClearInflightChunk(chunk_io_request* request);
@@ -184,15 +357,60 @@ class ChunkedDevice : public Device {
   int CloseChunk();
   bool TruncateChunkedVolume(DeviceControlRecord* dcr);
   ssize_t ChunkedVolumeSize();
-  bool LoadChunk();
-  bool WaitUntilChunksWritten();
+  bool LoadChunk(bool full = false);
+  void InvalidateCurrentChunk();
+  // Ends every speculative read and waits for its worker; also called by a
+  // derived class before the transport is destroyed.
+  void StopReadAhead();
+  bool ReadEndsTheVolume();
+  bool CurrentChunkNeedsFlushing();
+  bool StartEmptyChunkAfterLast(const std::map<int, size_t>& chunk_sizes);
+  bool LayoutIsHealthy(const std::map<int, size_t>& chunk_sizes);
+  bool WaitForPendingChunks(const std::function<bool()>& is_canceled,
+                            std::string& reason);
+  bool WaitUntilChunksWritten(const std::function<bool()>& is_canceled,
+                              std::string& reason);
+  std::vector<std::pair<std::string, uint16_t>> ChunksNotUploaded();
+  // Virtual so that tests can cancel the writer or fail the thread start.
+  virtual bool WriterCanceled();
+  virtual bool StartIoThreads();
 
   // Methods implemented by inheriting class.
   virtual bool CheckRemoteConnection() = 0;
   virtual bool FlushRemoteChunk(chunk_io_request* request) = 0;
   virtual bool ReadRemoteChunk(chunk_io_request* request) = 0;
-  virtual ssize_t RemoteVolumeSize() = 0;
+  virtual bool SupportsPartialRead() const { return false; }
+  // Requests the transport retried since the daemon started, for the status.
+  virtual uint64_t TransportRetries() const { return 0; }
+  // Whether ReadAheadFetch may run on a worker thread.
+  virtual bool SupportsReadAhead() const { return false; }
+  /* Downloads the whole chunk into buffer on a worker thread; it must not
+   * touch the device state and must end when its stop flag is set. */
+  virtual bool ReadAheadFetch(const char* volname,
+                              uint16_t chunk,
+                              char* buffer,
+                              uint32_t size,
+                              uint32_t* received,
+                              std::string* error)
+  {
+    (void)volname;
+    (void)chunk;
+    (void)buffer;
+    (void)size;
+    (void)received;
+    (void)error;
+    return false;
+  }
+  // Volume size, -1 when it has no chunks, nullopt (errmsg set) on error.
+  virtual std::optional<ssize_t> RemoteVolumeSize() = 0;
   virtual bool TruncateRemoteVolume(DeviceControlRecord* dcr) = 0;
+  // Whether the chunk is in a fresh listing; unknown ends a failed read as an
+  // error.
+  virtual ChunkPresence RemoteChunkPresence(int chunk)
+  {
+    (void)chunk;
+    return ChunkPresence::kUnknown;
+  }
 
  public:
   // Public Methods

@@ -44,9 +44,31 @@ ioslots
    greater than 1 for cached and to 0 for direct writing.
 
 retries
-   Number of writing tries before discarding the data (0-255, default: 0).
-   Setting this to a value greater zero will cause data-loss if the backend is
-   not available.
+   Number of upload tries of a chunk after which the device refuses further
+   writes (0-255, default: 0 = no limit). The chunk is not discarded: it stays
+   queued and is retried until it is uploaded. Jobs writing to the device in
+   the meantime fail with a message naming the chunk. Once every queued chunk
+   is uploaded, the device takes writes again.
+
+flush_timeout
+   Seconds without a successful chunk upload after which a job that waits for
+   its uploads at its end fails with "Failed to flush device", and a job that
+   waits for a free upload slot fails with "no upload progress" (default: 1800,
+   minimum 1). It must be longer than the upload of one chunk takes. The
+   chunks still queued are kept and retried. After a refused write the volume
+   is marked Full and the device refuses writes until the chunks are uploaded;
+   after a failed wait at the end of a job, the next append to the volume
+   compares its size with the catalog. While a device holds chunks it cannot
+   upload, every later job writing to it fails by its own deadline. A failed
+   upload is tried again after 5 seconds, then after a pause that doubles with
+   each try up to 60 seconds, but at most a quarter of ``flush_timeout``. A
+   job canceled while it waits for its uploads ends within a few seconds; a
+   job that only reads from the device does not wait for them.
+
+transport
+   How the device reaches the object storage: ``program`` (default) runs the
+   wrapper program for every operation, ``native`` talks to the S3 service
+   itself (see `Native S3 transport`_). Other values are refused.
 
 program
    The wrapper program to use. Either an absolute path or the name of a program
@@ -54,7 +76,8 @@ program
 
 program_timeout
    Timeout in seconds after which the wrapper program is presumed dead if it
-   does not respond to I/O operations (default: 30).
+   does not respond to I/O operations (default: 30). Output of the program
+   counts as a response, so a ``list`` that keeps printing is not killed.
 
 
 .. tip::
@@ -67,6 +90,135 @@ program_timeout
    memory for the device. With larger chunksize settings, this escalates pretty
    quickly. Make sure your have enough memory or reduce the number of ioslots.
 
+.. note::
+   Memory: each concurrent backup job on a dplcompat device holds up to the
+   value of the Storage Daemon directive Maximum Append Queue Size (bytes;
+   0 = no bound) of client data in the Storage Daemon, plus
+   :math:`(iothreads * ioslots + 1) * chunksize` bytes of chunk buffers on the
+   device.
+
+.. note::
+   Sizing the memory of a Storage Daemon (a rule of thumb, not a limit): for every
+   device that is writing at the same time add
+   :math:`MaximumAppendQueueSize + (iothreads * ioslots + 1) * chunksize` per
+   concurrent job, and for every device that is restoring with
+   ``transport=native`` add up to :math:`3 * chunksize` (the chunk being read
+   and the two read ahead). The default of Maximum Append Queue Size is 0, no
+   bound: set it on a Storage Daemon that serves many concurrent backups, or
+   the queue of a slow backend grows with the client data.
+
+.. note::
+   With ``iothreads`` set to 0 each chunk is uploaded while the job writes. If
+   that upload fails, the job fails with "could not upload chunk N of volume V"
+   and the volume is marked Full. The chunk is kept in the storage daemon's
+   memory and the device refuses writes: every job writing to it fails with
+   "refuses writes", also one that wants to mount another volume. The kept
+   chunk is tried again when a job that waits for its uploads at its end does
+   so (within ``flush_timeout``, pauses as above), and once whenever the device
+   is opened or closed. When it is uploaded, the device takes writes again. A
+   job ends OK only after every kept chunk of the device is uploaded. At most
+   two chunks are kept per device (a warning names more); they are lost only
+   if the storage daemon stops, which it then logs. Canceling a job that
+   retries kept chunks takes up to ``program_timeout`` plus one second when
+   the backend hangs instead of failing. With ``transport=native``, canceling
+   a job ends a retry pause at once, a request that has moved no data within
+   about two seconds, and an upload that is sent but not answered within about
+   twelve seconds; the chunk stays kept. A transfer that is still moving
+   finishes first, also its slow tail (the send buffers draining and the
+   reply), but only up to those twelve seconds. This applies to a canceled
+   job; canceling a job that has already failed does not shorten its last
+   kept-chunk try. With ``Maximum Concurrent Jobs`` above 1 on the device, a
+   job may fail and the device refuse writes while another job uploads the
+   same chunk at its end; no data is lost. Use ``iothreads`` of 1 or more for
+   concurrent jobs on one device.
+
+.. note::
+   A device that refuses writes, for any volume, also fails a job whose own
+   chunks are all uploaded when it ends ("refuses writes"), since the device
+   cannot tell whose data the refused chunks hold.
+
+.. note::
+   Keep ``No Rewind On Close = yes`` (the default) on dplcompat devices. With
+   ``no`` the device rewinds before it closes, and a chunk that is not stored
+   yet when a job on a shared device closes it can be lost.
+
+.. note::
+   While a device refuses writes, each backup job that tries to open it marks
+   the volume it was given in Error ("not on device", "Marking Volume ... in
+   Error"), also a healthy volume. Restores read Error volumes as usual. Once
+   the storage daemon logs that the device "takes writes again", compare the
+   sizes of each such volume's objects in the bucket with the catalog's
+   VolBytes (``s3cmd ls s3://<bucket>/<volume>/`` against
+   ``list volume=<volume>``). If the bucket holds at least VolBytes:
+
+   - a volume named in a job's "could not upload chunk N of volume V" or
+     "refuses writes: chunk N of volume V" message held a kept chunk:
+     ``update volume=<volume> volstatus=Used``, so nothing is appended to it;
+   - a volume named only in "not on device" or "Marking Volume ... in Error"
+     is healthy: ``update volume=<volume> volstatus=Append``.
+
+   A volume whose bucket holds less than VolBytes stays in Error.
+
+.. warning::
+   Do not purge, truncate or relabel a dplcompat volume while chunks of it may
+   still wait for upload in a storage daemon, that is after a job that wrote
+   to it was canceled or ended with "Failed to flush device", "made no
+   progress", "no upload progress", "could not upload chunk", "could not
+   queue chunk" or "refuses writes". Wait until the sizes of the volume's
+   objects in the bucket add up to at least the catalog's VolBytes
+   (``s3cmd ls s3://<bucket>/<volume>/`` against ``list volume=<volume>``), or
+   until every storage daemon that wrote to it has been restarted (its queue
+   is then gone, with any data not yet uploaded). Only the device that holds
+   the chunks refuses the truncate ("cannot be truncated before they are
+   uploaded"); another device or another storage daemon does not know about
+   them. When a backup job recycles such a volume, the refused truncate fails
+   that job ("Truncate error") and marks the volume Error; once its chunks
+   are uploaded, ``update volume=<volume> volstatus=Recycle`` lets it be
+   recycled again. If a storage daemon stops while a failed job's chunks are
+   still queued, that job's Full volume stays shorter than the catalog says.
+
+.. note::
+   With ``transport=native`` a volume is opened with a metadata request only;
+   the label, a seek and a restore of single files read the bytes they need
+   with ranged requests, and a sequential restore then reads each chunk once.
+   While a restore reads a volume sequentially its device reads at most the
+   next two chunks ahead: it holds up to two more buffers of ``chunksize``
+   while the restore runs, and ends those reads on a seek, when it closes the
+   volume and when the job is canceled. A chunk that cannot be read ahead is
+   read again when the restore needs it, and fails the restore only then.
+   Appending to a volume always loads the whole last chunk first, and a chunk
+   that cannot be read in full, with a metadata request that succeeded, fails
+   the job; the volume is not marked Error and no new label is written.
+
+.. note::
+   ``status storage=<name>`` shows, from memory only and without a request to
+   the backend, for each dplcompat device: the chunks received, uploaded,
+   pending (queued, uploading, kept) and waiting for a retry, the age of the
+   oldest pending chunk, the chunks and bytes uploaded, failed upload tries
+   and retried tries, and the objects and bytes downloaded with failed
+   downloads and, for ``transport=native``, the failed request attempts of
+   the transport (all request kinds, the last attempt of a chain included;
+   not a rate). The counters count from the start of the storage daemon and
+   are approximate.
+
+.. note::
+   With read-ahead an outage of the backend during a restore is reported
+   about one retry chain (about 30 seconds with the defaults) later than
+   without it: the speculative read makes its own attempts before the
+   restore reads the chunk itself.
+
+.. note::
+   Versions without the ``flush_timeout`` option behave differently: a backend
+   outage keeps a job and its device waiting without limit, also a job that
+   only reads; a failed upload is retried only every 300 seconds; ``retries``
+   greater than zero discards a chunk after its last try; a write refused by
+   the device, or a failed upload with ``iothreads`` set to 0, lets the job go
+   on with another volume without that chunk's data; a ``list`` that keeps
+   printing longer than ``program_timeout`` is killed; an empty ``list``
+   output is an error; a failed ``list`` of the volume is read as a volume
+   size of 0, so the volume is marked Error for a size mismatch instead of for
+   the failed listing; and a volume can be truncated while its chunks wait for
+   upload. Such a version refuses a device configured with ``flush_timeout``.
 
 Example
 '''''''
@@ -104,6 +256,97 @@ We want to configure a device **ObjectStore**:
    split into multiple lines.
    This is still a single value containing a comma-separated list of key-value
    pairs.
+
+Native S3 transport
+^^^^^^^^^^^^^^^^^^^
+With ``transport=native`` the Storage Daemon talks to the S3 service itself
+(HTTP and TLS through libcurl, signature version 4, connections kept open
+between requests) instead of starting a wrapper program for every operation.
+The object layout is the same as for the wrapper, so Volumes written with one
+transport can be read with the other. The native transport is only available
+when dplcompat was built with libcurl and not on Windows; otherwise a device
+configured with it is refused at start with "dplcompat was built without the
+native S3 transport". The options ``program`` and ``program_timeout`` cannot be
+used with it.
+
+s3cfg
+   Path of an ``s3cmd`` configuration file (required). Its ``access_key``,
+   ``secret_key``, ``host_base``, ``host_bucket``, ``use_https``,
+   ``bucket_location``, ``ca_certs_file`` and ``check_ssl_certificate`` are
+   used. The keys come only from this file: no device option, environment
+   variable or command line carries a key, and the Storage Daemon never
+   writes a key or a request signature to a log. The file should be readable
+   only by the user of the Storage Daemon; a file readable by others produces
+   a warning. Indented continuation lines are not supported.
+
+bucket
+   Name of the bucket (required).
+
+prefix
+   Text put in front of every object name, ``<prefix>/<Volume>/<chunk>``
+   (default: none).
+
+storage_class
+   Storage class of the uploaded objects (default: the service's default).
+
+endpoint
+   ``host[:port]`` of the service, overriding ``host_base`` of the file.
+
+region
+   Region used for signing, overriding ``bucket_location`` of the file.
+
+path_style
+   ``yes`` puts the bucket in the path, ``no`` in the host name, ``auto``
+   (default) uses the host name only if ``host_bucket`` of the file contains
+   ``%(bucket)s``.
+
+ca_file
+   File with the CA certificates that verify the service, overriding
+   ``ca_certs_file`` of the file (default: the system's certificates).
+
+connect_timeout
+   Seconds allowed for connecting (default: 10, 1 to 600).
+
+stall_timeout
+   Seconds without a single byte moving after which a request is given up
+   (default: 120, 1 to 3600).
+
+request_retries
+   Number of times a request that failed with a server error (5xx, 429), a
+   timeout or a connection error is repeated after a pause that doubles from
+   one second, up to 60 seconds (default: 5, 0 to 20). Errors that cannot
+   change, such as access denied, are not repeated.
+
+content_md5
+   ``yes`` (default) sends the MD5 sum of every uploaded chunk, so the service
+   refuses a chunk that arrived damaged.
+
+Example
+'''''''
+A device that writes to a Ceph RGW service with path style addressing:
+
+.. code-block:: bareosconfig
+   :caption: bareos-sd.d/device/RgwStorage.conf
+
+   Device {
+     Name = RgwStorage
+     Media Type = S3
+     Archive Device = Object Storage # currently unused, but required
+     Device Options = "transport=native"
+                      ",s3cfg=/etc/bareos/s3cfg"
+                      ",bucket=bareos"
+                      ",region=us-east-1"
+                      ",path_style=yes"
+                      ",iothreads=2"
+                      ",ioslots=2"
+                      ",chunksize=67108864"
+     Device Type = dplcompat
+     LabelMedia = yes
+     Random Access = yes
+     AutomaticMount = yes
+     RemovableMedia = no
+     AlwaysOpen = no
+   }
 
 Director
 ^^^^^^^^
