@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./environment
+if [[ -s "$tmp/sd-b-sd.pid" ]]; then
+  BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos-sd2" \
+    BAREOS_SD_PORT="$BAREOS_STORAGE2_PORT" \
+    BAREOS_PIDFILE_PREFIX="$tmp/sd-b-" \
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop || true
+fi
+"${BAREOS_SCRIPTS_DIR}/bareos-ctl-fd" stop || true
+"${BAREOS_SCRIPTS_DIR}/bareos-ctl-dir" stop || true
+BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos" \
+  BAREOS_SD_PORT="$BAREOS_STORAGE_PORT" \
+  BAREOS_PIDFILE="$tmp/sd-a-sd.pid" \
+  "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop || true
+if [[ -s "$tmp/s3-stub.pid" ]]; then
+  kill "$(cat "$tmp/s3-stub.pid")" 2>/dev/null || true
+fi
+"${BAREOS_SCRIPTS_DIR}/cleanup"

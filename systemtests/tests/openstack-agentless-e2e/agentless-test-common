@@ -1,0 +1,369 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+agentless_begin()
+{
+  TestName="$(basename "$0")"
+  export TestName
+  . ./environment
+  . "${BAREOS_SCRIPTS_DIR}"/functions
+  export PATH="$current_test_directory/sbin:$current_test_directory/bin:$PATH"
+  export PYTHONPATH="$current_test_directory/python-modules${PYTHONPATH:+:$PYTHONPATH}"
+  export AGENTLESS_FAKE_ROOT="$tmp/fakecloud"
+  export AGENTLESS_CONTROL_DIR="$tmp/s3-control"
+  export AGENTLESS_REQUESTS="$AGENTLESS_CONTROL_DIR/requests.log"
+  export BCONSOLE_TIMEOUT=240s
+  start_test
+}
+
+fake_cli()
+{
+  python3 -m bareos_openstack.fake_backend "$@" --root "$AGENTLESS_FAKE_ROOT"
+}
+
+console_output()
+{
+  timeout 30s "${BAREOS_BCONSOLE_BINARY}" -c "${BAREOS_CONFIG_DIR}" <<<"$1"
+}
+
+queued_jobid()
+{
+  grep 'Job queued. JobId=' "$1" | tail -n 1 | sed -n 's/^.*JobId=//p'
+}
+
+expect_termination()
+{
+  local jobid="$1" expected="$2" output
+  output=$(console_output "list joblog jobid=${jobid}")
+  printf '%s\n' "$output" >"$tmp/joblog-${jobid}.txt"
+  if ! grep -q "Termination:.*${expected}" <<<"$output"; then
+    echo "job ${jobid} did not terminate with ${expected}" >&2
+    cat "$tmp/joblog-${jobid}.txt" >&2
+    return 1
+  fi
+}
+
+request_offset()
+{
+  if [[ -f "$AGENTLESS_REQUESTS" ]]; then
+    wc -l <"$AGENTLESS_REQUESTS"
+  else
+    echo 0
+  fi
+}
+
+save_request_window()
+{
+  local tag="$1" before="$2"
+  local window="$tmp/requests-${tag}.log"
+  if [[ -f "$AGENTLESS_REQUESTS" ]]; then
+    sed -n "$((before + 1)),\$p" "$AGENTLESS_REQUESTS" >"$window"
+  else
+    : >"$window"
+  fi
+  echo "request_window=${tag} path=${window} lines=$(wc -l <"$window")"
+  cat "$window"
+}
+
+assert_signed_window()
+{
+  local tag="$1" before="$2"
+  local window="$tmp/requests-${tag}.log"
+  save_request_window "$tag" "$before"
+  if ! grep -Eq '^(PUT|GET|HEAD) /testbucket/[^ ]* [0-9]{3} sig=ok' "$window"; then
+    echo "${tag}: no successful signed request in this job window" >&2
+    return 1
+  fi
+  if grep -Eq 'sig=(bad|none)' "$window"; then
+    echo "${tag}: invalid or unsigned S3 request in this job window" >&2
+    grep -E 'sig=(bad|none)' "$window" >&2
+    return 1
+  fi
+}
+
+assert_successful_puts()
+{
+  local tag="$1" volume="$2" minimum="$3"
+  local window="$tmp/requests-${tag}.log"
+  local count
+  count=$(grep -Ec "^PUT /testbucket/${volume}/[^ ]+ 200 sig=ok" "$window" || :)
+  if ((count < minimum)); then
+    echo "${tag}: expected at least ${minimum} successful signed PUTs for ${volume}, got ${count}" >&2
+    return 1
+  fi
+  echo "successful_puts=${tag} volume=${volume} count=${count}"
+  grep -E "^PUT /testbucket/${volume}/[^ ]+ 200 sig=ok" "$window"
+}
+
+assert_successful_gets()
+{
+  local tag="$1" volume="$2" minimum="$3"
+  local window="$tmp/requests-${tag}.log"
+  local count
+  count=$(grep -Ec "^GET /testbucket/${volume}/[^ ]+ (200|206) sig=ok" "$window" || :)
+  if ((count < minimum)); then
+    echo "${tag}: expected at least ${minimum} successful signed GETs for ${volume}, got ${count}" >&2
+    return 1
+  fi
+  echo "successful_gets=${tag} volume=${volume} count=${count}"
+  grep -E "^GET /testbucket/${volume}/[^ ]+ (200|206) sig=ok" "$window"
+}
+
+run_group_backup()
+{
+  local tag="$1" level="$2" expected_storage="$3" expected_chunks="$4"
+  local volume="$5" pool="${6:-}" fileset="${7:-}" before log jobid joblog files count
+  before=$(request_offset)
+  log="$tmp/backup-${tag}.log"
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+run job=backup-openstack-group${fileset:+ fileset=${fileset}}${pool:+ pool=${pool}} level=${level} yes
+wait
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds"
+  jobid=$(queued_jobid "$log")
+  [[ -n "$jobid" ]] || {
+    echo "${tag}: no JobId in bconsole output" >&2
+    return 1
+  }
+  expect_termination "$jobid" "Backup OK"
+  joblog="$tmp/joblog-${jobid}.txt"
+  if [[ "$tag" == failover ]]; then
+    grep -Fq 'using "S3a"' "$joblog"
+    grep -Fq 'failed over to "S3b" after 2 attempts' "$joblog"
+  elif ! grep -Fq "using \"${expected_storage}\"" "$joblog"; then
+    echo "${tag}: job did not select ${expected_storage}" >&2
+    cat "$joblog" >&2
+    return 1
+  fi
+  if ! grep -Fq 'policy ListedOrder' "$joblog"; then
+    echo "${tag}: ListedOrder policy was not reported" >&2
+    return 1
+  fi
+  files="$tmp/files-${jobid}.txt"
+  console_output "list files jobid=${jobid}" >"$files"
+  count=$(grep -c '\.chunk' "$files" || :)
+  if [[ "$count" -ne "$expected_chunks" ]]; then
+    echo "${tag}: expected ${expected_chunks} chunk files, got ${count}" >&2
+    cat "$files" >&2
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$tag" "$jobid" "$expected_storage" "$volume" \
+    >>"$tmp/wave1b-jobs.tsv"
+  echo "job=${tag} JobId=${jobid} level=${level} selected=${expected_storage} chunks=${count} volume=${volume}"
+  grep 'Storage group:' "$joblog" || :
+  assert_signed_window "$tag" "$before"
+  assert_successful_puts "$tag" "$volume" 1
+  if [[ "$tag" == full-group ]]; then
+    assert_successful_puts "$tag" "$volume" 3
+  fi
+  if [[ "$tag" == *incremental* ]]; then
+    if grep -qi 'no metadata of the previous backup' "$joblog"; then
+      echo "${tag}: unexpected missing previous backup metadata warning" >&2
+      return 1
+    fi
+  fi
+  LAST_JOB_ID="$jobid"
+}
+
+run_restore_job()
+{
+  local tag="$1" source_job="$2" storage="$3" where="$4" options="${5:-}"
+  local before log jobid restore_cmd
+  before=$(request_offset)
+  log="$tmp/restore-${tag}.log"
+  restore_cmd="restore jobid=${source_job} client=bareos-fd storage=${storage} where=${where} all done yes"
+  if [[ -n "$options" ]]; then
+    restore_cmd+=" pluginoptions=${options}"
+  fi
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+${restore_cmd}
+wait
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds"
+  jobid=$(queued_jobid "$log")
+  [[ -n "$jobid" ]] || {
+    echo "${tag}: no restore JobId" >&2
+    return 1
+  }
+  expect_termination "$jobid" "Restore OK"
+  assert_signed_window "$tag" "$before"
+  echo "restore=${tag} JobId=${jobid} sourceJobId=${source_job} storage=${storage}"
+  RESTORE_JOB_ID="$jobid"
+  RESTORE_DIR="$where"
+}
+
+compare_local_restore()
+{
+  local directory="$1" expected_root="$2" expected_data="$3"
+  local server=33333333-3333-4333-8333-333333333333
+  local root="$directory/$server/44444444-4444-4444-8444-444444444444.raw"
+  local data="$directory/$server/66666666-6666-4666-8666-666666666666.raw"
+  cmp "$expected_root" "$root"
+  cmp "$expected_data" "$data"
+  echo "local restore byte comparison passed: $root $data"
+}
+
+stop_sd_a()
+{
+  BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos" \
+    BAREOS_SD_PORT="$BAREOS_STORAGE_PORT" \
+    BAREOS_PIDFILE="$tmp/sd-a-sd.pid" \
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop
+}
+
+start_sd_a()
+{
+  BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos" \
+    BAREOS_SD_PORT="$BAREOS_STORAGE_PORT" \
+    BAREOS_PIDFILE="$tmp/sd-a-sd.pid" \
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" start
+}
+
+stop_sd_b()
+{
+  BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos-sd2" \
+    BAREOS_SD_PORT="$BAREOS_STORAGE2_PORT" \
+    BAREOS_PIDFILE_PREFIX="$tmp/sd-b-" \
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" stop
+}
+
+start_sd_b()
+{
+  BAREOS_CONFIG_DIR="$current_test_directory/etc/bareos-sd2" \
+    BAREOS_SD_PORT="$BAREOS_STORAGE2_PORT" \
+    BAREOS_PIDFILE_PREFIX="$tmp/sd-b-" \
+    "${BAREOS_SCRIPTS_DIR}/bareos-ctl-sd" start
+}
+
+record_sd_state_dirs()
+{
+  local tag="$1" dir
+  echo "=== test-owned SD cache and state dirs: ${tag}"
+  for dir in "$tmp/sd-a-cache" "$tmp/sd-b-cache" \
+    "$tmp/sd-a-working" "$tmp/sd-b-working"; do
+    if [[ -d "$dir" ]]; then
+      echo "dir=${dir} entries=$(find "$dir" -mindepth 1 | wc -l)"
+      find "$dir" -mindepth 1 | sort
+    else
+      echo "dir=${dir} absent"
+    fi
+  done
+}
+
+assert_sd_state_dirs_empty()
+{
+  local tag="$1" dir count bad=0
+  echo "=== assert empty test-owned SD cache and state dirs: ${tag}"
+  for dir in "$tmp/sd-a-cache" "$tmp/sd-b-cache" \
+    "$tmp/sd-a-working" "$tmp/sd-b-working"; do
+    if [[ -d "$dir" ]]; then
+      count=$(find "$dir" -mindepth 1 | wc -l)
+      echo "dir=${dir} entries=${count}"
+      if ((count != 0)); then
+        find "$dir" -mindepth 1 | sort
+        bad=1
+      fi
+    else
+      echo "dir=${dir} absent"
+    fi
+  done
+  if ((bad)); then
+    echo "${tag}: test-owned SD cache or state dir is not empty" >&2
+    return 1
+  fi
+}
+
+restart_storage_daemons_and_clear_test_state()
+{
+  local tag="${1:-restart}"
+  stop_sd_b
+  stop_sd_a
+  rm -rf "$tmp/sd-a-working" "$tmp/sd-b-working" \
+    "$tmp/sd-a-cache" "$tmp/sd-b-cache"
+  mkdir -p "$tmp/sd-a-working" "$tmp/sd-b-working" \
+    "$tmp/sd-a-cache" "$tmp/sd-b-cache"
+  assert_sd_state_dirs_empty "$tag (both SDs stopped, before start)"
+  start_sd_a
+  start_sd_b
+  echo "both owned SD processes restarted; test-owned working/state and cache dirs cleared"
+  record_sd_state_dirs "$tag (after SD start, not gating)"
+}
+
+# Run a restore without aborting the runner; sets RESTORE_RESULT to ok or
+# failed and RESTORE_JOB_ID. Prints the complete job log and request window.
+try_restore_job()
+{
+  local tag="$1" source_job="$2" storage="$3" where="$4" options="${5:-}"
+  local before log jobid restore_cmd output
+  before=$(request_offset)
+  log="$tmp/restore-${tag}.log"
+  restore_cmd="restore jobid=${source_job} client=bareos-fd storage=${storage} where=${where} all done yes"
+  if [[ -n "$options" ]]; then
+    restore_cmd+=" pluginoptions=${options}"
+  fi
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+${restore_cmd}
+wait
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds" || true
+  RESTORE_RESULT=failed
+  RESTORE_JOB_ID=""
+  jobid=$(queued_jobid "$log")
+  if [[ -z "$jobid" ]]; then
+    echo "${tag}: no restore JobId; bconsole output follows"
+    cat "$log" || true
+    return 0
+  fi
+  RESTORE_JOB_ID="$jobid"
+  output=$(console_output "list joblog jobid=${jobid}" 2>&1 || true)
+  printf '%s\n' "$output" >"$tmp/joblog-${jobid}.txt"
+  echo "=== joblog restore ${tag} JobId=${jobid} sourceJobId=${source_job} storage=${storage}"
+  printf '%s\n' "$output"
+  save_request_window "$tag" "$before"
+  if grep -q "Termination:.*Restore OK" <<<"$output"; then
+    RESTORE_RESULT=ok
+  fi
+  echo "restore_result=${tag} JobId=${jobid} result=${RESTORE_RESULT}"
+  return 0
+}
+
+label_volume()
+{
+  local volume="$1" storage="$2" pool="$3"
+  local log="$tmp/label-${volume}.log"
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+label volume=${volume} storage=${storage} pool=${pool}
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds"
+  grep -q "${volume}" "$log"
+}
+
+check_clean()
+{
+  fake_cli check-clean | tee "$tmp/check-clean.out"
+  grep -qx clean "$tmp/check-clean.out"
+}

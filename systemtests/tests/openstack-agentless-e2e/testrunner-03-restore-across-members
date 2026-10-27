@@ -1,0 +1,170 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+
+# Every object of the given volumes that exists in the bucket must have a
+# successful signed GET in the request window of the restore tag.
+assert_every_object_read()
+{
+  local tag="$1" volume object chunk window="$tmp/requests-$1.log" missing=0
+  shift
+  for volume in "$@"; do
+    for object in "$tmp"/s3-data/"${volume}".*; do
+      [[ -e "$object" && "$object" != *.part ]] || continue
+      chunk="${object##*.}"
+      if grep -Eq "^GET /testbucket/${volume}/${chunk} (200|206) sig=ok" "$window"; then
+        echo "object read: ${tag} ${volume}/${chunk}"
+      else
+        echo "${tag}: no successful signed GET for ${volume}/${chunk}" >&2
+        missing=1
+      fi
+    done
+  done
+  ((missing == 0))
+}
+
+# The known restore-routing limitation: with storage=S3b the Director opens
+# SD-B first (bsr.cc OpenBootstrapFile), SD-B gets no volume section for a
+# volume recorded on S3a ("No Volume names found for restore", read.cc:69) and
+# the Director moves on to SD-A. Returns 0 only for exactly this failure form.
+limitation_form()
+{
+  local tag="$1" jobid="$2" joblog="$tmp/joblog-$2.txt" window="$tmp/requests-$1.log"
+  local ok=1 connects first second
+  grep -Eq "bareos-sd-b JobId ${jobid}: Fatal error: No Volume names found for restore\." "$joblog" || ok=0
+  grep -q 'Termination:.*Restore Error' "$joblog" || ok=0
+  [[ -f "$window" && "$(wc -l <"$window")" -eq 0 ]] || ok=0
+  connects=$(grep -Eo "bareos-dir JobId ${jobid}: Connected Storage daemon at [^ ]*:[0-9]+" "$joblog" \
+    | awk -F: '{print $NF}')
+  first=$(sed -n 1p <<<"$connects")
+  second=$(sed -n 2p <<<"$connects")
+  [[ "$first" == "$BAREOS_STORAGE2_PORT" && "$second" == "$BAREOS_STORAGE_PORT" ]] || ok=0
+  echo "limitation_form tag=${tag} JobId=${jobid} sd_b_no_volume_names=$(grep -c 'bareos-sd-b.*No Volume names found for restore' "$joblog") connects=$(paste -sd, - <<<"$connects") window_lines=$(wc -l <"$window") match=${ok}"
+  ((ok == 1))
+}
+full_jobid=$(awk -F '\t' '$1 == "full-group" {print $2}' "$tmp/wave1b-jobs.tsv")
+inc_jobid=$(awk -F '\t' '$1 == "changed-incremental-b" {print $2}' "$tmp/wave1b-jobs.tsv")
+latest_jobid=$(awk -F '\t' '$1 == "unchanged-incremental" {print $2}' "$tmp/wave1b-jobs.tsv")
+[[ -n "$full_jobid" && -n "$inc_jobid" && -n "$latest_jobid" ]]
+echo "restore source JobIds: Full=${full_jobid} Incremental-B=${inc_jobid} latest=${latest_jobid}"
+restore_chain="${full_jobid},${inc_jobid},${latest_jobid}"
+restart_storage_daemons_and_clear_test_state "chain-local restore"
+local_dir="$tmp/restore-chain-local"
+run_restore_job chain-local "$restore_chain" S3a "$local_dir" \
+  python3:restore_target=local
+assert_successful_gets chain-local Wave1bFull 1
+assert_successful_gets chain-local Wave1bIncB 1
+assert_every_object_read chain-local Wave1bFull Wave1bIncB
+compare_local_restore "$local_dir" \
+  "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)" \
+  "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)"
+
+restart_storage_daemons_and_clear_test_state "chain-cloud restore"
+cloud_dir="$tmp/restore-chain-cloud"
+run_restore_job chain-cloud "$restore_chain" S3a "$cloud_dir" \
+  python3:restore_name=web01-copy
+assert_successful_gets chain-cloud Wave1bFull 1
+assert_successful_gets chain-cloud Wave1bIncB 1
+assert_every_object_read chain-cloud Wave1bFull Wave1bIncB
+python3 - "$AGENTLESS_FAKE_ROOT" \
+  "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)" \
+  "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+source_root = pathlib.Path(sys.argv[2]).read_bytes()
+source_data = pathlib.Path(sys.argv[3]).read_bytes()
+state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+servers = [s for s in state["servers"].values() if s["name"] == "web01-copy"]
+assert len(servers) == 1, servers
+server = servers[0]
+assert server["metadata"]["wave"] == "1b"
+assert server["metadata"]["bareos-restored-from"] == "33333333-3333-4333-8333-333333333333"
+assert len(server["attachments"]) == 2
+found_sizes = set()
+for attachment in server["attachments"]:
+    volume_id = attachment["volume_id"]
+    volume = state["volumes"][volume_id]
+    assert volume["metadata"]["created-by"] == "bareos"
+    assert volume["metadata"]["bareos-role"] == "restore-volume"
+    path = root / "volumes" / (volume_id + ".img")
+    payload = path.read_bytes()
+    found_sizes.add(len(payload))
+    is_boot = (
+        volume["metadata"]["bareos-source-volume-id"]
+        == "44444444-4444-4444-8444-444444444444"
+    )
+    expected = source_root if is_boot else source_data
+    assert payload[: len(expected)] == expected
+    assert len(payload) == 1024 * 1024 * 1024
+    assert not any(payload[len(expected) :])
+assert len(server["attachments"]) == 2
+print("cloud restore: server metadata, two restore-volume tags and source bytes verified")
+PY
+
+# LIMITATION evidence, not gating: the Full alone (all its volumes were written
+# through S3a) restored with the override storage=S3b must fail in exactly the
+# known form; any other failure form, or a pass, is reported as such.
+restart_storage_daemons_and_clear_test_state "full-only restore through S3b (limitation probe)"
+try_restore_job full-only-through-S3b "$full_jobid" S3b "$tmp/restore-full-through-S3b" python3:restore_target=local
+probe_jobid="$RESTORE_JOB_ID"
+probe_result="$RESTORE_RESULT"
+unexpected=0
+if [[ "$probe_result" == ok ]]; then
+  echo "LIMITATION NOT PRESENT: full-only restore through S3b passed, JobId=${probe_jobid}"
+elif limitation_form full-only-through-S3b "$probe_jobid"; then
+  echo "LIMITATION CONFIRMED (exact form): full-only restore through S3b JobId=${probe_jobid}: SD-B 'No Volume names found for restore' (read.cc:69), then SD-A, empty GET window"
+else
+  echo "LIMITATION FORM MISMATCH: full-only restore through S3b JobId=${probe_jobid} failed in another form" >&2
+  unexpected=1
+fi
+
+# LIMITATION evidence, not gating on its outcome: the mixed chain with
+# storage=S3b; a failure must have exactly the known form.
+restart_storage_daemons_and_clear_test_state "mixed-chain restore through S3b (evidence)"
+try_restore_job mixed-chain-through-S3b "$restore_chain" S3b "$tmp/restore-chain-through-S3b" python3:restore_target=local
+echo "EVIDENCE mixed-chain-through-S3b JobId=${RESTORE_JOB_ID} result=${RESTORE_RESULT} (not gating)"
+if [[ "$RESTORE_RESULT" == ok ]]; then
+  echo "LIMITATION NOT PRESENT: mixed-chain restore through S3b passed, JobId=${RESTORE_JOB_ID}"
+elif limitation_form mixed-chain-through-S3b "$RESTORE_JOB_ID"; then
+  echo "LIMITATION CONFIRMED (exact form): mixed-chain restore through S3b JobId=${RESTORE_JOB_ID}: SD-B 'No Volume names found for restore' (read.cc:69), then SD-A, empty GET window"
+else
+  echo "LIMITATION FORM MISMATCH: mixed-chain restore through S3b JobId=${RESTORE_JOB_ID} failed in another form" >&2
+  unexpected=1
+fi
+
+# Evidence, not gating: the Incremental written through S3b read through S3b.
+# It is a lone Incremental, so the plugin reports the Full chunks as missing;
+# what is recorded is that SD-B reads its own volume with a signed GET.
+restart_storage_daemons_and_clear_test_state "own-member restore through S3b (evidence)"
+try_restore_job own-incremental-through-S3b "$inc_jobid" S3b "$tmp/restore-incremental-through-S3b" python3:restore_target=local
+echo "EVIDENCE own-incremental-through-S3b JobId=${RESTORE_JOB_ID} result=${RESTORE_RESULT} (not gating)"
+grep -E '^GET /testbucket/Wave1bIncB/[^ ]+ (200|206) sig=ok' "$tmp/requests-own-incremental-through-S3b.log" || true
+grep -E 'bareos-sd-b JobId .*Ready to read from volume' "$tmp/joblog-${RESTORE_JOB_ID}.txt" || true
+
+echo "GATING PASSED: chain-local and chain-cloud restores through the writing members, empty dirs asserted before each restore, every object read with a fresh signed GET, byte and cloud checks"
+if ((unexpected)); then
+  exit 1
+fi
+end_test

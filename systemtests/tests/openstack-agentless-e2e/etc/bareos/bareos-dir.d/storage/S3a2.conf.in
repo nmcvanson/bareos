@@ -1,0 +1,9 @@
+Storage {
+  Name = S3a2
+  Address = @hostname@
+  Password = "@sd_password@"
+  Device = DplcompatA2
+  Media Type = S3Native
+  Port = @sd_port@
+  Maximum Concurrent Jobs = 1
+}

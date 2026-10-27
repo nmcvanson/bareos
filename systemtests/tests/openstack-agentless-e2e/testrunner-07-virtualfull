@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Always Incremental style consolidation: Full and Incremental through S3a, a
+# VirtualFull of that chain written through a second device of SD-A (S3a2; a
+# VirtualFull reads and writes through the one Storage daemon the Director is
+# connected to, so both members cannot be used), then restores from the
+# VirtualFull. The documented limitation is asserted in its exact form: the
+# VirtualFull has no server.json RestoreObject and a restore of it alone fails
+# with the documented text; any other result fails the runner.
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+root_id=44444444-4444-4444-8444-444444444444
+data_id=66666666-6666-4666-8666-666666666666
+
+# Run a job of backup-openstack-vf at the given level; sets VF_JOBID and
+# VF_RESULT (the Termination line) and prints the complete job log.
+run_vf_job()
+{
+  local tag="$1" level="$2" log="$tmp/vf-$1.log" output
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+run job=backup-openstack-vf level=${level} yes
+wait
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds" || true
+  VF_JOBID=$(queued_jobid "$log")
+  VF_RESULT="no JobId"
+  if [[ -z "$VF_JOBID" ]]; then
+    echo "${tag}: no JobId; bconsole output follows"
+    cat "$log" || true
+    return 0
+  fi
+  output=$(console_output "list joblog jobid=${VF_JOBID}" 2>&1 || true)
+  printf '%s\n' "$output" >"$tmp/joblog-${VF_JOBID}.txt"
+  echo "=== joblog ${tag} JobId=${VF_JOBID} level=${level}"
+  printf '%s\n' "$output"
+  VF_RESULT=$(grep 'Termination:' <<<"$output" | tail -n 1 | sed 's/^.*Termination: *//' || true)
+  echo "vf_job=${tag} JobId=${VF_JOBID} level=${level} termination=${VF_RESULT:-unknown}"
+}
+
+restore_object_count()
+{
+  psql -d regress_openstack_agentless_e2e -Atc \
+    "SELECT count(*) FROM RestoreObject WHERE JobId = $1"
+}
+
+run_vf_job vf-full Full
+vf_full="$VF_JOBID"
+[[ "$VF_RESULT" == "Backup OK" ]]
+fake_cli write --volume "$root_id" --offset 3145728 --length 1048576 --seed 41
+fake_cli write --volume "$data_id" --offset 1048576 --length 1048576 --zero
+run_vf_job vf-incremental Incremental
+vf_incr="$VF_JOBID"
+[[ "$VF_RESULT" == "Backup OK" ]]
+echo "chain: Full JobId=${vf_full} RestoreObjects=$(restore_object_count "$vf_full"); Incremental JobId=${vf_incr} RestoreObjects=$(restore_object_count "$vf_incr")"
+
+run_vf_job vf-virtualfull VirtualFull
+vf_jobid="$VF_JOBID"
+vf_result="$VF_RESULT"
+vf_objects=0
+vf_files=0
+if [[ -n "$vf_jobid" ]]; then
+  vf_objects=$(restore_object_count "$vf_jobid")
+  console_output "list files jobid=${vf_jobid}" >"$tmp/files-${vf_jobid}.txt" 2>&1 || true
+  vf_files=$(grep -c '\.chunk' "$tmp/files-${vf_jobid}.txt" || :)
+  echo "VIRTUALFULL JobId=${vf_jobid} termination=${vf_result} chunk_files=${vf_files} RestoreObjects=${vf_objects}"
+  grep -E 'server\.json|\.chunk' "$tmp/files-${vf_jobid}.txt" | head -n 5 || true
+  psql -d regress_openstack_agentless_e2e -Atc \
+    "SELECT jobid, objectname, objectlength FROM RestoreObject WHERE JobId IN (${vf_full}, ${vf_incr}, ${vf_jobid}) ORDER BY jobid" || true
+fi
+
+failed=0
+expected_text='no server metadata (server.json) was received (VirtualFull and consolidated jobs carry none); restore the whole backup chain of one server'
+if [[ "$vf_result" != "Backup OK" ]]; then
+  echo "FAIL: the VirtualFull did not terminate with Backup OK: ${vf_result}" >&2
+  failed=1
+fi
+full_objects=$(restore_object_count "$vf_full")
+incr_objects=$(restore_object_count "$vf_incr")
+if [[ "$vf_objects" -ne 0 || "$full_objects" -ne 1 || "$incr_objects" -ne 1 ]]; then
+  echo "FAIL: RestoreObjects Full=${full_objects} Incremental=${incr_objects} VirtualFull=${vf_objects}, expected 1, 1 and 0" >&2
+  failed=1
+fi
+echo "exact form: VirtualFull JobId=${vf_jobid} Backup OK=$([[ "$vf_result" == "Backup OK" ]] && echo yes || echo no) RestoreObjects source=${full_objects},${incr_objects} virtualfull=${vf_objects}"
+
+# The restore of the VirtualFull alone must end in exactly the documented
+# error: Restore Error, the document text, no file restored, nothing created.
+assert_missing_document_form()
+{
+  local tag="$1" joblog="$tmp/joblog-${RESTORE_JOB_ID}.txt"
+  if [[ "$RESTORE_RESULT" == ok ]]; then
+    echo "FAIL ${tag}: the restore of the VirtualFull alone passed (JobId ${RESTORE_JOB_ID})" >&2
+    return 1
+  fi
+  if ! grep -q 'Termination:.*Restore Error' "$joblog"; then
+    echo "FAIL ${tag}: not a Restore Error" >&2
+    return 1
+  fi
+  if ! grep -qF "$expected_text" "$joblog"; then
+    echo "FAIL ${tag}: the error text differs from the documented one" >&2
+    grep -E 'python3-fd-mod|Fatal' "$joblog" | head -n 5 >&2 || true
+    return 1
+  fi
+  if ! grep -Eq 'Files Restored: +0$' "$joblog"; then
+    echo "FAIL ${tag}: files were restored" >&2
+    return 1
+  fi
+  echo "PASS ${tag}: JobId ${RESTORE_JOB_ID} Restore Error with the documented text, 0 files"
+}
+
+if [[ -n "$vf_jobid" && "$vf_result" == "Backup OK" ]]; then
+  local_dir="$tmp/restore-vf-local"
+  try_restore_job vf-local "$vf_jobid" S3a2 "$local_dir" python3:restore_target=local
+  assert_missing_document_form "VirtualFull alone to local files" || failed=1
+  if [[ -d "$local_dir" ]] && [[ -n "$(find "$local_dir" -type f | head -n 1)" ]]; then
+    echo "FAIL: the local target is not empty:" >&2
+    find "$local_dir" -type f | head -n 5 >&2
+    failed=1
+  else
+    echo "PASS: the local target holds no file"
+  fi
+  servers_before=$(
+    python3 - "$AGENTLESS_FAKE_ROOT" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1] + "/state.json", encoding="utf-8"))
+print(len(state["servers"]), len(state["volumes"]))
+PY
+  )
+  cloud_dir="$tmp/restore-vf-cloud"
+  try_restore_job vf-cloud "$vf_jobid" S3a2 "$cloud_dir" python3:restore_name=vf-copy
+  assert_missing_document_form "VirtualFull alone to the fake cloud" || failed=1
+  servers_after=$(
+    python3 - "$AGENTLESS_FAKE_ROOT" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1] + "/state.json", encoding="utf-8"))
+print(len(state["servers"]), len(state["volumes"]))
+PY
+  )
+  if [[ "$servers_before" != "$servers_after" ]]; then
+    echo "FAIL: the failed cloud restore changed the cloud (servers, volumes: ${servers_before} -> ${servers_after})" >&2
+    failed=1
+  else
+    echo "PASS: the failed cloud restore created nothing (servers, volumes: ${servers_after})"
+  fi
+fi
+
+# Evidence, not gating: the VirtualFull restored together with the Incremental
+# of its chain, so that the RestoreObject of that Incremental is delivered.
+if [[ -n "$vf_jobid" && "$vf_result" == "Backup OK" ]]; then
+  try_restore_job vf-with-chain-object "${vf_incr},${vf_jobid}" S3a "$tmp/restore-vf-chain" python3:restore_target=local
+  echo "EVIDENCE vf-with-chain-object sourceJobIds=${vf_incr},${vf_jobid} JobId=${RESTORE_JOB_ID} result=${RESTORE_RESULT} (not gating)"
+  if [[ "$RESTORE_RESULT" == ok ]]; then
+    if cmp "$(fake_cli volume-path --volume "$root_id")" "$tmp/restore-vf-chain/33333333-3333-4333-8333-333333333333/${root_id}.raw" \
+      && cmp "$(fake_cli volume-path --volume "$data_id")" "$tmp/restore-vf-chain/33333333-3333-4333-8333-333333333333/${data_id}.raw"; then
+      echo "EVIDENCE vf-with-chain-object restore matches the source volumes"
+    else
+      echo "EVIDENCE vf-with-chain-object restore differs from the source volumes"
+    fi
+  fi
+fi
+check_clean
+if ((failed)); then
+  exit 1
+fi
+echo "VirtualFull JobId=${vf_jobid}: documented limitation confirmed in its exact form (no RestoreObject, restore of the VirtualFull alone fails with the documented text)"
+end_test

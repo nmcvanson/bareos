@@ -1,0 +1,6 @@
+Storage {
+  Name = bareos-sd
+  Working Directory = "@tmpdir@/sd-a-working"
+  Port = @sd_port@
+  @sd_backend_config@
+}

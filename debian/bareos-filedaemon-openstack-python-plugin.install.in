@@ -1,0 +1,3 @@
+@plugindir@/bareos-fd-openstack.py*
+@plugindir@/bareos_openstack/*
+@sbindir@/bareos-openstack-tool

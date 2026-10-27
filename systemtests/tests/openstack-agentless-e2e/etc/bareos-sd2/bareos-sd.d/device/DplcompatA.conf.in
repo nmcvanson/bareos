@@ -1,0 +1,19 @@
+Device {
+  Name = DplcompatA
+  Media Type = S3Native
+  Archive Device = S3 Object Storage
+  Device Options = "transport=native"
+                   ",s3cfg=@tmpdir@/s3cfg"
+                   ",bucket=testbucket"
+                   ",iothreads=0"
+                   ",chunksize=5242880"
+                   ",flush_timeout=120"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 1
+}

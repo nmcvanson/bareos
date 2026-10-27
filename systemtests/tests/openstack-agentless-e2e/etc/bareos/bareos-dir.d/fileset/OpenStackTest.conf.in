@@ -1,0 +1,28 @@
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+FileSet {
+  Name = "OpenStackTest"
+  Description = "Agentless OpenStack plugin through native S3 dplcompat."
+  Include {
+    Options {
+      Signature = XXH128
+      Sparse = yes
+    }
+    Plugin = "python3:module_path=@python_plugin_module_src_test_dir@:module_name=bareos-fd-openstack:backend=fake:fake_root=@tmp@/fakecloud:server_id=33333333-3333-4333-8333-333333333333:chunk_size=1MiB"
+  }
+}

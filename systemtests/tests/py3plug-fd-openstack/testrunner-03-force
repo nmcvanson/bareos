@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./openstack-test-common
+openstack_test_begin
+log="$tmp/openstack-force-active.out"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+restore client=bareos-fd fileset=OpenStackTest select all done pluginoptions=${plugin_name}:force=yes
+yes
+wait
+messages
+END_OF_DATA
+run_bconsole "$@"
+grep -Eiq 'restore preparation failed|requires it to be SHUTOFF|Error|Fatal' "$log"
+fake_cli servers --name web01 | python3 -c 'import json,sys; s=json.load(sys.stdin); assert len(s)==1 and s[0]["status"]=="ACTIVE"'
+fake_cli set-status --server 33333333-3333-4333-8333-333333333333 --status SHUTOFF
+log="$tmp/openstack-force-shutoff.out"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+restore client=bareos-fd fileset=OpenStackTest select all done pluginoptions=${plugin_name}:force=yes
+yes
+wait
+messages
+END_OF_DATA
+run_bconsole "$@"
+check_log "$log"
+fake_cli servers --name web01 | python3 -c 'import json,sys; s=json.load(sys.stdin); assert len(s)==0, "the original server web01 still exists after the forced restore"'
+fake_cli servers | grep -q 'web01-restore-'
+end_test

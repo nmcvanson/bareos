@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+: >"$tmp/wave1b-jobs.tsv"
+label_volume Wave1bFull S3a Full
+run_group_backup full-group Full S3a 32 Wave1bFull
+jobid="$LAST_JOB_ID"
+files="$tmp/files-${jobid}.txt"
+zero_chunks=$(grep -Ec '/44444444-4444-4444-8444-444444444444/(0000000[89]|0000001[0-5])\.chunk' "$files" || :)
+if [[ "$zero_chunks" -ne 8 ]]; then
+  echo "expected eight boot zero-range chunks, got ${zero_chunks}" >&2
+  exit 1
+fi
+restore_object_count=$(psql -d regress_openstack_agentless_e2e -Atc \
+  "SELECT count(*) FROM RestoreObject WHERE JobId = ${jobid}")
+if [[ "$restore_object_count" -ne 1 ]]; then
+  echo "expected one server.json RestoreObject, got ${restore_object_count}" >&2
+  exit 1
+fi
+python3 - "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)" \
+  "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)" <<'PY'
+import pathlib
+import sys
+
+boot = pathlib.Path(sys.argv[1])
+data = pathlib.Path(sys.argv[2])
+boot_bytes = boot.read_bytes()
+data_bytes = data.read_bytes()
+assert len(boot_bytes) == 24 * 1024 * 1024
+assert len(data_bytes) == 8 * 1024 * 1024
+assert boot_bytes[8 * 1024 * 1024 : 16 * 1024 * 1024] == bytes(8 * 1024 * 1024)
+assert any(boot_bytes[: 8 * 1024 * 1024])
+assert any(data_bytes)
+print("fake source: 24 MiB boot, 8 MiB data, exactly one 8 MiB zero range")
+PY
+check_clean
+echo "full JobId=${jobid}; chunks=32; zero_chunks=${zero_chunks}; RestoreObjects=${restore_object_count}; selected=S3a"
+end_test

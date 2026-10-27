@@ -1,0 +1,214 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./agentless-test-common
+agentless_begin
+
+# The job must be terminal within CANCEL_BOUND seconds of the cancel command.
+# The observation window DIAG_LIMIT is longer so that a late job is still
+# recorded; it never changes the bound.
+CANCEL_BOUND=120
+DIAG_LIMIT=400
+
+# Print the catalog status letter of a job (A = canceled by user, T, E, e, f).
+job_status_letter()
+{
+  console_output "list jobid=$1" 2>&1 \
+    | awk -F'|' '$2 ~ /^ *[0-9]+ *$/ {gsub(/ /, "", $11); print $11}' | tail -n 1
+}
+
+cancel_diag()
+{
+  local tag="$1" jobid="$2" at="$3" before="$4"
+  echo "=== diag ${tag} +${at}s JobId=${jobid}"
+  echo "--- status dir"
+  console_output "status dir" 2>&1 || true
+  echo "--- status storage=S3a"
+  console_output "status storage=S3a" 2>&1 || true
+  echo "--- status client=bareos-fd"
+  console_output "status client=bareos-fd" 2>&1 || true
+  echo "--- put-stalled: $(cat "$AGENTLESS_CONTROL_DIR/put-stalled" 2>/dev/null || echo none)"
+  echo "--- request window since job start"
+  if [[ -f "$AGENTLESS_REQUESTS" ]]; then
+    sed -n "$((before + 1)),\$p" "$AGENTLESS_REQUESTS"
+  fi
+}
+
+# Start a Full group backup, wait for its first PUT to stall, cancel it and
+# record the daemons every 10 s until the job is terminal or DIAG_LIMIT.
+# Sets SCEN_JOBID, SCEN_BEFORE, SCEN_STALLED and SCEN_TERMINAL_AT; returns 0
+# only if the job was terminal and Canceled within CANCEL_BOUND.
+cancel_scenario()
+{
+  local tag="$1" pool="$2" fileset="$3" key_pattern="$4"
+  local cancel_log attempt cancel_started now next_diag letter joblog
+  local handler_done stall_seen
+  SCEN_JOBID=""
+  SCEN_STALLED=""
+  SCEN_TERMINAL_AT=""
+  rm -f "$AGENTLESS_CONTROL_DIR/put-stalled" "$AGENTLESS_CONTROL_DIR/put-stall"
+  echo 25 >"$AGENTLESS_CONTROL_DIR/put-stall"
+  SCEN_BEFORE=$(request_offset)
+  cancel_log="$tmp/cancel-run-${tag}.log"
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $cancel_log
+run job=backup-openstack-group pool=${pool} fileset=${fileset} level=Full yes
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds"
+  SCEN_JOBID=$(queued_jobid "$cancel_log")
+  if [[ -z "$SCEN_JOBID" ]]; then
+    echo "${tag}: cancel test did not queue a job" >&2
+    return 1
+  fi
+  for attempt in $(seq 1 80); do
+    if [[ -s "$AGENTLESS_CONTROL_DIR/put-stalled" ]]; then
+      SCEN_STALLED=$(cat "$AGENTLESS_CONTROL_DIR/put-stalled")
+      # shellcheck disable=SC2053
+      [[ "$SCEN_STALLED" == $key_pattern ]] && break
+    fi
+    sleep 0.25
+  done
+  # shellcheck disable=SC2053
+  if [[ "$SCEN_STALLED" != $key_pattern ]]; then
+    echo "${tag}: put-stall did not reach the active job's fresh volume: ${SCEN_STALLED:-empty}" >&2
+    return 1
+  fi
+  echo "${tag}: stalled PUT belongs to active job media: ${SCEN_STALLED} (JobId=${SCEN_JOBID})"
+  stall_seen=$SECONDS
+  cancel_started=$SECONDS
+  cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $tmp/cancel-command-${tag}.log
+cancel jobid=${SCEN_JOBID} yes
+quit
+END_OF_DATA
+  run_bconsole "$tmp/bconcmds"
+  cat "$tmp/cancel-command-${tag}.log"
+  next_diag=0
+  while ((SECONDS - cancel_started <= DIAG_LIMIT)); do
+    now=$((SECONDS - cancel_started))
+    if ((now >= next_diag)); then
+      cancel_diag "$tag" "$SCEN_JOBID" "$now" "$SCEN_BEFORE"
+      next_diag=$((next_diag + 10))
+    fi
+    letter=$(job_status_letter "$SCEN_JOBID" || true)
+    case "$letter" in
+      A | T | E | e | f)
+        joblog=$(console_output "list joblog jobid=${SCEN_JOBID}" 2>&1 || true)
+        if grep -q 'Termination:' <<<"$joblog"; then
+          SCEN_TERMINAL_AT=$((SECONDS - cancel_started))
+          echo "${tag}: JobId=${SCEN_JOBID} terminal status=${letter} after ${SCEN_TERMINAL_AT}s"
+          cancel_diag "$tag" "$SCEN_JOBID" "$SCEN_TERMINAL_AT" "$SCEN_BEFORE"
+          break
+        fi
+        ;;
+    esac
+    sleep 1
+  done
+  echo "=== final status ${tag} JobId=${SCEN_JOBID}: letter=$(job_status_letter "$SCEN_JOBID" || true) terminal_at=${SCEN_TERMINAL_AT:-never}"
+  console_output "list jobid=${SCEN_JOBID}" 2>&1 || true
+  echo "=== joblog ${tag} JobId=${SCEN_JOBID}"
+  console_output "list joblog jobid=${SCEN_JOBID}" 2>&1 | tee "$tmp/joblog-${SCEN_JOBID}.txt" || true
+
+  # The stub handler that was already sleeping answers after the stall time;
+  # its request line is written only if the connection is still open, so wait
+  # for the stall time itself and record whether a 200 was logged.
+  while ((SECONDS - stall_seen < 30)); do
+    sleep 1
+  done
+  handler_done=0
+  if grep -F "$SCEN_STALLED" "$AGENTLESS_REQUESTS" | grep -q ' 200 sig=ok'; then
+    handler_done=1
+  fi
+  rm -f "$AGENTLESS_CONTROL_DIR/put-stall"
+  echo "${tag}: stall time elapsed; 200 logged for the stalled key=${handler_done} key=${SCEN_STALLED}"
+  save_request_window "$tag" "$SCEN_BEFORE"
+
+  if [[ -z "$SCEN_TERMINAL_AT" ]]; then
+    echo "${tag}: JobId=${SCEN_JOBID} was not terminal within ${DIAG_LIMIT}s" >&2
+    return 1
+  fi
+  if ((SCEN_TERMINAL_AT >= CANCEL_BOUND)); then
+    echo "${tag}: JobId=${SCEN_JOBID} became terminal after ${SCEN_TERMINAL_AT}s, bound is ${CANCEL_BOUND}s" >&2
+    return 1
+  fi
+  if ! grep -q 'Termination:.*Canceled' "$tmp/joblog-${SCEN_JOBID}.txt"; then
+    echo "${tag}: JobId=${SCEN_JOBID} did not terminate with Canceled" >&2
+    return 1
+  fi
+  echo "${tag}: canceled JobId=${SCEN_JOBID} terminal_seconds_from_cancel=${SCEN_TERMINAL_AT}"
+  return 0
+}
+
+label_volume Wave1bCancel S3a Full
+main_ok=0
+if cancel_scenario main Wave1bCancel OpenStackTest '*Wave1bCancel-*/*'; then
+  main_ok=1
+fi
+main_jobid="$SCEN_JOBID"
+main_terminal="${SCEN_TERMINAL_AT:-never}"
+main_stalled="$SCEN_STALLED"
+
+# Control: same group Job and storages, plain files, same stall. The SDs are
+# restarted first: the SD keeps the canceled chunk and uploads it again when the
+# next job opens the device, which would be the first stalled PUT of the control.
+restart_storage_daemons_and_clear_test_state "before the control cancel"
+mkdir -p "$tmp/control-data"
+head -c 12582912 /dev/urandom >"$tmp/control-data/blob.bin"
+control_ok=0
+if cancel_scenario control Wave1bControl PlainControl '*Wave1bControl-*/*'; then
+  control_ok=1
+fi
+echo "CANCEL RESULT main JobId=${main_jobid} ok=${main_ok} terminal_at=${main_terminal}s; control JobId=${SCEN_JOBID} ok=${control_ok} terminal_at=${SCEN_TERMINAL_AT:-never}s"
+if ((main_ok == 0)); then
+  exit 1
+fi
+
+echo "main cancel: assert signed window of the canceled job"
+main_window="$tmp/requests-main.log"
+grep -Eq '^(PUT|GET|HEAD) /testbucket/[^ ]* [0-9]{3} sig=ok' "$main_window"
+if grep -Eq 'sig=(bad|none)' "$main_window"; then
+  echo "invalid or unsigned S3 request in the canceled job window" >&2
+  exit 1
+fi
+echo "stalled PUT of the canceled job: ${main_stalled}; partial objects are retained and reported"
+grep -F "$main_stalled" "$main_window" || true
+check_clean
+
+# A dedicated pool: in pool Full the job would append to the earlier volume.
+run_group_backup recovery-full Full S3a 32 'Wave1bRecovery-[0-9]+' Wave1bRecovery
+recovery_jobid="$LAST_JOB_ID"
+recovery_dir="$tmp/restore-recovery-full"
+run_restore_job recovery-full-local "$recovery_jobid" S3a "$recovery_dir" \
+  python3:restore_target=local
+assert_successful_gets recovery-full-local 'Wave1bRecovery-[0-9]+' 1
+compare_local_restore "$recovery_dir" \
+  "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)" \
+  "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)"
+
+full_jobid=$(awk -F '\t' '$1 == "full-group" {print $2}' "$tmp/wave1b-jobs.tsv")
+earlier_dir="$tmp/restore-earlier-full"
+run_restore_job earlier-full-local "$full_jobid" S3a "$earlier_dir" \
+  python3:restore_target=local
+assert_successful_gets earlier-full-local Wave1bFull 1
+compare_local_restore "$earlier_dir" "$tmp/original-root.img" "$tmp/original-data.img"
+rm -f "$AGENTLESS_CONTROL_DIR/put-stall" "$AGENTLESS_CONTROL_DIR/put-stalled"
+echo "recovery JobId=${recovery_jobid}; earlier Full JobId=${full_jobid} remains restorable"
+end_test

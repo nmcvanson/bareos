@@ -108,6 +108,10 @@ else()
     list(APPEND DEBIAN_CONTROL_SNIPPETS "incus")
   endif()
 
+  if(ENABLE_PYTHON AND Python3_FOUND)
+    list(APPEND DEBIAN_CONTROL_SNIPPETS "openstack")
+  endif()
+
 endif()
 
 include(BareosConfigureFile)

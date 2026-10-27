@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# BAREOS - Backup Archiving REcovery Open Sourced
+#
+# Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+# This program is Free Software; you can redistribute it and/or
+# modify it under the terms of version three of the GNU Affero General Public
+# License as published by the Free Software Foundation, which is
+# listed in the file LICENSE.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+set -euo pipefail
+. ./openstack-test-common
+openstack_test_begin
+log="$tmp/openstack-restore-cloud.out"
+cat >"$tmp/bconcmds" <<END_OF_DATA
+@$out $log
+restore client=bareos-fd fileset=OpenStackTest select all done pluginoptions=${plugin_name}:restore_name=web01-copy
+yes
+wait
+END_OF_DATA
+run_bconsole "$@"
+check_log "$log"
+listing=$(fake_cli servers --name web01-copy)
+[ "$(printf '%s' "$listing" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ]
+restored_ids=$(printf '%s' "$listing" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)[0]["volume_ids"]))')
+root_id=$(printf '%s\n' "$restored_ids" | awk '{print $1}')
+data_id=$(printf '%s\n' "$restored_ids" | awk '{print $2}')
+cmp -n 8388608 "$(fake_cli volume-path --volume "$root_id")" \
+  "$(fake_cli volume-path --volume 44444444-4444-4444-8444-444444444444)"
+cmp -n 4194304 "$(fake_cli volume-path --volume "$data_id")" \
+  "$(fake_cli volume-path --volume 66666666-6666-4666-8666-666666666666)"
+fake_cli check-clean
+end_test
