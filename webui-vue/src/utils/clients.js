@@ -154,3 +154,31 @@ export function withClientsScopeDirectorQuery(query, director) {
 
   return nextQuery
 }
+
+// Marks each catalog client as configured (true), catalog-only (false) or unknown (null) when .clients failed.
+export function markConfiguredClients(catalogEntries, dotResult) {
+  const list = Array.isArray(catalogEntries) ? catalogEntries : []
+  const known = dotResult !== null && typeof dotResult === 'object' && 'clients' in dotResult
+  if (!known) {
+    return list.map(entry => ({ ...entry, configured: null, enabled: entry.enabled ?? true }))
+  }
+  const dot = dotResult.clients
+  const configured = new Map((Array.isArray(dot) ? dot : Object.values(dot ?? {}).flat())
+    .map(item => [item.name, item.enabled]))
+  return list.map(entry => (configured.has(entry.name)
+    ? { ...entry, configured: true, enabled: configured.get(entry.name) ?? true }
+    : { ...entry, configured: false }))
+}
+
+export function visibleClients(rows, showUnconfigured) {
+  const list = Array.isArray(rows) ? rows : []
+  return showUnconfigured ? list : list.filter(row => row.configured !== false)
+}
+
+export function hasUnconfiguredClients(rows) {
+  return Array.isArray(rows) && rows.some(row => row.configured === false)
+}
+
+export function clientConfigurationUnknown(rows) {
+  return Array.isArray(rows) && rows.some(row => row.configured === null)
+}

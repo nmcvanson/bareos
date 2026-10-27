@@ -29,10 +29,22 @@
 #include "dird.h"
 #include "dird/dird_globals.h"
 #include "dird/ua_select.h"
+#include "dird/configure_edit.h"
+#include "dird/dird_conf.h"
+#include "dird/reload.h"
 #include "lib/parse_conf.h"
 #include "lib/util.h"
 #include <array>
 #include <algorithm>
+#include <chrono>
+#include <climits>
+#include <cstdlib>
+#include <optional>
+#include <map>
+#include <set>
+#include <vector>
+#include <thread>
+#include <sys/stat.h>
 
 namespace directordaemon {
 
@@ -453,6 +465,443 @@ static inline bool ConfigureExport(UaContext* ua)
   return result;
 }
 
+// How long a configure change waits for another change or reload to end.
+static int config_change_wait_ms = 30000;
+
+// Holds the configuration change token for the scope of a command.
+class ConfigChangeGuard {
+ public:
+  ConfigChangeGuard()
+  {
+    for (int waited = 0;; waited += 100) {
+      auto t = TryBeginConfigChange();
+      if (t) {
+        token_.emplace(std::move(*t));
+        return;
+      }
+      if (waited >= config_change_wait_ms) { return; }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  }
+  bool held() const { return token_.has_value(); }
+  const ConfigChangeToken& token() const { return *token_; }
+
+ private:
+  std::optional<ConfigChangeToken> token_;
+};
+
+// [A-Za-z0-9][A-Za-z0-9._-]* without ".."
+static bool ValidResourceName(const char* name)
+{
+  if (!name || !isalnum((unsigned char)name[0]) || strstr(name, "..")) {
+    return false;
+  }
+  for (const char* p = name; *p; p++) {
+    if (!isalnum((unsigned char)*p) && *p != '.' && *p != '_' && *p != '-') {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Non-empty and free of characters that could change the file's structure.
+static bool ValueIsSafe(const char* v)
+{
+  return v && *v && !strpbrk(v, "@;\"\\\r\n");
+}
+
+// Removes a trailing or inner "preview" argument; true if it was there.
+static bool ExtractPreview(UaContext* ua)
+{
+  for (int i = 1; i < ua->argc; i++) {
+    if (Bstrcasecmp(ua->argk[i], "preview") && !ua->argv[i]) {
+      for (int j = i; j + 1 < ua->argc; j++) {
+        ua->argk[j] = ua->argk[j + 1];
+        ua->argv[j] = ua->argv[j + 1];
+      }
+      ua->argc--;
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::string DirName(const std::string& p)
+{
+  size_t s = p.rfind('/');
+  if (s == std::string::npos) { return "."; }
+  return s == 0 ? "/" : p.substr(0, s);
+}
+
+static std::string RealPath(const std::string& p)
+{
+  char buf[PATH_MAX];
+  if (!realpath(p.c_str(), buf)) { return std::string(); }
+  return buf;
+}
+
+static std::string BaseName(const std::string& p)
+{
+  return p.substr(p.rfind('/') + 1);
+}
+
+static bool IsRealDirectory(const std::string& p)
+{
+  struct stat st;
+  return lstat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// File of a resource as <realpath(configdir)>/<include dir>/<type>/<name>.conf;
+// the include and type directories must be real directories, not symlinks.
+static bool ManagedFilePath(UaContext* ua,
+                            const ResourceTable* res_table,
+                            const char* name,
+                            std::string& path)
+{
+  PoolMem p(PM_FNAME);
+
+  if (!my_config->IsUsingConfigIncludeDir()
+      || !my_config->GetPathOfResource(p, nullptr, res_table->name, name,
+                                       false)) {
+    ua->ErrorMsg(
+        T_("The configuration does not use the include directory layout.\n"));
+    return false;
+  }
+  const std::string canon = p.c_str();
+  const std::string type_path = DirName(canon);
+  const std::string include_path = DirName(type_path);
+  const std::string root = RealPath(DirName(include_path));
+  if (root.empty() || BaseName(canon) != std::string(name) + ".conf") {
+    ua->ErrorMsg(T_("The configuration directory layout is not supported.\n"));
+    return false;
+  }
+
+  const std::string include_dir = root + "/" + BaseName(include_path);
+  const std::string type_dir = include_dir + "/" + BaseName(type_path);
+  if (!IsRealDirectory(include_dir) || !IsRealDirectory(type_dir)) {
+    ua->ErrorMsg(T_("\"%s\" is not a real directory inside the configuration "
+                    "tree.\n"),
+                 type_dir.c_str());
+    return false;
+  }
+  path = type_dir + "/" + name + ".conf";
+  return true;
+}
+
+static bool ReadWholeFile(const std::string& path, std::string& data)
+{
+  int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) { return false; }
+  struct stat st;
+  bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
+  char buf[4096];
+  data.clear();
+  while (ok) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n < 0) {
+      ok = false;
+    } else if (n == 0) {
+      break;
+    } else {
+      data.append(buf, n);
+    }
+  }
+  close(fd);
+  return ok;
+}
+
+// Writes <path>.tmp (new file, no symlink), fsync; returns its name. An
+// existing .tmp makes this fail and is never touched.
+static bool WriteTmp(const std::string& path,
+                     const std::string& data,
+                     std::string& tmp,
+                     std::string& err)
+{
+  tmp = path + ".tmp";
+  int fd = open(tmp.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0640);
+  if (fd < 0) {
+    err = "cannot create " + tmp + ": " + strerror(errno);
+    return false;
+  }
+  bool ok = true;
+  size_t done = 0;
+  while (ok && done < data.size()) {
+    ssize_t n = write(fd, data.data() + done, data.size() - done);
+    if (n <= 0) {
+      ok = false;
+    } else {
+      done += n;
+    }
+  }
+  if (ok && fsync(fd) != 0) { ok = false; }
+  if (close(fd) != 0) { ok = false; }
+  if (!ok) {
+    err = "cannot write " + tmp + ": " + strerror(errno);
+    unlink(tmp.c_str());
+  }
+  return ok;
+}
+
+// Test hook, null in production: returns true to make a ReplaceFile fail.
+bool (*ConfigureWriteFailHook)(const std::string& path,
+                               const std::string& data)
+    = nullptr;
+
+// Replaces path by data (tmp + rename).
+static bool ReplaceFile(const std::string& path,
+                        const std::string& data,
+                        std::string& err)
+{
+  if (ConfigureWriteFailHook && ConfigureWriteFailHook(path, data)) {
+    err = "write failed (test hook)";
+    return false;
+  }
+  std::string tmp;
+  if (!WriteTmp(path, data, tmp, err)) { return false; }
+  if (rename(tmp.c_str(), path.c_str()) != 0) {
+    err = "cannot rename " + tmp + ": " + strerror(errno);
+    unlink(tmp.c_str());
+    return false;
+  }
+  return true;
+}
+
+struct PublishOutcome {
+  bool published{false};
+  bool reloaded{false};
+  const char* rollback{"none"};
+};
+
+// Publishes updated over the file, reloads; a failed reload puts orig back.
+static PublishOutcome PublishSet(const ConfigChangeToken& token,
+                                 const std::string& path,
+                                 const std::string& orig,
+                                 const std::string& updated,
+                                 std::string& err)
+{
+  PublishOutcome o;
+  if (!ReplaceFile(path, updated, err)) { return o; }
+  o.published = true;
+  o.reloaded = ReloadConfigHeld(token);
+  if (!o.reloaded) {
+    std::string e, back;
+    bool ok = ReplaceFile(path, orig, e) && ReadWholeFile(path, back)
+              && back == orig;
+    o.rollback = ok ? "restored" : "failed";
+  }
+  return o;
+}
+
+static void ConfigureSendOutcome(UaContext* ua,
+                                 const PublishOutcome& o,
+                                 bool preview)
+{
+  ua->send->ObjectKeyValueBool("preview", preview, "Preview: %s\n");
+  ua->send->ObjectKeyValueBool("reloaded", o.reloaded, "Reloaded: %s\n");
+  ua->send->ObjectKeyValue("rollback", o.rollback, "Rollback: %s\n");
+}
+
+static bool ConfigureReportFailure(UaContext* ua,
+                                   const PublishOutcome& o,
+                                   const std::string& path)
+{
+  if (!o.reloaded && o.published) {
+    if (!strcmp(o.rollback, "failed")) {
+      ua->ErrorMsg(T_("ROLLBACK FAILED: reload failed, check \"%s\"\n"),
+                   path.c_str());
+    } else {
+      ua->ErrorMsg(T_("reload failed, the file was %s\n"), o.rollback);
+    }
+  }
+  return o.reloaded;
+}
+
+// Checks that every comma-separated name is an existing, permitted Storage.
+static bool CheckStorageList(UaContext* ua, const char* list)
+{
+  std::string s(list);
+  size_t pos = 0;
+  while (pos <= s.size()) {
+    size_t e = s.find(',', pos);
+    if (e == std::string::npos) { e = s.size(); }
+    std::string n = s.substr(pos, e - pos);
+    size_t b = n.find_first_not_of(" \t");
+    size_t f = n.find_last_not_of(" \t");
+    n = b == std::string::npos ? std::string() : n.substr(b, f - b + 1);
+    if (!ValidResourceName(n.c_str())) {
+      ua->ErrorMsg(T_("Invalid storage name \"%s\" in the list.\n"), n.c_str());
+      return false;
+    }
+    if (!ua->GetStoreResWithName(n.c_str())) {
+      ua->ErrorMsg(T_("Storage \"%s\" does not exist or is not permitted.\n"),
+                   n.c_str());
+      return false;
+    }
+    pos = e + 1;
+  }
+  return true;
+}
+
+static void ConfigureSetUsage(UaContext* ua)
+{
+  ua->ErrorMsg(
+      T_("usage:\n"
+         "  configure set job=<n>|jobdefs=<n>|pool=<n> "
+         "storagegrouppolicy=<ListedOrder|LeastUsed> [preview]\n"
+         "  configure set job=<n>|jobdefs=<n>|pool=<n> storage=<A,B,...> "
+         "[preview]\n"
+         "  configure set storage=<n> enabled=<yes|no> [preview]\n"));
+}
+
+static bool ConfigureSetLocked(UaContext* ua,
+                               const ConfigChangeToken& token,
+                               bool preview)
+{
+  const char* target_key = ua->argk[2];
+  const char* name = ua->argv[2];
+  const char* directive = ua->argk[3];
+  const char* value = ua->argv[3];
+  const char* table_name = nullptr;
+  int rcode = 0;
+
+  if (Bstrcasecmp(target_key, "job")) {
+    table_name = "Job";
+    rcode = R_JOB;
+  } else if (Bstrcasecmp(target_key, "jobdefs")) {
+    table_name = "JobDefs";
+    rcode = R_JOBDEFS;
+  } else if (Bstrcasecmp(target_key, "pool")) {
+    table_name = "Pool";
+    rcode = R_POOL;
+  } else if (Bstrcasecmp(target_key, "storage")) {
+    table_name = "Storage";
+    rcode = R_STORAGE;
+  } else {
+    ConfigureSetUsage(ua);
+    return false;
+  }
+
+  const bool is_storage = rcode == R_STORAGE;
+  const char* wanted = is_storage ? "enabled" : nullptr;
+  if (is_storage ? !Bstrcasecmp(directive, wanted)
+                 : !(Bstrcasecmp(directive, "storagegrouppolicy")
+                     || Bstrcasecmp(directive, "storage"))) {
+    ConfigureSetUsage(ua);
+    return false;
+  }
+  if (!name || !value || !*value) {
+    ua->ErrorMsg(T_("A name and a non-empty value are required.\n"));
+    return false;
+  }
+  if (!ValidResourceName(name)) {
+    ua->ErrorMsg(T_("Invalid resource name \"%s\".\n"), name);
+    return false;
+  }
+  if (!ValueIsSafe(value)) {
+    ua->ErrorMsg(T_("The value contains a forbidden character.\n"));
+    return false;
+  }
+
+  const ResourceTable* res_table = my_config->GetResourceTable(table_name);
+  const ResourceItem* item
+      = res_table ? my_config->GetResourceItem(res_table->items, directive)
+                  : nullptr;
+  if (!item) {
+    ua->ErrorMsg(T_("Resource \"%s\" does not permit directive \"%s\".\n"),
+                 table_name, directive);
+    return false;
+  }
+
+  if (!ua->GetResWithName(rcode, name)) {
+    ua->ErrorMsg(T_("%s \"%s\" does not exist or is not permitted.\n"),
+                 res_table->name, name);
+    return false;
+  }
+
+  std::string new_value;
+  if (Bstrcasecmp(directive, "storagegrouppolicy")) {
+    for (int i = 0; storage_group_policies[i]; i++) {
+      if (Bstrcasecmp(value, storage_group_policies[i])) {
+        new_value = storage_group_policies[i];
+      }
+    }
+    if (new_value.empty()) {
+      ua->ErrorMsg(T_("Invalid policy \"%s\", use ListedOrder or LeastUsed.\n"),
+                   value);
+      return false;
+    }
+  } else if (Bstrcasecmp(directive, "storage")) {
+    if (!CheckStorageList(ua, value)) { return false; }
+    new_value = value;
+  } else {
+    if (Bstrcasecmp(value, "yes") || Bstrcasecmp(value, "true")) {
+      new_value = "yes";
+    } else if (Bstrcasecmp(value, "no") || Bstrcasecmp(value, "false")) {
+      new_value = "no";
+    } else {
+      ua->ErrorMsg(T_("Invalid value \"%s\", use yes or no.\n"), value);
+      return false;
+    }
+  }
+
+  std::string path, orig, updated, old_value, err;
+  struct stat st;
+  if (!ManagedFilePath(ua, res_table, name, path)) { return false; }
+  if (lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)
+      || !ReadWholeFile(path, orig)) {
+    ua->ErrorMsg(T_("\"%s\" is not a managed file, edit by hand.\n"),
+                 path.c_str());
+    return false;
+  }
+  if (!CheckManagedResourceText(orig, res_table->name, name, err)
+      || !SetDirective(orig, item->name, new_value, updated, old_value, err)) {
+    ua->ErrorMsg(T_("\"%s\": %s\n"), path.c_str(), err.c_str());
+    return false;
+  }
+
+  PublishOutcome outcome;
+  outcome.rollback = "none";
+  if (!preview) {
+    outcome = PublishSet(token, path, orig, updated, err);
+    if (!outcome.published) {
+      ua->ErrorMsg(T_("%s\n"), err.c_str());
+      return false;
+    }
+  }
+
+  ua->send->ObjectStart("set");
+  ua->send->ObjectKeyValue("resource", res_table->name, "Resource: %s\n");
+  ua->send->ObjectKeyValue("name", name, "Name: %s\n");
+  ua->send->ObjectKeyValue("directive", item->name, "Directive: %s\n");
+  ua->send->ObjectKeyValue("old", old_value.c_str(), "Old: %s\n");
+  ua->send->ObjectKeyValue("new", new_value.c_str(), "New: %s\n");
+  ua->send->ObjectKeyValue("filename", path.c_str(), "File: %s\n");
+  ConfigureSendOutcome(ua, outcome, preview);
+  ua->send->ObjectEnd("set");
+
+  return preview ? true : ConfigureReportFailure(ua, outcome, path);
+}
+
+static bool ConfigureSet(UaContext* ua)
+{
+  bool preview = ExtractPreview(ua);
+  if (ua->argc != 4) {
+    ConfigureSetUsage(ua);
+    return false;
+  }
+
+  ConfigChangeGuard guard;
+  if (!guard.held()) {
+    ua->ErrorMsg(T_("Director busy, try again.\n"));
+    return false;
+  }
+
+  ua->send->ObjectStart("configure");
+  bool result = ConfigureSetLocked(ua, guard.token(), preview);
+  ua->send->ObjectEnd("configure");
+  return result;
+}
+
 bool ConfigureCmd(UaContext* ua, const char*)
 {
   bool result = false;
@@ -469,14 +918,25 @@ bool ConfigureCmd(UaContext* ua, const char*)
     ua->ErrorMsg(
         T_("usage:\n"
            "  configure add <resourcetype> <key1>=<value1> ...\n"
-           "  configure export client=<clientname>\n"));
+           "  configure export client=<clientname>\n"
+           "  configure set job=<n>|jobdefs=<n>|pool=<n> "
+           "storagegrouppolicy=<v>|storage=<A,B,...> [preview]\n"
+           "  configure set storage=<n> enabled=<yes|no> [preview]\n"
+           ));
     return false;
   }
 
   if (Bstrcasecmp(ua->argk[1], NT_("add"))) {
+    ConfigChangeGuard guard;
+    if (!guard.held()) {
+      ua->ErrorMsg(T_("Director busy, try again.\n"));
+      return false;
+    }
     result = ConfigureAdd(ua, 2);
   } else if (Bstrcasecmp(ua->argk[1], NT_("export"))) {
     result = ConfigureExport(ua);
+  } else if (Bstrcasecmp(ua->argk[1], NT_("set"))) {
+    result = ConfigureSet(ua);
   } else {
     ua->ErrorMsg(T_("invalid subcommand %s.\n"), ua->argk[1]);
     return false;

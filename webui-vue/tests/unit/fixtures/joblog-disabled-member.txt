@@ -1,0 +1,213 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+list joblog jobid=1102
+Automatically selected Catalog: MyCatalog
+Using Catalog "MyCatalog"
+ 2026-10-18 22:35:31 lab-dir JobId 1102: Warning: Storage group: skipping "File2", it is disabled.
+ 2026-10-18 22:35:31 lab-dir JobId 1102: Storage group: 1 candidates, using "File1a" (Pool resource, policy ListedOrder).
+ 2026-10-18 22:35:33 lab-dir JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-18 22:35:33 lab-dir JobId 1102: Start Backup JobId 1102, Job=demo-local-docs.2026-10-18_22.35.31_50
+ 2026-10-18 22:35:33 lab-dir JobId 1102: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:33 lab-dir JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:33 lab-dir JobId 1102: Connected Client: fd1 at lab-fd1:9102, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:33 lab-dir JobId 1102:  Handshake: Immediate TLS 
+ 2026-10-18 22:35:33 lab-dir JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:34 lab-dir JobId 1102: Created new Volume "DemoLocal-0343" in catalog.
+ 2026-10-18 22:35:34 lab-dir JobId 1102: Using Device "FileStorage1a" to write.
+ 2026-10-18 22:35:34 fd1 JobId 1102: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:34 fd1 JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+ 2026-10-18 22:35:34 fd1 JobId 1102: Extended attribute support is enabled
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-18 22:35:34 fd1 JobId 1102: ACL support is enabled
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Labeled new Volume "DemoLocal-0343" on device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Moving to end of data on volume "DemoLocal-0343"
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Ready to append to end of Volume "DemoLocal-0343" size=207
+ 2026-10-18 22:35:34 fd1 JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Releasing device "FileStorage1a" (/srv/bareos/a).
+ 2026-10-18 22:35:34 lab-sd1 JobId 1102: Elapsed time=00:00:01, Transfer rate=13.53 M Bytes/second
+ 2026-10-18 22:35:34 lab-dir JobId 1102: Insert of attributes batch table with 303 entries start
+ 2026-10-18 22:35:34 lab-dir JobId 1102: Insert of attributes batch table done
+ 2026-10-18 22:35:34 lab-dir JobId 1102: Bareos lab-dir 25.1.1 (14Sep25):
+  OS Information:         Ubuntu 24.04.5 LTS
+  JobId:                  1102
+  Job:                    demo-local-docs.2026-10-18_22.35.31_50
+  Backup Level:           Full
+  Client:                 "fd1" 25.1.1 (14Sep25) Ubuntu 24.04.5 LTS,ubuntu
+  FileSet:                "Demo-Documents" 2026-10-18 22:35:31
+  Pool:                   "DemoLocalPool" (From Job resource)
+  Catalog:                "MyCatalog" (From Client resource)
+  Storage:                "File1a" (From Pool resource)
+  Scheduled time:         18-Oct-2026 22:35:31
+  Start time:             18-Oct-2026 22:35:33
+  End time:               18-Oct-2026 22:35:34
+  Elapsed time:           1 sec
+  Priority:               10
+  Allow Mixed Priority:   no
+  FD Files Written:       303
+  SD Files Written:       303
+  FD Bytes Read:          13,494,630 (13.49 MB)
+  FD Bytes Written:       13,494,630 (13.49 MB)
+  SD Bytes Written:       13,533,411 (13.53 MB)
+  Rate:                   13494.6 KB/s
+  Software Compression:   None
+  VSS:                    no
+  Encryption:             no
+  Accurate:               no
+  Volume name(s):         DemoLocal-0343
+  Volume Session Id:      1
+  Volume Session Time:    1792336627
+  Last Volume Bytes:      13,545,312 (13.54 MB)
+  Non-fatal FD errors:    0
+  SD Errors:              0
+  FD termination status:  OK
+  SD termination status:  OK
+  Bareos binary info:     Self-compiled: Get professional support from https://www.bareos.com
+  Job triggered by:       User
+  Termination:            Backup OK
+
+You have messages.
+.api 2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "api": 2
+  }
+}list joblog jobid=1102
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "joblog": [
+      {
+        "time": "2026-10-18 22:35:31",
+        "logtext": "lab-dir JobId 1102: Warning: Storage group: skipping \"File2\", it is disabled.\n"
+      },
+      {
+        "time": "2026-10-18 22:35:31",
+        "logtext": "lab-dir JobId 1102: Storage group: 1 candidates, using \"File1a\" (Pool resource, policy ListedOrder).\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102: Start Backup JobId 1102, Job=demo-local-docs.2026-10-18_22.35.31_50\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102: Connected Client: fd1 at lab-fd1:9102, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102:  Handshake: Immediate TLS \n"
+      },
+      {
+        "time": "2026-10-18 22:35:33",
+        "logtext": "lab-dir JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-dir JobId 1102: Created new Volume \"DemoLocal-0343\" in catalog.\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-dir JobId 1102: Using Device \"FileStorage1a\" to write.\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "fd1 JobId 1102: Connected Storage daemon at lab-sd1:9103, encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "fd1 JobId 1102:  Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "fd1 JobId 1102: Extended attribute support is enabled\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "fd1 JobId 1102: ACL support is enabled\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Labeled new Volume \"DemoLocal-0343\" on device \"FileStorage1a\" (/srv/bareos/a).\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Moving to end of data on volume \"DemoLocal-0343\"\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Ready to append to end of Volume \"DemoLocal-0343\" size=207\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "fd1 JobId 1102: Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Releasing device \"FileStorage1a\" (/srv/bareos/a).\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-sd1 JobId 1102: Elapsed time=00:00:01, Transfer rate=13.53 M Bytes/second\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-dir JobId 1102: Insert of attributes batch table with 303 entries start\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-dir JobId 1102: Insert of attributes batch table done\n"
+      },
+      {
+        "time": "2026-10-18 22:35:34",
+        "logtext": "lab-dir JobId 1102: Bareos lab-dir 25.1.1 (14Sep25):\n  OS Information:         Ubuntu 24.04.5 LTS\n  JobId:                  1102\n  Job:                    demo-local-docs.2026-10-18_22.35.31_50\n  Backup Level:           Full\n  Client:                 \"fd1\" 25.1.1 (14Sep25) Ubuntu 24.04.5 LTS,ubuntu\n  FileSet:                \"Demo-Documents\" 2026-10-18 22:35:31\n  Pool:                   \"DemoLocalPool\" (From Job resource)\n  Catalog:                \"MyCatalog\" (From Client resource)\n  Storage:                \"File1a\" (From Pool resource)\n  Scheduled time:         18-Oct-2026 22:35:31\n  Start time:             18-Oct-2026 22:35:33\n  End time:               18-Oct-2026 22:35:34\n  Elapsed time:           1 sec\n  Priority:               10\n  Allow Mixed Priority:   no\n  FD Files Written:       303\n  SD Files Written:       303\n  FD Bytes Read:          13,494,630 (13.49 MB)\n  FD Bytes Written:       13,494,630 (13.49 MB)\n  SD Bytes Written:       13,533,411 (13.53 MB)\n  Rate:                   13494.6 KB/s\n  Software Compression:   None\n  VSS:                    no\n  Encryption:             no\n  Accurate:               no\n  Volume name(s):         DemoLocal-0343\n  Volume Session Id:      1\n  Volume Session Time:    1792336627\n  Last Volume Bytes:      13,545,312 (13.54 MB)\n  Non-fatal FD errors:    0\n  SD Errors:              0\n  FD termination status:  OK\n  SD termination status:  OK\n  Bareos binary info:     Self-compiled: Get professional support from https://www.bareos.com\n  Job triggered by:       User\n  Termination:            Backup OK\n\n"
+      }
+    ]
+  }
+}list jobmedia jobid=1102
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobmedia": [
+      {
+        "jobid": "1102",
+        "volumename": "DemoLocal-0343",
+        "firstindex": "1",
+        "lastindex": "303"
+      }
+    ]
+  }
+}run job=demo-s3-backup fileset=Demo-Projects yes
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "run": {
+      "jobid": "1103"
+    }
+  }
+}

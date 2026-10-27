@@ -1,0 +1,10 @@
+{
+  "clients": {
+    "fd1": {
+      "name": "fd1",
+      "address": "127.0.0.1",
+      "version": "25.1.1",
+      "os": "Linux"
+    }
+  }
+}

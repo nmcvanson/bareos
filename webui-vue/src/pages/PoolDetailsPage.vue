@@ -25,6 +25,17 @@
             {{ pool.enabled !== '0' ? t('Enabled') : t('Disabled') }}
           </q-badge>
         </div>
+        <q-space />
+        <q-btn
+          outline
+          no-caps
+          icon="sync"
+          :label="t('Update pool from configuration')"
+          :loading="updatePoolLoading"
+          :disable="!canUpdatePool || updatePoolLoading"
+          data-testid="pool-action-update-from-config"
+          @click="updatePoolFromConfig"
+        />
       </div>
 
       <div class="row q-col-gutter-md">
@@ -127,7 +138,7 @@
                 icon="delete_sweep"
                 :label="pruneSelectedLabel"
                 :loading="pruneSelectedLoading"
-                :disable="pruneSelectedDisabled"
+                :disable="!canPrune || pruneSelectedDisabled"
                 @click="confirmPruneSelectedVolumes"
               />
             </q-card-section>
@@ -189,11 +200,28 @@
         </div>
       </div>
     </template>
+
+    <!-- Director Reply Dialog -->
+    <q-dialog v-model="replyDlg.open" data-testid="director-reply-dialog">
+      <q-card style="min-width: 480px; max-width: 800px">
+        <q-card-section class="panel-header row items-center">
+          <div class="text-h6">{{ replyDlg.title }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup />
+        </q-card-section>
+        <q-card-section>
+          <pre class="console-output" data-testid="director-reply-text">{{ replyDlg.text }}</pre>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps :label="t('Close')" color="primary" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useQuasar } from 'quasar'
@@ -207,10 +235,21 @@ import { usePersistedTablePagination } from '../composables/usePersistedTablePag
 import VolumeNameLink from '../components/VolumeNameLink.vue'
 import { useAuthStore } from '../stores/auth.js'
 import { useDirectorStore } from '../stores/director.js'
+import { useDirectorAclStore } from '../stores/directorAcl.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { formatBytes, formatDuration } from '../mock/index.js'
+import { actionAllowed } from '../utils/acl.js'
 import { quoteDirectorString } from '../utils/directorStrings.js'
 import { formatNumber } from '../utils/locales.js'
+import {
+  buildPrunePoolVolumesCommand,
+  buildUpdatePoolFromConfigCommand,
+  capturePoolPruneTarget,
+  captureVolumeActionTarget,
+  formatDirectorReply,
+  parseDirectorActionReply,
+} from '../utils/volumeActions.js'
+import { createActionTokenGuard } from '../utils/actionToken.js'
 import {
   buildPoolVolumeDetailsQuery,
   resolvePoolDetailsStoragesOrigin,
@@ -227,8 +266,54 @@ import {
 const route     = useRoute()
 const auth      = useAuthStore()
 const director  = useDirectorStore()
+const acl       = useDirectorAclStore()
 const settings  = useSettingsStore()
 const { t } = useI18n()
+
+const activeDirectorName = () => auth.user?.director || settings.directorName || ''
+const canUpdatePool = computed(() => actionAllowed(acl.commands, 'update'))
+const canPrune = computed(() => actionAllowed(acl.commands, 'prune'))
+const updatePoolLoading = ref(false)
+const replyDlg = ref({
+  open: false,
+  title: '',
+  text: '',
+})
+
+onMounted(() => {
+  acl.ensureLoaded().catch(() => {})
+})
+
+async function updatePoolFromConfig() {
+  if (!canUpdatePool.value || updatePoolLoading.value) return
+  const target = captureVolumeActionTarget(poolName.value, currentPoolDirector.value, activeDirectorName())
+  const token = updateGuard.open(target, poolScope(), activeDirectorName())
+  const isCurrent = () => updateGuard.isCurrent(token, poolScope())
+  updatePoolLoading.value = true
+  try {
+    await ensurePoolDirector()
+    if (!canUpdatePool.value || !updateGuard.canWrite(token, poolScope(), activeDirectorName())) return
+    const cmd = buildUpdatePoolFromConfigCommand(token.target.volume)
+    updateGuard.consume(token)
+    const reply = await director.call(cmd)
+    const result = parseDirectorActionReply(reply)
+    replyDlg.value = {
+      open: true,
+      title: result.ok ? t('Update Pool') : t('Update Pool Failed'),
+      text: result.text,
+    }
+    if (result.ok && isCurrent()) await loadPool()
+  } catch (err) {
+    replyDlg.value = {
+      open: true,
+      title: t('Update Pool Failed'),
+      text: formatDirectorReply(err),
+    }
+  } finally {
+    updatePoolLoading.value = false
+  }
+}
+
 const volumesPagination = usePersistedTablePagination('pool-details.volumes', {
   rowsPerPage: 10,
 })
@@ -246,6 +331,23 @@ const requestedDirector = computed(() => (
 const currentPoolDirector = computed(() => (
   requestedDirector.value || auth.user?.director || settings.directorName || ''
 ))
+
+// A pending prune confirmation is a token bound to the pool, Director and
+// volumes it was opened for; a change of pool or Director invalidates it for
+// good (and closes the dialog), switching to its own Director does not.
+const pruneGuard = createActionTokenGuard()
+const updateGuard = createActionTokenGuard()
+const poolScope = () => `${poolName.value}\u0000${currentPoolDirector.value}`
+let pruneDialog = null
+let pruneToken = null
+watch([poolName, currentPoolDirector, activeDirectorName], () => {
+  pruneGuard.observe(poolScope(), activeDirectorName())
+  updateGuard.observe(poolScope(), activeDirectorName())
+  if (!pruneDialog || pruneGuard.isCurrent(pruneToken, poolScope())) return
+  pruneDialog?.hide?.()
+  pruneDialog = null
+  pruneToken = null
+}, { flush: 'sync' })
 const storagesOrigin = computed(() => resolvePoolDetailsStoragesOrigin(route.query))
 const volumeOrigin = computed(() => resolvePoolDetailsVolumeOrigin(route.query))
 const autochangerOrigin = computed(() => resolveAutochangerSelectionQuery(route.query))
@@ -317,7 +419,8 @@ async function ensurePoolDirector() {
     return
   }
 
-  await switchActiveDirector(requestedDirector.value)
+  // The command list belongs to the Director; reload it after switching.
+  if (await switchActiveDirector(requestedDirector.value)) await acl.refresh()
 }
 
 async function loadPool() {
@@ -352,13 +455,15 @@ const pruneSelectedLabel = computed(() => (
 ))
 
 const pruneSelectedDisabled = computed(() => (
-  pruneSelectedLoading.value || selectedPrunableVolumes.value.length === 0
+  !canPrune.value || pruneSelectedLoading.value || selectedPrunableVolumes.value.length === 0
 ))
 
 function confirmPruneSelectedVolumes() {
-  if (pruneSelectedDisabled.value) return
+  if (!canPrune.value || pruneSelectedDisabled.value) return
 
-  const selectedNames = selectedPrunableVolumes.value.map(volume => volume.name).join(', ')
+  const target = capturePoolPruneTarget(poolName.value,
+    selectedPrunableVolumes.value.map(volume => volume.name), currentPoolDirector.value, activeDirectorName())
+  const selectedNames = target.names.join(', ')
   const totalJobs = selectedPrunableVolumes.value.reduce(
     (sum, volume) => sum + Number(volume.prunablejobs ?? 0),
     0
@@ -367,34 +472,39 @@ function confirmPruneSelectedVolumes() {
     (sum, volume) => sum + Number(volume.prunablebytes ?? 0),
     0
   )
-  $q.dialog({
+  const token = pruneGuard.open(target, poolScope(), activeDirectorName())
+  pruneToken = token
+  pruneDialog = $q.dialog({
     title: t('Prune Volumes'),
-    message: `${t('Prune the selected volumes from pool')} ${poolName.value}? ${selectedNames} (${totalJobs} ${t('Jobs')}, ${formatBytes(totalBytes)})`,
+    message: `${t('Prune the selected volumes from pool')} ${target.volume}? ${selectedNames} (${totalJobs} ${t('Jobs')}, ${formatBytes(totalBytes)})`,
     ok: { label: t('Prune'), color: 'negative', flat: true },
     cancel: { label: t('Cancel'), flat: true },
-  }).onOk(pruneSelectedVolumes)
+  })
+  pruneDialog.onOk(() => pruneSelectedVolumes(token))
 }
 
-async function pruneSelectedVolumes() {
-  if (pruneSelectedDisabled.value) return
+async function pruneSelectedVolumes(token) {
+  if (!canPrune.value || pruneSelectedLoading.value || !pruneGuard.isCurrent(token, poolScope())) return
 
   pruneSelectedLoading.value = true
-  const selectedNames = selectedPrunableVolumes.value.map(volume => volume.name)
-  const command = [
-    `prune volume pool=${quoteDirectorString(poolName.value)}`,
-    ...selectedNames.map(name => `volume=${quoteDirectorString(name)}`),
-    'yes',
-  ].join(' ')
+  const selectedNames = [...token.target.names]
+  const command = buildPrunePoolVolumesCommand(token.target)
 
   try {
     await ensurePoolDirector()
-    await director.call(command)
+    if (!canPrune.value || !pruneGuard.canWrite(token, poolScope(), activeDirectorName())) return
+    pruneGuard.consume(token)
+    const reply = await director.call(command)
+    const result = parseDirectorActionReply(reply)
+    replyDlg.value = { open: true, title: result.ok ? t('Prune Volumes') : t('Prune failed'), text: result.text }
+    if (!result.ok) return
     $q.notify({
       type: 'positive',
       message: `${t('Pruned')} ${formatNumber(selectedNames.length, settings.locale)} ${t('selected volume(s).')}`,
     })
     await loadPool()
   } catch (pruneError) {
+    replyDlg.value = { open: true, title: t('Prune failed'), text: formatDirectorReply(pruneError) }
     $q.notify({
       type: 'negative',
       message: `${t('Prune failed')}: ${pruneError.message}`,

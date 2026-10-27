@@ -111,6 +111,18 @@
                 <span aria-hidden="true">↻</span>
                 <span class="panel-refresh-countdown__value">{{ countdown }}s</span>
               </span>
+              <q-btn
+                v-if="canConfigure"
+                flat
+                dense
+                no-caps
+                icon="add"
+                color="white"
+                class="q-mr-sm"
+                :label="t('New job')"
+                :to="{ name: 'job-create' }"
+                data-testid="jobs-new-job"
+              />
               <q-btn flat round dense icon="refresh" color="white" @click="manualRefresh" />
             </div>
           </q-card-section>
@@ -197,186 +209,254 @@
               v-model:pagination="pagination"
               @request="onRequest"
             >
-              <template #body-cell-id="props">
-                <q-td :props="props">
-                  <a href="#" class="text-primary" @click.prevent="openJobDetails(props.row)">
-                    {{ props.value }}
-                  </a>
-                </q-td>
-              </template>
-              <template #body-cell-director="props">
-                <q-td :props="props">
-                  <DirectorLabel :director="props.row.director || props.value || ''" />
-                </q-td>
-              </template>
-              <template #body-cell-name="props">
-                <q-td :props="props">
-                  <a
-                    href="#"
-                    class="text-primary"
-                    :title="`${t('Job Name')}: ${props.value}`"
-                    @click.prevent="setJobFilter(props.value ?? '')"
-                  >
-                    {{ props.value }}
-                  </a>
-                </q-td>
-              </template>
-              <template #body-cell-status="props">
-                <q-td :props="props" class="text-center">
-                  <a
-                    v-if="props.row.status"
-                    href="#"
-                    class="inline-job-filter justify-center"
-                    :title="`${t('Status')}: ${jobStatusLabel(props.row.status)}`"
-                    @click.prevent="applyStatusFilter(props.row.status)"
-                  >
-                    <span
-                      v-if="isWaitingStatus(displayJobStatus(props.row))"
-                      class="row items-center no-wrap q-gutter-x-xs justify-center"
-                    >
-                      <q-icon name="hourglass_empty" color="orange-7" size="16px" class="animated-spin" />
-                      <span class="text-orange-7 text-caption">{{ displayJobStatus(props.row) }}</span>
-                    </span>
-                    <JobStatusBadge v-else :status="displayJobStatus(props.row)" />
-                  </a>
-                  <span v-else>—</span>
-                </q-td>
-              </template>
-              <template #body-cell-client="props">
-                <q-td :props="props">
-                  <span v-if="props.value" class="row inline items-center no-wrap q-gutter-x-xs">
-                    <a
-                      href="#"
-                      class="text-primary inline-job-filter"
-                      :title="`${t('Client')}: ${props.value}`"
-                      @click.prevent="applyClientFilter(props.value)"
-                    >
-                      {{ props.value }}
-                    </a>
-                    <q-btn
-                      flat
-                      round
-                      dense
-                      size="sm"
-                      icon="info"
-                      :title="t('Client details')"
-                      @click="openClientDetails(props.row)"
-                    />
-                  </span>
-                  <span v-else>—</span>
-                </q-td>
-              </template>
-              <template #body-cell-type="props">
-                <q-td :props="props" class="text-center">
-                  <a
-                    v-if="props.value"
-                    href="#"
-                    class="inline-job-filter"
-                    :title="`${t('Type')}: ${jobTypeLabel(props.value)}`"
-                    @click.prevent="applyTypeFilter(props.value)"
-                  >
-                    <JobTypeBadge :type="props.value" />
-                  </a>
-                  <span v-else>—</span>
-                </q-td>
-              </template>
-              <template #body-cell-level="props">
-                <q-td :props="props" class="text-center">
-                  <a
-                    v-if="props.value"
-                    href="#"
-                    class="inline-job-filter"
-                    :title="`${t('Level')}: ${jobLevelLabel(props.value)}`"
-                    @click.prevent="applyLevelFilter(props.value)"
-                  >
-                    <JobLevelBadge :level="props.value" />
-                  </a>
-                  <span v-else>—</span>
-                </q-td>
-              </template>
-              <template #body-cell-starttime="props">
-                <q-td :props="props">
-                  <span :title="settings.relativeTime ? props.value : timeAgo(props.value, settings.locale)">
-                    {{ settings.relativeTime ? timeAgo(props.value, settings.locale) : props.value }}
-                  </span>
-                </q-td>
-              </template>
-              <template #body-cell-bytes="props">
-                <q-td :props="props" class="text-right" style="min-width:90px">
-                  <div>{{ fmtBytes(props.row.bytes) }}</div>
-                  <q-linear-progress
-                    v-if="isRunning(props.row.status)"
-                    indeterminate
-                    color="primary" track-color="grey-3"
-                    size="4px" class="q-mt-xs" rounded
-                  />
-                  <q-linear-progress
-                    v-else
-                    :value="bytesGauge(props.row.bytes)"
-                    color="primary" track-color="grey-3"
-                    size="4px" class="q-mt-xs" rounded
-                  />
-                </q-td>
-              </template>
-              <template #body-cell-files="props">
-                <q-td :props="props" class="text-right" style="min-width:80px">
-                  <div>{{ formatNumber(props.value, settings.locale) }}</div>
-                  <q-linear-progress
-                    v-if="isRunning(props.row.status)"
-                    indeterminate
-                    color="teal" track-color="grey-3"
-                    size="4px" class="q-mt-xs" rounded
-                  />
-                  <q-linear-progress
-                    v-else
-                    :value="filesGauge(props.row.files)"
-                    color="teal" track-color="grey-3"
-                    size="4px" class="q-mt-xs" rounded
-                  />
-                </q-td>
-              </template>
-              <template #body-cell-duration="props">
-                <q-td :props="props" class="text-right" style="min-width:80px">
-                  <div>{{ props.value || '—' }}
-                    <q-tooltip v-if="props.row.endtime">
-                       {{ t('Ended') }}: {{ props.row.endtime }}
-                    </q-tooltip>
-                  </div>
-                  <q-linear-progress
-                    :value="durationGauge(props.value)"
-                    color="orange" track-color="grey-3"
-                    size="4px" class="q-mt-xs" rounded
-                  />
-                </q-td>
-              </template>
-              <template #body-cell-speed="props">
-                <q-td :props="props" class="text-right" style="min-width:80px">
-                  <div v-if="isRunning(props.row.status)" class="text-grey-5">—</div>
-                  <template v-else>
-                    <div>{{ fmtSpeed(props.row.bytes, props.row.duration) }}</div>
-                    <q-linear-progress
-                      :value="speedGauge(props.row)"
-                      color="cyan-7" track-color="grey-3"
-                      size="4px" class="q-mt-xs" rounded
-                    />
-                  </template>
-                </q-td>
-              </template>
-              <template #body-cell-actions="props">
-                <q-td :props="props" class="text-center" style="white-space:nowrap">
-                   <q-btn flat round dense size="sm" icon="restart_alt" :title="t('Rerun')"
-                         @click="confirmRerun(props.row)" class="q-mr-xs" />
-                  <q-btn v-if="isRunning(props.row.status)"
-                         flat round dense size="sm" icon="cancel" color="negative" :title="t('Cancel')"
-                         @click="confirmCancel(props.row)" class="q-mr-xs" />
-                  <q-btn v-if="canRestoreFromJob(props.row)"
-                         flat round dense size="sm" icon="restore" color="teal"
-                         :title="t('Restore this job')"
-                         @click="openRestoreDetails(props.row)"
-                         class="q-mr-xs" />
-                   <q-btn flat round dense size="sm" icon="info" :title="t('Details')"
-                         @click="openJobDetails(props.row)" />
-                </q-td>
+              <template #body="props">
+                <q-tr :props="props">
+                  <q-td v-for="col in props.cols" :key="col.name" :props="props">
+                    <!-- outcome -->
+                    <template v-if="col.name === 'outcome'">
+                      <div class="row items-center no-wrap justify-center q-gutter-x-xs">
+                        <q-icon
+                          :name="getOutcomeIcon(props.row).name"
+                          :color="getOutcomeIcon(props.row).color"
+                          size="18px"
+                          :class="getOutcomeIcon(props.row).class"
+                        >
+                          <q-tooltip>{{ t(getOutcomeIcon(props.row).label) }}</q-tooltip>
+                        </q-icon>
+                        <q-btn
+                          v-if="canExpandReasons(props.row)"
+                          flat round dense size="xs"
+                          :icon="expandedReasonRows[jobReasonScopeKey(props.row)] ? 'expand_less' : 'expand_more'"
+                          :title="t('Show failure reason')"
+                          @click.stop="toggleRowReasons(props)"
+                        />
+                      </div>
+                    </template>
+
+                    <!-- id -->
+                    <template v-else-if="col.name === 'id'">
+                      <a href="#" class="text-primary" @click.prevent="openJobDetails(props.row)">
+                        {{ col.value }}
+                      </a>
+                    </template>
+
+                    <!-- director -->
+                    <template v-else-if="col.name === 'director'">
+                      <DirectorLabel :director="props.row.director || col.value || ''" />
+                    </template>
+
+                    <!-- name -->
+                    <template v-else-if="col.name === 'name'">
+                      <a
+                        href="#"
+                        class="text-primary"
+                        :title="`${t('Job Name')}: ${col.value}`"
+                        @click.prevent="setJobFilter(col.value ?? '')"
+                      >
+                        {{ col.value }}
+                      </a>
+                    </template>
+
+                    <!-- client -->
+                    <template v-else-if="col.name === 'client'">
+                      <span v-if="col.value" class="row inline items-center no-wrap q-gutter-x-xs">
+                        <a
+                          href="#"
+                          class="text-primary inline-job-filter"
+                          :title="`${t('Client')}: ${col.value}`"
+                          @click.prevent="applyClientFilter(col.value)"
+                        >
+                          {{ col.value }}
+                        </a>
+                        <q-btn
+                          flat
+                          round
+                          dense
+                          size="sm"
+                          icon="info"
+                          :title="t('Client details')"
+                          @click="openClientDetails(props.row)"
+                        />
+                      </span>
+                      <span v-else>—</span>
+                    </template>
+
+                    <!-- type -->
+                    <template v-else-if="col.name === 'type'">
+                      <a
+                        v-if="col.value"
+                        href="#"
+                        class="inline-job-filter"
+                        :title="`${t('Type')}: ${jobTypeLabel(col.value)}`"
+                        @click.prevent="applyTypeFilter(col.value)"
+                      >
+                        <JobTypeBadge :type="col.value" />
+                      </a>
+                      <span v-else>—</span>
+                    </template>
+
+                    <!-- level -->
+                    <template v-else-if="col.name === 'level'">
+                      <a
+                        v-if="col.value"
+                        href="#"
+                        class="inline-job-filter"
+                        :title="`${t('Level')}: ${jobLevelLabel(col.value)}`"
+                        @click.prevent="applyLevelFilter(col.value)"
+                      >
+                        <JobLevelBadge :level="col.value" />
+                      </a>
+                      <span v-else>—</span>
+                    </template>
+
+                    <!-- status -->
+                    <template v-else-if="col.name === 'status'">
+                      <a
+                        v-if="props.row.status"
+                        href="#"
+                        class="inline-job-filter justify-center"
+                        :title="`${t('Status')}: ${jobStatusLabel(props.row.status)}`"
+                        @click.prevent="applyStatusFilter(props.row.status)"
+                      >
+                        <span
+                          v-if="isWaitingStatus(displayJobStatus(props.row))"
+                          class="row items-center no-wrap q-gutter-x-xs justify-center"
+                        >
+                          <q-icon name="hourglass_empty" color="orange-7" size="16px" class="animated-spin" />
+                          <span class="text-orange-7 text-caption">{{ displayJobStatus(props.row) }}</span>
+                        </span>
+                        <JobStatusBadge v-else :status="displayJobStatus(props.row)" />
+                      </a>
+                      <span v-else>—</span>
+                    </template>
+
+                    <!-- starttime -->
+                    <template v-else-if="col.name === 'starttime'">
+                      <span :title="settings.relativeTime ? col.value : timeAgo(col.value, settings.locale)">
+                        {{ settings.relativeTime ? timeAgo(col.value, settings.locale) : col.value }}
+                      </span>
+                    </template>
+
+                    <!-- bytes -->
+                    <template v-else-if="col.name === 'bytes'">
+                      <div style="min-width:90px">
+                        <div>{{ fmtBytes(props.row.bytes) }}</div>
+                        <q-linear-progress
+                          v-if="isRunning(props.row.status)"
+                          indeterminate
+                          color="primary" track-color="grey-3"
+                          size="4px" class="q-mt-xs" rounded
+                        />
+                        <q-linear-progress
+                          v-else
+                          :value="bytesGauge(props.row.bytes)"
+                          color="primary" track-color="grey-3"
+                          size="4px" class="q-mt-xs" rounded
+                        />
+                      </div>
+                    </template>
+
+                    <!-- files -->
+                    <template v-else-if="col.name === 'files'">
+                      <div style="min-width:80px">
+                        <div>{{ formatNumber(col.value, settings.locale) }}</div>
+                        <q-linear-progress
+                          v-if="isRunning(props.row.status)"
+                          indeterminate
+                          color="teal" track-color="grey-3"
+                          size="4px" class="q-mt-xs" rounded
+                        />
+                        <q-linear-progress
+                          v-else
+                          :value="filesGauge(props.row.files)"
+                          color="teal" track-color="grey-3"
+                          size="4px" class="q-mt-xs" rounded
+                        />
+                      </div>
+                    </template>
+
+                    <!-- duration -->
+                    <template v-else-if="col.name === 'duration'">
+                      <div style="min-width:80px">
+                        <div>{{ col.value || '—' }}
+                          <q-tooltip v-if="props.row.endtime">
+                             {{ t('Ended') }}: {{ props.row.endtime }}
+                          </q-tooltip>
+                        </div>
+                        <q-linear-progress
+                          :value="durationGauge(col.value)"
+                          color="orange" track-color="grey-3"
+                          size="4px" class="q-mt-xs" rounded
+                        />
+                      </div>
+                    </template>
+
+                    <!-- speed -->
+                    <template v-else-if="col.name === 'speed'">
+                      <div style="min-width:80px">
+                        <div v-if="isRunning(props.row.status)" class="text-grey-5">—</div>
+                        <template v-else>
+                          <div>{{ fmtSpeed(props.row.bytes, props.row.duration) }}</div>
+                          <q-linear-progress
+                            :value="speedGauge(props.row)"
+                            color="cyan-7" track-color="grey-3"
+                            size="4px" class="q-mt-xs" rounded
+                          />
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- errors -->
+                    <template v-else-if="col.name === 'errors'">
+                      {{ col.value }}
+                    </template>
+
+                    <!-- actions -->
+                    <template v-else-if="col.name === 'actions'">
+                      <div style="white-space:nowrap">
+                        <q-btn flat round dense size="sm" icon="restart_alt" :title="t('Rerun')"
+                              @click="confirmRerun(props.row)" class="q-mr-xs" />
+                        <q-btn v-if="isRunning(props.row.status)"
+                              flat round dense size="sm" icon="cancel" color="negative" :title="t('Cancel')"
+                              @click="confirmCancel(props.row)" class="q-mr-xs" />
+                        <q-btn v-if="canRestoreFromJob(props.row)"
+                              flat round dense size="sm" icon="restore" color="teal"
+                              :title="t('Restore this job')"
+                              @click="openRestoreDetails(props.row)"
+                              class="q-mr-xs" />
+                        <q-btn flat round dense size="sm" icon="info" :title="t('Details')"
+                              @click="openJobDetails(props.row)" />
+                      </div>
+                    </template>
+
+                    <!-- fallback -->
+                    <template v-else>
+                      {{ col.value }}
+                    </template>
+                  </q-td>
+                </q-tr>
+                <q-tr v-if="expandedReasonRows[jobReasonScopeKey(props.row)]" :props="props" class="bg-grey-1">
+                  <q-td colspan="100%" class="q-pa-sm">
+                    <div v-if="rowReasons[jobReasonScopeKey(props.row)]?.loading" class="row items-center q-gutter-x-sm text-caption">
+                      <q-spinner size="14px" color="primary" />
+                      <span>{{ t('Loading reason…') }}</span>
+                    </div>
+                    <div v-else-if="rowReasons[jobReasonScopeKey(props.row)]?.error" class="text-negative text-caption">
+                      {{ rowReasons[jobReasonScopeKey(props.row)].error }}
+                    </div>
+                    <div v-else-if="rowReasons[jobReasonScopeKey(props.row)]?.reasons?.length" class="q-gutter-y-xs">
+                      <div v-if="rowReasons[jobReasonScopeKey(props.row)].termination" class="text-caption text-weight-bold text-negative">
+                        {{ rowReasons[jobReasonScopeKey(props.row)].termination }}
+                      </div>
+                      <div v-for="(line, idx) in rowReasons[jobReasonScopeKey(props.row)].reasons" :key="idx" class="text-caption font-monospace text-negative">
+                        {{ line }}
+                      </div>
+                    </div>
+                    <div v-else class="text-caption text-grey">
+                      {{ t('No specific error reason found in job log.') }}
+                    </div>
+                  </q-td>
+                </q-tr>
               </template>
             </q-table>
           </q-card-section>
@@ -482,11 +562,32 @@
             <q-form @submit.prevent="runJob" class="q-gutter-md">
                <q-select v-model="runForm.job"     data-testid="run-job-field" :options="dotJobs"     :label="t('Job *')"     outlined dense
                          @update:model-value="onJobSelected" />
-              <q-select v-model="runForm.client"  :options="dotClients"  :label="t('Client')"    outlined dense clearable />
-              <q-select v-model="runForm.fileset" :options="dotFilesets" :label="t('Fileset')"   outlined dense clearable />
-              <q-select v-model="runForm.pool"    :options="dotPools"    :label="t('Pool')"      outlined dense clearable />
-              <q-select v-model="runForm.storage" :options="dotStorages" :label="t('Storage')"   outlined dense clearable />
-              <q-select v-model="runForm.level"   :options="levels"      :label="t('Level')"     outlined dense />
+              <q-select v-model="runForm.client"  :options="dotClients"  :label="t('Client')"    outlined dense clearable @update:model-value="runOverrides.client = true" />
+              <q-select v-model="runForm.fileset" :options="dotFilesets" :label="t('Fileset')"   outlined dense clearable @update:model-value="runOverrides.fileset = true" />
+              <div v-if="runFilesetIncludes.length > 0" class="q-pl-xs q-mt-xs">
+                <div class="text-caption text-grey-7">{{ t('Includes') }}:</div>
+                <ul class="q-my-none q-pl-md text-caption font-monospace">
+                  <li v-for="(path, idx) in runFilesetIncludes" :key="idx">{{ path }}</li>
+                </ul>
+              </div>
+              <q-select v-model="runForm.pool"    :options="dotPools"    :label="t('Pool')"      outlined dense clearable @update:model-value="runOverrides.pool = true" />
+              <q-select v-model="runForm.storage" :options="dotStorages" :label="t('Storage')"   outlined dense clearable @update:model-value="runOverrides.storage = true" />
+              <div class="text-caption text-grey-7">{{ t('Default values are shown. Only fields you change override the job configuration.') }}</div>
+              <q-banner v-if="runGroupHint" dense class="bg-blue-1 text-primary rounded-borders q-mt-xs">
+                <div>
+                  <span class="text-weight-bold">{{ t('Storage group') }}:</span>
+                  {{ runGroupHint.members.join(' → ') }}
+                  ({{ runGroupHint.membersSource }}) ·
+                  <span class="text-weight-bold">{{ t('policy') }}:</span>
+                  {{ runGroupHint.policy }}
+                  ({{ runGroupHint.policySource }})
+                </div>
+                <div>{{ t('Leave Storage empty to keep the group.') }}</div>
+                <div v-if="runOverrides.storage && runForm.storage" class="text-warning text-weight-bold q-mt-xs">
+                  {{ t('This storage replaces the storage group for this run.') }}
+                </div>
+              </q-banner>
+              <q-select v-model="runForm.level"   :options="levels"      :label="t('Level')"     outlined dense @update:model-value="runOverrides.level = true" />
               <q-input  v-model="runForm.when"                           :label="t('When (optional)')" outlined dense
                         :placeholder="t('YYYY-MM-DD HH:MM:SS')">
                 <template #append>
@@ -505,7 +606,7 @@
                   </q-icon>
                 </template>
               </q-input>
-              <q-input  v-model.number="runForm.priority" type="number" :label="t('Priority')" outlined dense style="max-width:140px" />
+              <q-input  v-model.number="runForm.priority" type="number" :label="t('Priority')" outlined dense style="max-width:140px" @update:model-value="runOverrides.priority = true" />
               <div>
                  <q-btn data-testid="run-job-submit" type="submit" color="primary" :label="t('Run Job')" icon="play_arrow"
                         no-caps :loading="runLoading" :disable="!runForm.job" />
@@ -682,6 +783,7 @@ import { useDirectorScope } from '../composables/useDirectorScope.js'
 import { usePersistedTablePagination } from '../composables/usePersistedTablePagination.js'
 import { useAuthStore } from '../stores/auth.js'
 import { useDirectorStore } from '../stores/director.js'
+import { useDirectorAclStore } from '../stores/directorAcl.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { buildClientDetailsQuery } from '../utils/clients.js'
 import { formatNumber } from '../utils/locales.js'
@@ -729,14 +831,23 @@ import JobStatusBadge from '../components/JobStatusBadge.vue'
 import JobLevelBadge from '../components/JobLevelBadge.vue'
 import JobTypeBadge from '../components/JobTypeBadge.vue'
 import JobTimeline from '../components/JobTimeline.vue'
+import { quoteDirectorString } from '../utils/directorStrings.js'
+import { effectiveGroup } from '../utils/storageGroups.js'
+import { runStorageDefault, runFormSubmission } from '../utils/runForm.js'
+import { jobOutcome } from '../utils/jobOutcome.js'
+import { createJobReasonCache, jobReasonScopeKey, toggleJobReasonExpansion } from '../utils/jobReasonCache.js'
+import { filesetIncludePaths } from '../utils/filesets.js'
+import { actionAllowed } from '../utils/acl.js'
 
 const route    = useRoute()
 const router   = useRouter()
 const $q       = useQuasar()
 const auth     = useAuthStore()
 const director = useDirectorStore()
+const acl      = useDirectorAclStore()
 const settings = useSettingsStore()
 const { t } = useI18n()
+const canConfigure = computed(() => actionAllowed(acl.commands, 'configure'))
 const validTabs = new Set(['list', 'actions', 'run', 'rerun', 'timeline'])
 function normaliseTab(value) {
   return validTabs.has(value) ? value : 'list'
@@ -1264,8 +1375,52 @@ function isRunning(status) {
   return status === 'R' || status === 'l'
 }
 
+function getOutcomeIcon(row) {
+  const o = jobOutcome(row)
+  switch (o.state) {
+    case 'ok':
+      return { name: 'check_circle', color: 'positive', label: o.label }
+    case 'warning':
+      return { name: 'warning', color: 'warning', label: o.label }
+    case 'failed':
+      return { name: 'error', color: 'negative', label: o.label }
+    case 'canceled':
+      return { name: 'cancel', color: 'grey-7', label: o.label }
+    case 'running':
+      return { name: 'sync', color: 'primary', class: 'animated-spin', label: o.label }
+    case 'waiting':
+      return { name: 'hourglass_empty', color: 'light-blue', class: 'animated-spin', label: o.label }
+    default:
+      return { name: 'help_outline', color: 'grey-5', label: o.label }
+  }
+}
+
+function canExpandReasons(row) {
+  const o = jobOutcome(row)
+  return o.state === 'failed' || o.state === 'warning' || o.state === 'canceled'
+}
+
+const rowReasons = ref({})
+const expandedReasonRows = ref({})
+const reasonCache = createJobReasonCache({
+  switchDirector: row => switchToJobDirector(row),
+  call: command => director.call(command),
+  fallbackDirector: () => auth.user?.director || '',
+  onUpdate: (key, value) => { rowReasons.value = { ...rowReasons.value, [key]: value } },
+})
+onUnmounted(() => reasonCache.dispose())
+
+async function toggleRowReasons(props) {
+  const row = props.row
+  const key = jobReasonScopeKey(row, auth.user?.director)
+  expandedReasonRows.value = toggleJobReasonExpansion(expandedReasonRows.value, row, auth.user?.director)
+  props.expand = expandedReasonRows.value[key]
+  if (props.expand) await reasonCache.load(row)
+}
+
 // ── columns ───────────────────────────────────────────────────────────────────
 const columns = computed(() => [
+  { name: 'outcome',   label: 'Outcome',  field: 'status',    align: 'center', sortable: true, style: 'width:60px' },
   { name: 'id',        label: 'ID',       field: 'id',        align: 'right',  sortable: true, style: 'width:60px' },
   ...(showDirectorColumn.value ? [{
     name: 'director', label: 'Director', field: 'director', align: 'left', sortable: true,
@@ -1616,7 +1771,33 @@ const levels      = ['Full', 'Incremental', 'Differential']
 const runLoading  = ref(false)
 
 const runForm = ref({ job: null, client: null, fileset: null, pool: null, storage: null, level: 'Incremental', when: '', priority: 10 })
+const runOverrides = ref({})
+let runDefaultsRequest = 0
+const runGroupHint = ref(null)
+const runGroupLoading = ref(false)
 const runWhenPickerValue = ref(formatRunWhenPickerDate(new Date()))
+const runFilesetIncludes = ref([])
+
+watch(currentSingletonDirector, () => {
+  runDefaultsRequest++
+  runOverrides.value = {}
+  runGroupHint.value = null
+  runForm.value = { job: null, client: null, fileset: null, pool: null, storage: null, level: null, when: '', priority: null }
+}, { flush: 'sync' })
+
+watch(() => runForm.value.fileset, async (filesetName) => {
+  if (!filesetName) {
+    runFilesetIncludes.value = []
+    return
+  }
+  try {
+    await ensureSingletonTabDirector()
+    const res = await director.call('show fileset=' + quoteDirectorString(filesetName))
+    runFilesetIncludes.value = filesetIncludePaths(res, filesetName)
+  } catch {
+    runFilesetIncludes.value = []
+  }
+}, { immediate: true })
 
 function prepareRunWhenPicker() {
   runWhenPickerValue.value = resolveRunWhenPickerValue(runForm.value.when)
@@ -1656,35 +1837,63 @@ async function loadRunOptions() {
 }
 
 async function onJobSelected(name) {
+  const request = ++runDefaultsRequest
+  runOverrides.value = {}
+  runGroupHint.value = null
+  runForm.value = { ...runForm.value, job: name, client: null, fileset: null, pool: null, storage: null, level: null, priority: null }
   if (!name) return
   try {
     await ensureSingletonTabDirector()
+    if (request !== runDefaultsRequest) return
     const res = await director.call(buildJobDefaultsCommand(name))
-    const d   = res?.defaults ?? res ?? {}
-    if (Object.hasOwn(d, 'client')) {
+    if (request !== runDefaultsRequest) return
+    const d   = res?.defaults ?? res?.result?.defaults ?? res ?? {}
+    if (Object.hasOwn(d, 'client') && !runOverrides.value.client) {
       runForm.value.client = resolvePermittedRunJobDefault(dotClients.value, d.client)
     }
-    if (Object.hasOwn(d, 'fileset')) {
+    if (Object.hasOwn(d, 'fileset') && !runOverrides.value.fileset) {
       runForm.value.fileset = resolvePermittedRunJobDefault(dotFilesets.value, d.fileset)
     }
-    if (Object.hasOwn(d, 'pool')) {
+    if (Object.hasOwn(d, 'pool') && !runOverrides.value.pool) {
       runForm.value.pool = resolvePermittedRunJobDefault(dotPools.value, d.pool)
     }
-    if (Object.hasOwn(d, 'storage')) {
+    if (Object.hasOwn(d, 'storage') && !runOverrides.value.storage) {
       runForm.value.storage = resolvePermittedRunJobDefault(dotStorages.value, d.storage)
     }
-    if (d.level)    runForm.value.level    = d.level
-    if (d.priority) runForm.value.priority = Number(d.priority)
+    if (d.level && !runOverrides.value.level) runForm.value.level = d.level
+    if (d.priority && !runOverrides.value.priority) runForm.value.priority = Number(d.priority)
+
+    runGroupLoading.value = true
+    try {
+      const jobRes = await director.call('show job=' + quoteDirectorString(name) + ' verbose')
+      if (request !== runDefaultsRequest) return
+      const job = jobRes?.jobs?.[name] ?? jobRes?.result?.jobs?.[name]
+      let pool = null
+      if (d.pool) {
+        const poolRes = await director.call('show pool=' + quoteDirectorString(d.pool))
+        if (request !== runDefaultsRequest) return
+        pool = poolRes?.pools?.[d.pool] ?? poolRes?.result?.pools?.[d.pool]
+      }
+      const group = effectiveGroup({ job, pool })
+      const resGroup = runStorageDefault(runForm.value.storage, group)
+      if (!runOverrides.value.storage) runForm.value.storage = resGroup.storage
+      runGroupHint.value = resGroup.hint
+    } catch {
+      if (request === runDefaultsRequest) runGroupHint.value = null
+    } finally {
+      if (request === runDefaultsRequest) runGroupLoading.value = false
+    }
   } catch { /* ignore */ }
 }
 
 async function runJob() {
   const f = runForm.value
-  if (!f.job) return
+  if (!f.job || runLoading.value) return
+  const submission = runFormSubmission(f, runOverrides.value)
   runLoading.value = true
   try {
     await ensureSingletonTabDirector()
-    const res = await director.call(buildRunJobCommand(f))
+    const res = await director.call(buildRunJobCommand(submission))
     const newId = res?.run?.jobid ?? res?.jobid ?? '?'
     $q.notify({ type: 'positive', message: `Job started — ID ${newId}` })
     tab.value = 'list'
@@ -1806,6 +2015,7 @@ function manualRefresh() {
 }
 
 onMounted(() => {
+  acl.ensureLoaded().catch(() => {})
   loadAvailableDirectors()
   syncSelectedDirectors()
   syncJobsScopeDirectorQuery()

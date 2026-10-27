@@ -243,6 +243,13 @@ if(NOT client-only)
                              Bareos::SQL GTest::gtest_main
   )
   bareos_add_test(
+    configure_edit LINK_LIBRARIES Bareos::Dir GTest::gtest_main
+  )
+  bareos_add_test(
+    configure_set LINK_LIBRARIES testing_common Bareos::Dir Bareos::Findlib
+                                 Bareos::SQL GTest::gtest_main
+  )
+  bareos_add_test(
     dir_fd_connection
     LINK_LIBRARIES testing_common Bareos::Dir Bareos::Lib Bareos::SQL
                    Bareos::Findlib GTest::gtest_main

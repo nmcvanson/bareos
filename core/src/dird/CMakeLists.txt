@@ -95,6 +95,7 @@ target_sources(
           scheduler_private.cc
           stats.cc
           storage.cc
+          configure_edit.cc
           storage_group_policy.cc
           ua.cc
           ua_acl.cc

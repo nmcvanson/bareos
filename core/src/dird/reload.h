@@ -22,6 +22,7 @@
 #ifndef BAREOS_DIRD_RELOAD_H_
 #define BAREOS_DIRD_RELOAD_H_
 
+#include <optional>
 #include "include/bareos.h"
 #include "include/jcr.h"
 #include "dird/dird_conf.h"
@@ -40,6 +41,43 @@ namespace directordaemon {
 bool CheckResources();
 bool InitializeSqlPooling(void);
 bool DoReloadConfig();
+
+// Proof that the caller holds the configuration change guard; only
+// TryBeginConfigChange() makes one, and its destruction ends the change.
+class ConfigChangeToken {
+ public:
+  ConfigChangeToken(const ConfigChangeToken&) = delete;
+  ConfigChangeToken& operator=(const ConfigChangeToken&) = delete;
+  ConfigChangeToken(ConfigChangeToken&& other) noexcept : active_(other.active_)
+  {
+    other.active_ = false;
+  }
+  ConfigChangeToken& operator=(ConfigChangeToken&& other) noexcept
+  {
+    if (this != &other) {
+      Release();
+      active_ = other.active_;
+      other.active_ = false;
+    }
+    return *this;
+  }
+  ~ConfigChangeToken() { Release(); }
+
+  // False for a moved-from or released token.
+  bool active() const { return active_; }
+
+ private:
+  friend std::optional<ConfigChangeToken> TryBeginConfigChange();
+  ConfigChangeToken() = default;
+  void Release();  // ends the change once, if this token holds it
+  bool active_{true};
+};
+
+// Empty while another configuration change or reload runs.
+std::optional<ConfigChangeToken> TryBeginConfigChange();
+
+// Reloads the configuration; needs the change guard.
+bool ReloadConfigHeld(const ConfigChangeToken& token);
 
 } /* namespace directordaemon */
 

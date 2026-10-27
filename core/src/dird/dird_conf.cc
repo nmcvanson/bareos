@@ -1171,7 +1171,7 @@ bool ValidateResource(int res_type,
  * A name listed here is accepted by the configuration parser; anything else
  * is rejected with the list of valid names.
  */
-static const char* storage_group_policies[]
+const char* storage_group_policies[]
     = {"ListedOrder", "LeastUsed", nullptr};
 
 /* Check one StorageGroupPolicy value. An unset policy is valid: the effective

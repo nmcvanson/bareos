@@ -1,0 +1,460 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+.api 2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "api": 2
+  }
+}show job=demo-local-docs verbose
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": {
+      "demo-local-docs": {
+        "name": "demo-local-docs",
+        "description": "",
+        "type": "Backup",
+        "protocol": "Native",
+        "backupformat": "Native",
+        "level": "Full",
+        "messages": "Standard",
+        "storagegrouppolicy": "",
+        "pool": "DemoLocalPool",
+        "fullbackuppool": "",
+        "virtualfullbackuppool": "",
+        "incrementalbackuppool": "",
+        "differentialbackuppool": "",
+        "nextpool": "",
+        "client": "fd1",
+        "fileset": "Demo-Documents",
+        "schedule": "",
+        "jobtoverify": "",
+        "catalog": "",
+        "jobdefs": "DefaultJob",
+        "where": "",
+        "regexwhere": "",
+        "stripprefix": "",
+        "addprefix": "",
+        "addsuffix": "",
+        "bootstrap": "",
+        "writebootstrap": "/var/lib/bareos/%c.bsr",
+        "replace": "Always",
+        "maximumbandwidth": 0,
+        "maxrunschedtime": "0",
+        "maxruntime": "0",
+        "fullmaxruntime": "0",
+        "incrementalmaxruntime": "0",
+        "differentialmaxruntime": "0",
+        "maxwaittime": "0",
+        "maxstartdelay": "0",
+        "maxfullinterval": "0",
+        "maxvirtualfullinterval": "0",
+        "maxdiffinterval": "0",
+        "prefixlinks": false,
+        "prunejobs": false,
+        "prunefiles": false,
+        "prunevolumes": false,
+        "purgemigrationjob": false,
+        "enabled": true,
+        "spoolattributes": false,
+        "spooldata": false,
+        "spoolsize": "0",
+        "rerunfailedlevels": false,
+        "prefermountedvolumes": true,
+        "maximumconcurrentjobs": 5,
+        "rescheduleonerror": false,
+        "rescheduleinterval": "30 minutes ",
+        "rescheduletimes": 5,
+        "priority": 10,
+        "allowmixedpriority": false,
+        "selectionpattern": "",
+        "accurate": false,
+        "allowduplicatejobs": true,
+        "cancellowerlevelduplicates": false,
+        "cancelqueuedduplicates": false,
+        "cancelrunningduplicates": false,
+        "savefilehistory": true,
+        "filehistorysize": "9 m 549 k 640",
+        "maxconcurrentcopies": 100,
+        "alwaysincremental": false,
+        "alwaysincrementaljobretention": "0",
+        "alwaysincrementalkeepnumber": 0,
+        "alwaysincrementalmaxfullage": "0",
+        "maxfullconsolidations": 0,
+        "runonincomingconnectinterval": "0"
+      }
+    }
+  }
+}.defaults storage=File2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "defaults": {
+      "storage": "File2",
+      "address": "lab-sd2",
+      "port": 9103,
+      "enabled": 1,
+      "media_type": "File",
+      "device": "FileStorage2"
+    }
+  }
+}llist volume=demo-s3-0307
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "volume": {
+      "mediaid": "342",
+      "volumename": "demo-s3-0307",
+      "slot": "0",
+      "poolid": "59",
+      "pool": "DemoS3Pool",
+      "mediatype": "S3Demo3",
+      "firstwritten": "2026-10-18 22:34:10",
+      "lastwritten": "2026-10-18 22:37:46",
+      "labeldate": "2026-10-18 22:34:10",
+      "voljobs": "2",
+      "volfiles": "0",
+      "volblocks": "203",
+      "volmounts": "2",
+      "volbytes": "209744491",
+      "volerrors": "0",
+      "volwrites": "203",
+      "volcapacitybytes": "0",
+      "volstatus": "Append",
+      "enabled": "1",
+      "recycle": "1",
+      "volretention": "604800",
+      "voluseduration": "0",
+      "maxvoljobs": "0",
+      "maxvolfiles": "0",
+      "maxvolbytes": "1073741824",
+      "inchanger": "0",
+      "endfile": "0",
+      "endblock": "209744490",
+      "labeltype": "0",
+      "storageid": "67",
+      "deviceid": "0",
+      "locationid": "0",
+      "recyclecount": "0",
+      "initialwrite": "",
+      "scratchpoolid": "0",
+      "scratchpool": "",
+      "recyclepoolid": "0",
+      "recyclepool": "",
+      "hasencryptionkey": "0",
+      "comment": "",
+      "storage": "S3-sd3"
+    }
+  }
+}list jobs storage=S3-sd3
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": [
+      {
+        "jobid": "1101",
+        "name": "demo-s3-backup",
+        "client": "fd1",
+        "starttime": "2026-10-18 22:34:10",
+        "duration": "00:01:08",
+        "type": "B",
+        "level": "F",
+        "jobfiles": "41",
+        "jobbytes": "104857600",
+        "jobstatus": "f"
+      },
+      {
+        "jobid": "1103",
+        "name": "demo-s3-backup",
+        "client": "fd1",
+        "starttime": "2026-10-18 22:37:24",
+        "duration": "00:00:22",
+        "type": "B",
+        "level": "F",
+        "jobfiles": "41",
+        "jobbytes": "104857600",
+        "jobstatus": "T"
+      }
+    ]
+  }
+}.storages
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "storages": [
+      {
+        "name": "S3-sd3",
+        "enabled": true
+      },
+      {
+        "name": "S3-sd2",
+        "enabled": true
+      },
+      {
+        "name": "S3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-fb1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-fb2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-fb3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd3-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-d120",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-d120",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd3-d120",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd3-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-t2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd3-t2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-t3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd3-t3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-dp",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t1p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t3p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-dn",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-t3n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-xp",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-xn",
+        "enabled": true
+      },
+      {
+        "name": "s3b-live-sd1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-live-sd2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-live-sd3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-c138n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-c138m0",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-c138m2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-a138n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd2-a138p",
+        "enabled": true
+      },
+      {
+        "name": "File3",
+        "enabled": true
+      },
+      {
+        "name": "File2",
+        "enabled": true
+      },
+      {
+        "name": "File1b",
+        "enabled": true
+      },
+      {
+        "name": "File1a",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-ts15n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-sd1-ts15p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-h2a",
+        "enabled": true
+      },
+      {
+        "name": "s3b-h2b",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2z",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-3",
+        "enabled": true
+      }
+    ]
+  }
+}

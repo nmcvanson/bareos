@@ -22,6 +22,7 @@
 import { jobStatusMap } from '../mock/index.js'
 import { quoteDirectorString } from './directorStrings.js'
 import { resolveJobTypeCode } from './jobTypes.js'
+import { actionAllowed } from './acl.js'
 
 const JOB_LEVEL_FILTERS = new Set(['F', 'I', 'D', 'V', 'B'])
 const JOB_TYPE_FILTERS = new Set(['B', 'A', 'V', 'R', 'D', 'C', 'c', 'M', 'g', 'O', 'S', 'U', 'I'])
@@ -814,3 +815,76 @@ export function resolveJobDetailsDirectorOrigin(query) {
 export function resolveJobDetailsDashboardOrigin(query) {
   return query?.dashboardOrigin === '1'
 }
+
+const TERMINAL_JOB_STATUSES = new Set(['T', 'W', 'E', 'e', 'f', 'A'])
+
+// A job still to be followed: any known status except the terminal ones.
+export function isActiveJobStatus(status) {
+  if (typeof status !== 'string' || !status.trim()) return false
+  const code = status.trim()
+  return !TERMINAL_JOB_STATUSES.has(code) && code !== 'D' && code !== 'I'
+}
+
+export function isFinishedJobStatus(status) {
+  if (typeof status !== 'string') {
+    return false
+  }
+  return TERMINAL_JOB_STATUSES.has(status.trim())
+}
+
+export function canRestoreFromJob(job, commands) {
+  if (!job || typeof job !== 'object') {
+    return false
+  }
+
+  const typeCode = resolveJobTypeCode(job.type) ?? (typeof job.type === 'string' ? job.type.toUpperCase() : null)
+  const isBackup = typeCode === 'B' || !job.type
+  if (!isBackup) {
+    return false
+  }
+
+  const status = typeof job.jobstatus === 'string'
+    ? job.jobstatus
+    : (typeof job.status === 'string' ? job.status : (typeof job.state === 'string' ? job.state : ''))
+  const isOkOrWarning = status === 'T' || status === 'W' || status === 'ok' || status === 'warning'
+  if (!isOkOrWarning) {
+    return false
+  }
+
+  if (commands !== undefined && !actionAllowed(commands, 'restore')) {
+    return false
+  }
+
+  const jobId = job.id ?? job.jobid
+  return Boolean(job.client && jobId)
+}
+
+export function isValidJobRecord(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return false
+  }
+
+  const jobId = normaliseJobId(entry.jobid ?? entry.id)
+  return jobId !== null
+}
+
+export function formatJobDetailsTitle(job, fallbackId) {
+  const jobId = normaliseJobId(job?.id ?? job?.jobid)
+  if (jobId !== null) {
+    const name = job?.name ? ` — ${job.name}` : ''
+    return `Job #${jobId}${name}`
+  }
+
+  return fallbackId ? `Job ${fallbackId}` : 'Job'
+}
+
+export function buildRestoreFromJobQuery(job, director) {
+  if (!job) return {}
+  const query = {}
+  if (job.client) query.client = job.client
+  const jobId = job.id ?? job.jobid
+  if (jobId !== undefined && jobId !== null) query.jobid = String(jobId)
+  if (director) query.director = director
+  return query
+}
+

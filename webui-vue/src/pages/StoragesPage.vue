@@ -74,6 +74,19 @@
                   <q-btn flat round dense size="sm" icon="monitor_heart"
                          :title="t('Storage Status')"
                           @click="showStorageStatus(props.row)" />
+                  <q-btn
+                    flat
+                    round
+                    dense
+                    size="sm"
+                    :icon="props.row.enabled ? 'block' : 'check_circle'"
+                    :color="props.row.enabled ? 'negative' : 'positive'"
+                    :disable="storageActionBusy || (props.row.enabled ? !canDisable : !canEnable)"
+                    :data-testid="props.row.enabled ? 'storage-action-disable' : 'storage-action-enable'"
+                    @click="toggleStorageEnabled(props.row)"
+                  >
+                    <q-tooltip>{{ t('Until the next reload; use Storage groups to change the configuration.') }}</q-tooltip>
+                  </q-btn>
                 </q-td>
               </template>
             </q-table>
@@ -209,6 +222,11 @@
               :filter="volSearch"
               v-model:pagination="volumesPagination"
             >
+              <template #no-data>
+                <div v-if="!loading" class="full-width row flex-center q-pa-md text-grey">
+                  {{ t('No volumes are visible to this console.') }}
+                </div>
+              </template>
               <template #body-cell-volumename="props">
                 <q-td :props="props">
                   <div class="row items-center no-wrap q-gutter-xs">
@@ -312,6 +330,23 @@
         </q-card-section>
       </q-card>
     </q-dialog>
+
+    <!-- Director Reply Dialog -->
+    <q-dialog v-model="replyDlg.open" data-testid="director-reply-dialog">
+      <q-card style="min-width: 480px; max-width: 800px">
+        <q-card-section class="panel-header row items-center">
+          <div class="text-h6">{{ replyDlg.title }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup />
+        </q-card-section>
+        <q-card-section>
+          <pre class="console-output" data-testid="director-reply-text">{{ replyDlg.text }}</pre>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps :label="t('Close')" color="primary" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
@@ -338,8 +373,12 @@ import { buildVolumeDetailsQuery, volumeHasEncryptionKey } from '../utils/volume
 import AutochangerPage from './AutochangerPage.vue'
 import { useAuthStore } from '../stores/auth.js'
 import { useDirectorStore } from '../stores/director.js'
+import { useDirectorAclStore } from '../stores/directorAcl.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { formatBytes, formatDuration } from '../mock/index.js'
+import { actionAllowed } from '../utils/acl.js'
+import { buildStorageEnabledCommand } from '../utils/storageGroups.js'
+import { formatDirectorReply, parseDirectorActionReply } from '../utils/volumeActions.js'
 import BoolIcon from '../components/BoolIcon.vue'
 import DirectorBadge from '../components/DirectorBadge.vue'
 import DirectorLabel from '../components/DirectorLabel.vue'
@@ -351,9 +390,20 @@ const route    = useRoute()
 const router   = useRouter()
 const auth = useAuthStore()
 const director = useDirectorStore()
+const acl = useDirectorAclStore()
 const settings = useSettingsStore()
 const $q = useQuasar()
 const { t } = useI18n()
+
+const canEnable = computed(() => actionAllowed(acl.commands, 'enable'))
+const canDisable = computed(() => actionAllowed(acl.commands, 'disable'))
+const storageActionBusy = ref(false)
+const replyDlg = ref({
+  open: false,
+  title: '',
+  text: '',
+})
+
 const devicesPagination = usePersistedTablePagination('storages.devices', {
   rowsPerPage: 15,
 })
@@ -577,7 +627,7 @@ const storageCols = computed(() => [
   { name: 'mediatype',   label: t('Media Type'),  field: 'mediatype',   align: 'left',  sortable: true },
   { name: 'autochanger', label: t('Autochanger'), field: 'autochanger', align: 'center', sortable: true },
   { name: 'enabled',     label: t('Status'),      field: 'enabled',     align: 'center', sortable: true },
-  { name: 'actions',     label: '',               field: 'actions',     align: 'center', style: 'width:110px' },
+  { name: 'actions',     label: '',               field: 'actions',     align: 'center', style: 'width:140px' },
 ])
 
 function statusColor(s) {
@@ -668,7 +718,35 @@ async function openVolumeDetails(volume) {
   }
 }
 
+async function toggleStorageEnabled(storage) {
+  const nextEnabled = !storage.enabled
+  if (storage.enabled ? !canDisable.value : !canEnable.value) return
+  if (storageActionBusy.value) return
+  storageActionBusy.value = true
+  try {
+    await switchToRowDirector(storage)
+    const cmd = buildStorageEnabledCommand(storage.name, nextEnabled)
+    const reply = await director.call(cmd)
+    const result = parseDirectorActionReply(reply)
+    replyDlg.value = {
+      open: true,
+      title: result.ok ? (nextEnabled ? t('Enable Storage') : t('Disable Storage')) : t('Storage Action Failed'),
+      text: result.text,
+    }
+    if (result.ok) await refresh()
+  } catch (err) {
+    replyDlg.value = {
+      open: true,
+      title: t('Storage Action Failed'),
+      text: formatDirectorReply(err),
+    }
+  } finally {
+    storageActionBusy.value = false
+  }
+}
+
 onMounted(() => {
+  acl.ensureLoaded().catch(() => {})
   director.fetchAvailableDirectors().catch(() => {})
   syncSelectedDirectors()
   refresh()

@@ -1,0 +1,51 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+status storage=S3-sd3
+Connecting to Storage daemon S3-sd3 at lab-sd3:9103
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+
+lab-sd3 Version: 25.1.1 (14 September 2025) Ubuntu 24.04.5 LTS 
+Daemon started 18-Oct-26 22:33. Jobs: run=1, running=0, self-compiled binary
+ Sizes: boffset_t=8 size_t=8 int32_t=4 int64_t=8 bwlimit=0kB/s
+
+There are WARNINGS for this storagedaemon's configuration!
+See output of 'bareos-sd -t' for details.
+
+Job inventory:
+
+No Jobs running.
+====
+
+Jobs waiting to reserve a drive:
+====
+
+Terminated Jobs:
+ JobId  Level    Files      Bytes   Status   Finished        Name 
+===================================================================
+  1101  Full         41    104.8 M  OK       18-Oct-26 22:34 demo-s3-backup
+====
+
+Device status:
+
+Device "S3Demo" (bucket-bareos) is not open.
+Last upload succeeded 0 s ago.
+Inflight chunks: 0
+No pending IO flush requests.
+Chunks: received 12, uploaded 12, pending 0 (queued 0, uploading 0, kept 0), waiting for retry 0.
+Upload: 12 chunks, 104872553 bytes; failed tries 0, retried tries 0.
+Download: 1 objects, 205 bytes, failed 0; transport retries 0.
+==
+====
+
+Used Volume status:
+====
+
+====
+
+You have messages.

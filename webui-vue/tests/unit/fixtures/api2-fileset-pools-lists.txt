@@ -1,0 +1,1278 @@
+Connecting to Director lab-dir:9101
+ Encryption: TLS_CHACHA20_POLY1305_SHA256 TLSv1.3
+1000 OK: lab-dir Version: 25.1.1 (14 September 2025)
+Self-compiled binaries (UNSUPPORTED)
+Get professional support from https://www.bareos.com
+You are connected using the default console
+
+Enter a period (.) to cancel a command.
+.api 2
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "api": 2
+  }
+}show fileset=Demo-Projects
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "filesets": {
+      "Demo-Projects": {
+        "name": "Demo-Projects",
+        "description": "Folder /srv/demo/Projects",
+        "include": [
+          {
+            "options": [
+              {
+                "signature": "MD5",
+                "hardlinks": false,
+                "aclsupport": true,
+                "xattrsupport": true
+              }
+            ],
+            "file": [
+              "/srv/demo/Projects"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}show pools
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "pools": {
+      "Scratch": {
+        "name": "Scratch",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "S3Pool": {
+        "name": "S3Pool",
+        "labelformat": "S3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 20,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-dp": {
+        "name": "s3b-p-dp",
+        "labelformat": "bdrtest-dp-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t1p": {
+        "name": "s3b-p-t1p",
+        "labelformat": "bdrtest-t1p-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t3p": {
+        "name": "s3b-p-t3p",
+        "labelformat": "bdrtest-t3p-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-dn": {
+        "name": "s3b-p-dn",
+        "labelformat": "bdrtest-dn-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t3n": {
+        "name": "s3b-p-t3n",
+        "labelformat": "bdrtest-t3n-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-xp": {
+        "name": "s3b-p-xp",
+        "labelformat": "bdrtest-xp-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-xn": {
+        "name": "s3b-p-xn",
+        "labelformat": "bdrtest-xn-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-d": {
+        "name": "s3b-p-d",
+        "labelformat": "bdrtest-d-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-d120": {
+        "name": "s3b-p-d120",
+        "labelformat": "bdrtest-d120-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t1": {
+        "name": "s3b-p-t1",
+        "labelformat": "bdrtest-t1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t2": {
+        "name": "s3b-p-t2",
+        "labelformat": "bdrtest-t2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-t3": {
+        "name": "s3b-p-t3",
+        "labelformat": "bdrtest-t3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-live-native": {
+        "name": "s3b-live-native",
+        "labelformat": "bdrtest-live-native-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "autoprune": false,
+        "recycle": false,
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-live-fault": {
+        "name": "s3b-live-fault",
+        "labelformat": "bdrtest-live-fault-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 10,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "autoprune": false,
+        "recycle": false,
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-file": {
+        "name": "s3b-file",
+        "labelformat": "bdrtest-file-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-c138n": {
+        "name": "s3b-p-c138n",
+        "labelformat": "bdrtest-c138n-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-c138m0": {
+        "name": "s3b-p-c138m0",
+        "labelformat": "bdrtest-c138m0-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-c138m2": {
+        "name": "s3b-p-c138m2",
+        "labelformat": "bdrtest-c138m2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-a138n": {
+        "name": "s3b-p-a138n",
+        "labelformat": "bdrtest-a138n-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-a138p": {
+        "name": "s3b-p-a138p",
+        "labelformat": "bdrtest-a138p-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "HybridPool": {
+        "name": "HybridPool",
+        "labelformat": "Hybrid-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 40,
+        "maximumvolumebytes": "1 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "GroupPool": {
+        "name": "GroupPool",
+        "labelformat": "Group-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 100,
+        "maximumvolumebytes": "1 g",
+        "nextpool": "",
+        "storage": [
+          "File2",
+          "File1a"
+        ],
+        "storagegrouppolicy": "ListedOrder",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "Full": {
+        "name": "Full",
+        "labelformat": "Full-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 100,
+        "maximumvolumebytes": "1 g",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "DemoS3Pool": {
+        "name": "DemoS3Pool",
+        "labelformat": "demo-s3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 40,
+        "maximumvolumebytes": "1 g",
+        "volumeretention": "1 weeks ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "DemoLocalPool": {
+        "name": "DemoLocalPool",
+        "labelformat": "DemoLocal-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 60,
+        "maximumvolumebytes": "1 g",
+        "volumeretention": "1 weeks ",
+        "nextpool": "",
+        "storage": [
+          "File2",
+          "File1a"
+        ],
+        "storagegrouppolicy": "ListedOrder",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "DemoFd2Pool": {
+        "name": "DemoFd2Pool",
+        "labelformat": "DemoFd2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 20,
+        "maximumvolumebytes": "1 g",
+        "volumeretention": "1 weeks ",
+        "nextpool": "",
+        "storage": [
+          "File1a",
+          "File1b"
+        ],
+        "storagegrouppolicy": "ListedOrder",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-ts15n": {
+        "name": "s3b-p-ts15n",
+        "labelformat": "bdrtest-ts15n-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-ts15p": {
+        "name": "s3b-p-ts15p",
+        "labelformat": "bdrtest-ts15p-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-h2": {
+        "name": "s3b-p-h2",
+        "labelformat": "bdrtest-h2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "4 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-tf2z": {
+        "name": "s3b-p-tf2z",
+        "labelformat": "bdrtest-tf2z-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-tf2": {
+        "name": "s3b-p-tf2",
+        "labelformat": "bdrtest-tf2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-tf1": {
+        "name": "s3b-p-tf1",
+        "labelformat": "bdrtest-tf1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z-1": {
+        "name": "s3b-p-m1z-1",
+        "labelformat": "bdrtest-m1z-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1m-1": {
+        "name": "s3b-p-m1m-1",
+        "labelformat": "bdrtest-m1m-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1a-1": {
+        "name": "s3b-p-m1a-1",
+        "labelformat": "bdrtest-m1a-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1s-1": {
+        "name": "s3b-p-m1s-1",
+        "labelformat": "bdrtest-m1s-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1r-1": {
+        "name": "s3b-p-m1r-1",
+        "labelformat": "bdrtest-m1r-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1l-1": {
+        "name": "s3b-p-m1l-1",
+        "labelformat": "bdrtest-m1l-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z2-1": {
+        "name": "s3b-p-m1z2-1",
+        "labelformat": "bdrtest-m1y-1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z-2": {
+        "name": "s3b-p-m1z-2",
+        "labelformat": "bdrtest-m1z-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1m-2": {
+        "name": "s3b-p-m1m-2",
+        "labelformat": "bdrtest-m1m-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1a-2": {
+        "name": "s3b-p-m1a-2",
+        "labelformat": "bdrtest-m1a-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1s-2": {
+        "name": "s3b-p-m1s-2",
+        "labelformat": "bdrtest-m1s-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1r-2": {
+        "name": "s3b-p-m1r-2",
+        "labelformat": "bdrtest-m1r-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1l-2": {
+        "name": "s3b-p-m1l-2",
+        "labelformat": "bdrtest-m1l-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z2-2": {
+        "name": "s3b-p-m1z2-2",
+        "labelformat": "bdrtest-m1y-2-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z-3": {
+        "name": "s3b-p-m1z-3",
+        "labelformat": "bdrtest-m1z-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1m-3": {
+        "name": "s3b-p-m1m-3",
+        "labelformat": "bdrtest-m1m-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1a-3": {
+        "name": "s3b-p-m1a-3",
+        "labelformat": "bdrtest-m1a-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1s-3": {
+        "name": "s3b-p-m1s-3",
+        "labelformat": "bdrtest-m1s-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1r-3": {
+        "name": "s3b-p-m1r-3",
+        "labelformat": "bdrtest-m1r-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1l-3": {
+        "name": "s3b-p-m1l-3",
+        "labelformat": "bdrtest-m1l-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-m1z2-3": {
+        "name": "s3b-p-m1z2-3",
+        "labelformat": "bdrtest-m1y-3-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 50,
+        "maximumvolumebytes": "2 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-base-d": {
+        "name": "s3b-p-base-d",
+        "labelformat": "bdrtest-base-d-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 20,
+        "maximumvolumebytes": "2 g",
+        "nextpool": "",
+        "autoprune": false,
+        "recycle": false,
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-base-t1": {
+        "name": "s3b-p-base-t1",
+        "labelformat": "bdrtest-base-t1-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 20,
+        "maximumvolumebytes": "2 g",
+        "nextpool": "",
+        "autoprune": false,
+        "recycle": false,
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      },
+      "s3b-p-ac36": {
+        "name": "s3b-p-ac36",
+        "labelformat": "bdrtest-ac36-",
+        "labeltype": "bareos",
+        "actiononpurge": "None",
+        "maximumvolumes": 200,
+        "maximumvolumebytes": "4 g",
+        "volumeretention": "1 months ",
+        "nextpool": "",
+        "recyclepool": "",
+        "scratchpool": "",
+        "catalog": ""
+      }
+    }
+  }
+}.clients
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "clients": [
+      {
+        "name": "s3b-c1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c4",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c5",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c6",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c7",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c8",
+        "enabled": true
+      },
+      {
+        "name": "fd2",
+        "enabled": true
+      },
+      {
+        "name": "fd1",
+        "enabled": true
+      }
+    ]
+  }
+}.filesets
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "filesets": [
+      {
+        "name": "SelfTest"
+      },
+      {
+        "name": "s3b-lg"
+      },
+      {
+        "name": "s3b-sm"
+      },
+      {
+        "name": "s3b-mx"
+      },
+      {
+        "name": "s3b-tiny1"
+      },
+      {
+        "name": "s3b-tiny5"
+      },
+      {
+        "name": "s3b-m24a"
+      },
+      {
+        "name": "s3b-m24b"
+      },
+      {
+        "name": "s3b-m40a"
+      },
+      {
+        "name": "s3b-c1"
+      },
+      {
+        "name": "s3b-c2"
+      },
+      {
+        "name": "s3b-c3"
+      },
+      {
+        "name": "s3b-c4"
+      },
+      {
+        "name": "s3b-c5"
+      },
+      {
+        "name": "s3b-c6"
+      },
+      {
+        "name": "s3b-c7"
+      },
+      {
+        "name": "s3b-c8"
+      },
+      {
+        "name": "s3b-g2"
+      },
+      {
+        "name": "s3b-cal"
+      },
+      {
+        "name": "s3b-m320"
+      },
+      {
+        "name": "LabData"
+      },
+      {
+        "name": "Demo-Projects"
+      },
+      {
+        "name": "Demo-Documents"
+      },
+      {
+        "name": "Demo-Database"
+      },
+      {
+        "name": "Demo-All"
+      },
+      {
+        "name": "Binaries"
+      }
+    ]
+  }
+}.jobs type=B
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "result": {
+    "jobs": [
+      {
+        "name": "s3b-ts15n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-ts15p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-h2-grp",
+        "enabled": true
+      },
+      {
+        "name": "s3b-h2-b",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2z",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2-lo",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf2-lu",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf1-s3first",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tf1-filefirst",
+        "enabled": true
+      },
+      {
+        "name": "s3b-tb1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-dp",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t1p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t3p",
+        "enabled": true
+      },
+      {
+        "name": "s3b-dn",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t3n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-xp",
+        "enabled": true
+      },
+      {
+        "name": "s3b-xn",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z2-1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z2-2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1m-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1a-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1s-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1r-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1l-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-m1z2-3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-live-native",
+        "enabled": true
+      },
+      {
+        "name": "s3b-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-grp-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-d120",
+        "enabled": true
+      },
+      {
+        "name": "s3b-grp-d120",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-grp-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-grp-t2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-t3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-grp-t3",
+        "enabled": true
+      },
+      {
+        "name": "s3b-file",
+        "enabled": true
+      },
+      {
+        "name": "s3b-base-d",
+        "enabled": true
+      },
+      {
+        "name": "s3b-base-t1",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c138n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c138m0",
+        "enabled": true
+      },
+      {
+        "name": "s3b-c138m2",
+        "enabled": true
+      },
+      {
+        "name": "s3b-a138n",
+        "enabled": true
+      },
+      {
+        "name": "s3b-a138p",
+        "enabled": true
+      },
+      {
+        "name": "demo-s3-group",
+        "enabled": true
+      },
+      {
+        "name": "demo-s3-backup",
+        "enabled": true
+      },
+      {
+        "name": "demo-local-projects",
+        "enabled": true
+      },
+      {
+        "name": "demo-local-docs",
+        "enabled": true
+      },
+      {
+        "name": "demo-fd2-backup",
+        "enabled": true
+      },
+      {
+        "name": "backup-webui-demo",
+        "enabled": true
+      },
+      {
+        "name": "backup-slow-1a",
+        "enabled": true
+      },
+      {
+        "name": "backup-single",
+        "enabled": true
+      },
+      {
+        "name": "backup-s3-failover",
+        "enabled": true
+      },
+      {
+        "name": "backup-s3",
+        "enabled": true
+      },
+      {
+        "name": "backup-pool-group",
+        "enabled": true
+      },
+      {
+        "name": "backup-group-reversed",
+        "enabled": true
+      },
+      {
+        "name": "backup-group-leastused",
+        "enabled": true
+      },
+      {
+        "name": "backup-group",
+        "enabled": true
+      },
+      {
+        "name": "backup-group3",
+        "enabled": true
+      },
+      {
+        "name": "backup-fd2-group",
+        "enabled": true
+      },
+      {
+        "name": "backup-failover-demo",
+        "enabled": true
+      },
+      {
+        "name": "backup-failover3",
+        "enabled": true
+      },
+      {
+        "name": "backup-duplicate-member",
+        "enabled": true
+      },
+      {
+        "name": "backup-cross-daemon",
+        "enabled": true
+      },
+      {
+        "name": "s3b-ac36",
+        "enabled": true
+      }
+    ]
+  }
+}
