@@ -52,6 +52,15 @@ void SetStorageidInMr(StorageResource* store, MediaDbRecord* mr)
 }
 
 /**
+ * Is this job writing through a storage group? Read from the flag set at
+ * job setup, since the policy may have shrunk the list to one member.
+ */
+static bool JobWritesToStorageGroup(JobControlRecord* jcr)
+{
+  return jcr && jcr->dir_impl->uses_storage_group;
+}
+
+/**
  *  Items needed:
  *
  *  mr.PoolId must be set
@@ -85,6 +94,10 @@ int FindNextVolumeForAppend(JobControlRecord* jcr,
    * on the first pass */
   InChanger = store->autochanger;
 
+  /* A storage group member searches only its own volumes, at every step
+   * below, including the retry without InChanger. */
+  const bool restrict_to_storage = JobWritesToStorageGroup(jcr);
+
   // Find the Next Volume for Append
   DbLocker _{jcr->db};
   while (1) {
@@ -92,11 +105,13 @@ int FindNextVolumeForAppend(JobControlRecord* jcr,
     SetStorageidInMr(store, mr);
 
     bstrncpy(mr->VolStatus, "Append", sizeof(mr->VolStatus));
-    ok = jcr->db->FindNextVolume(jcr, index, InChanger, mr, unwanted_volumes);
+    ok = jcr->db->FindNextVolume(jcr, index, InChanger, mr, unwanted_volumes,
+                                 restrict_to_storage);
     //  2. Look for volume with "Unlabeled" status.
     if (!ok) {
       bstrncpy(mr->VolStatus, "Unlabeled", sizeof(mr->VolStatus));
-      ok = jcr->db->FindNextVolume(jcr, index, InChanger, mr, unwanted_volumes);
+      ok = jcr->db->FindNextVolume(jcr, index, InChanger, mr, unwanted_volumes,
+                                   restrict_to_storage);
     }
     if (!ok) { bstrncpy(mr->VolStatus, "Append", sizeof(mr->VolStatus)); }
 
@@ -107,23 +122,24 @@ int FindNextVolumeForAppend(JobControlRecord* jcr,
             index, InChanger, mr->VolStatus);
 
       // 3. Try finding a recycled volume
-      ok = FindRecycledVolume(jcr, InChanger, mr, store, unwanted_volumes);
+      ok = FindRecycledVolume(jcr, InChanger, mr, store, unwanted_volumes,
+                              restrict_to_storage);
       SetStorageidInMr(store, mr);
       Dmsg2(debuglevel, "FindRecycledVolume ok=%d FW=%" PRItime "\n", ok,
             mr->FirstWritten);
       if (!ok) {
         // 4. Try recycling any purged volume
         ok = RecycleOldestPurgedVolume(jcr, InChanger, mr, store,
-                                       unwanted_volumes);
+                                       unwanted_volumes, restrict_to_storage);
         SetStorageidInMr(store, mr);
         if (!ok) {
           // 5. Try pruning Volumes
           if (prune) {
             Dmsg0(debuglevel, "Call PruneVolumes\n");
-            PruneVolumes(jcr, InChanger, mr, store);
+            PruneVolumes(jcr, InChanger, mr, store, restrict_to_storage);
           }
           ok = RecycleOldestPurgedVolume(jcr, InChanger, mr, store,
-                                         unwanted_volumes);
+                                         unwanted_volumes, restrict_to_storage);
           SetStorageidInMr(store, mr); /* put StorageId in new record */
           if (!ok && create) {
             Dmsg4(debuglevel,
@@ -131,7 +147,8 @@ int FindNextVolumeForAppend(JobControlRecord* jcr,
                   "Vstat=%s\n",
                   ok, index, InChanger, mr->VolStatus);
             // 6. Try pulling a volume from the Scratch pool
-            ok = GetScratchVolume(jcr, InChanger, mr, store);
+            ok = GetScratchVolume(jcr, InChanger, mr, store,
+                                  restrict_to_storage);
             SetStorageidInMr(store, mr); /* put StorageId in new record */
             Dmsg4(debuglevel,
                   "after get scratch volume ok=%d index=%d InChanger=%d "
@@ -163,7 +180,8 @@ int FindNextVolumeForAppend(JobControlRecord* jcr,
 
         // Find oldest volume to recycle
         SetStorageidInMr(store, mr);
-        ok = jcr->db->FindNextVolume(jcr, -1, InChanger, mr, unwanted_volumes);
+        ok = jcr->db->FindNextVolume(jcr, -1, InChanger, mr, unwanted_volumes,
+                                     restrict_to_storage);
         SetStorageidInMr(store, mr);
         Dmsg1(debuglevel, "Find oldest=%d Volume\n", ok);
         if (ok && prune) {
@@ -368,7 +386,8 @@ static pthread_mutex_t scratch_volume_mutex = PTHREAD_MUTEX_INITIALIZER;
 bool GetScratchVolume(JobControlRecord* jcr,
                       bool InChanger,
                       MediaDbRecord* mr,
-                      StorageResource* store)
+                      StorageResource* store,
+                      bool restrict_to_storage)
 {
   MediaDbRecord smr; /* for searching scratch pool */
   PoolDbRecord spr;
@@ -386,8 +405,9 @@ bool GetScratchVolume(JobControlRecord* jcr,
   spr.PoolId = mr->ScratchPoolId;
   if (jcr->db->GetPoolRecord(jcr, &spr)) {
     smr.PoolId = spr.PoolId;
-    if (InChanger) {
-      smr.StorageId = mr->StorageId; /* want only Scratch Volumes in changer */
+    if (InChanger || restrict_to_storage) {
+      /* want only Scratch Volumes on this storage */
+      smr.StorageId = mr->StorageId;
     }
 
     bstrncpy(smr.VolStatus, "Append",
@@ -397,11 +417,14 @@ bool GetScratchVolume(JobControlRecord* jcr,
     /* If we do not find a valid Scratch volume, try recycling any existing
      * purged volumes, then try to take the oldest volume. */
     SetStorageidInMr(store, &smr); /* put StorageId in new record */
-    if (jcr->db->FindNextVolume(jcr, 1, InChanger, &smr, NULL)) {
+    if (jcr->db->FindNextVolume(jcr, 1, InChanger, &smr, NULL,
+                                restrict_to_storage)) {
       found = true;
-    } else if (FindRecycledVolume(jcr, InChanger, &smr, store, NULL)) {
+    } else if (FindRecycledVolume(jcr, InChanger, &smr, store, NULL,
+                                  restrict_to_storage)) {
       found = true;
-    } else if (RecycleOldestPurgedVolume(jcr, InChanger, &smr, store, NULL)) {
+    } else if (RecycleOldestPurgedVolume(jcr, InChanger, &smr, store, NULL,
+                                         restrict_to_storage)) {
       found = true;
     }
 

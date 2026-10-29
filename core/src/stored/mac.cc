@@ -457,7 +457,16 @@ bool DoMacRun(JobControlRecord* jcr)
   bool acquire_fail = false;
   BareosSocket* dir = jcr->dir_bsock;
   if (!jcr->sd_impl->dcr) { TryReserveAfterUse(jcr, true); }
-  Device* dev = jcr->sd_impl->dcr->dev;
+  Device* dev = jcr->sd_impl->dcr ? jcr->sd_impl->dcr->dev : nullptr;
+  if (!dev) {
+    // no device could be reserved (for example the job was canceled)
+    Jmsg(jcr, M_FATAL, 0, T_("Could not reserve any device for this job.\n"));
+    if (jcr->sd_impl->dcr) { FreeDeviceControlRecord(jcr->sd_impl->dcr); }
+    jcr->sd_impl->dcr = nullptr;
+    ok = false;
+    acquire_fail = true;
+    goto bail_out;
+  }
 
   switch (jcr->getJobType()) {
     case JT_MIGRATE:

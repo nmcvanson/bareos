@@ -1,0 +1,14 @@
+# bconsole configuration for the restricted console "storage-acl-file".
+
+Director {
+  Name = @basename@-dir
+  Port = @dir_port@
+  Password = "@dir_password@"
+  Address = @hostname@
+}
+
+Console {
+  Name = storage-acl-file
+  Password = "@dir_password@"
+  Director = @basename@-dir
+}

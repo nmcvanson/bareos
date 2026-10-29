@@ -28,12 +28,14 @@ bool FindRecycledVolume(JobControlRecord* jcr,
                         bool InChanger,
                         MediaDbRecord* mr,
                         StorageResource* store,
-                        const char* unwanted_volumes);
+                        const char* unwanted_volumes,
+                        bool restrict_to_storage = false);
 bool RecycleOldestPurgedVolume(JobControlRecord* jcr,
                                bool InChanger,
                                MediaDbRecord* mr,
                                StorageResource* store,
-                               const char* unwanted_volumes);
+                               const char* unwanted_volumes,
+                               bool restrict_to_storage = false);
 bool RecycleVolume(JobControlRecord* jcr, MediaDbRecord* mr);
 
 } /* namespace directordaemon */

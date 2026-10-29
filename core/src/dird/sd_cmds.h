@@ -35,6 +35,9 @@ bool ConnectToStorageDaemon(JobControlRecord* jcr,
                             int retry_interval,
                             int max_retry_time,
                             bool verbose);
+
+/* Signal BNET_TERMINATE, close and free jcr->store_bsock. */
+void TerminateAndCloseJcrStoreSocket(JobControlRecord* jcr);
 BareosSocket* open_sd_bsock(UaContext* ua);
 void CloseSdBsock(UaContext* ua);
 char* get_volume_name_from_SD(UaContext* ua,

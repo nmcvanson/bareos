@@ -24,6 +24,8 @@
  * @file
  * BAREOS Director -- Run Command
  */
+#include <vector>
+
 #include "dird/dird_globals.h"
 #include "include/bareos.h"
 #include "dird.h"
@@ -595,6 +597,7 @@ int ModifyJobParameters(UaContext* ua, JobControlRecord* jcr, RunContext& rc)
         rc.store->store = select_storage_resource(ua);
         if (rc.store->store) {
           PmStrcpy(rc.store->store_source, T_("user selection"));
+          rc.store_explicit = true;
           SetRwstorage(jcr, rc.store);
           goto try_again;
         }
@@ -802,6 +805,47 @@ try_again:
 }
 
 /**
+ * Drop the members of a storage group this console may not use, with a
+ * warning each. Returns false when none is left: the job must not run.
+ */
+static bool FilterWstorageByAcl(UaContext* ua, JobControlRecord* jcr)
+{
+  alist<StorageResource*>* list = jcr->dir_impl->res.write_storage_list;
+  std::vector<StorageResource*> allowed;
+  bool refused_any = false;
+
+  for (auto* store : list) {
+    if (ua->AclAccessOk(Storage_ACL, store->resource_name_)) {
+      allowed.push_back(store);
+      continue;
+    }
+    refused_any = true;
+    ua->WarningMsg(T_("No authorization for Storage \"%s\", it is removed "
+                      "from the storage group.\n"),
+                   store->resource_name_);
+  }
+
+  if (allowed.empty()) {
+    ua->ErrorMsg(T_("No authorization for any Storage of this job.\n"));
+    return false;
+  }
+
+  if (!refused_any) { return true; }
+
+  /* alist offers no erase, so drain and refill. Safe because the write
+   * storage list is created not_owned_by_alist. */
+  while (!list->empty()) { list->remove(0); }
+  for (auto* store : allowed) { list->append(store); }
+
+  /* Move write_storage off a member that was just removed. */
+  if (!SetCurrentWstorage(jcr, jcr->dir_impl->res.write_storage)) {
+    SetCurrentWstorage(jcr, allowed.front());
+  }
+
+  return true;
+}
+
+/**
  * Reset the restore context.
  * This subroutine can be called multiple times, so it must keep any prior
  * settings.
@@ -826,7 +870,20 @@ static bool ResetRestoreContext(UaContext* ua,
              && jcr->dir_impl->res.pool != jcr->dir_impl->res.job->pool) {
     PmStrcpy(jcr->dir_impl->res.pool_source, T_("user input"));
   }
-  SetRwstorage(jcr, rc.store);
+  /* Only override the storage list when the user actually named a storage.
+   * Otherwise keep the list built by SetJcrDefaults, so a storage group
+   * survives to the policy in DoNativeBackupInit.
+   *
+   * Restricted to the job types JobMayUseStorageGroup() allows: every other
+   * type keeps its pre-existing behaviour exactly. */
+  if (rc.store_explicit || !JobMayUseStorageGroup(jcr)
+      || !jcr->dir_impl->res.write_storage_list
+      || jcr->dir_impl->res.write_storage_list->size() <= 1) {
+    SetRwstorage(jcr, rc.store);
+  } else if (!FilterWstorageByAcl(ua, jcr)) {
+    /* This console may use no member of the storage group. */
+    return false;
+  }
 
   if (rc.next_pool_name) {
     PmStrcpy(jcr->dir_impl->res.npool_source, T_("command line"));
@@ -2190,6 +2247,7 @@ static bool ScanCommandLineArguments(UaContext* ua, RunContext& rc)
   if (rc.StoreName) {
     rc.store->store = ua->GetStoreResWithName(rc.StoreName);
     PmStrcpy(rc.store->store_source, T_("command line"));
+    rc.store_explicit = true;
     if (!rc.store->store) {
       if (*rc.StoreName != 0) {
         ua->WarningMsg(T_("Storage \"%s\" not found.\n"), rc.StoreName);

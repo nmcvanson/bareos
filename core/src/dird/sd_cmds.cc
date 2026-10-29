@@ -83,7 +83,8 @@ inline constexpr const char readlabelresponse[] = "3001 Volume=%s Slot=%hd";
 inline constexpr const char changerslotsresponse[] = "slots=%hd\n";
 inline constexpr const char changerdrivesresponse[] = "drives=%hd\n";
 
-static void TerminateAndCloseJcrStoreSocket(JobControlRecord* jcr)
+/* Say goodbye to the Storage Daemon and drop the socket. */
+void TerminateAndCloseJcrStoreSocket(JobControlRecord* jcr)
 {
   if (jcr && jcr->store_bsock) {
     jcr->store_bsock->signal(BNET_TERMINATE);

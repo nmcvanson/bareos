@@ -41,6 +41,8 @@
 #include "dird/msgchan.h"
 #include "dird/quota.h"
 #include "dird/sd_cmds.h"
+#include "dird/storage.h"
+#include "lib/alist.h"
 #include "lib/berrno.h"
 #include "lib/bnet.h"
 #include "lib/edit.h"
@@ -215,6 +217,23 @@ bool ReserveWriteDevice(JobControlRecord* jcr,
   bool ok = true;
   int copy = 0;
   int stripe = 0;
+
+  /* Offer the daemon only the storage the Director records in the catalog.
+   * Backup jobs with a storage group are narrowed by their caller; this
+   * covers migrate, copy and VirtualFull, whose write_storage is the first
+   * Next Pool member. A write_storage outside the list is left alone. */
+  alist<StorageResource*> recorded_storage(1, not_owned_by_alist);
+  if (write_storage && write_storage->size() > 1
+      && jcr->dir_impl->res.write_storage) {
+    for (auto* store : write_storage) {
+      if (store == jcr->dir_impl->res.write_storage) {
+        recorded_storage.append(store);
+        write_storage = &recorded_storage;
+        break;
+      }
+    }
+  }
+
   /* We have two loops here. The first comes from the
    *  Storage = associated with the Job, and we need
    *  to attach to each one.
@@ -250,13 +269,18 @@ bool ReserveWriteDevice(JobControlRecord* jcr,
     jcr->store_bsock->signal(BNET_EOD);  // end of Storages
     if (BgetDirmsg(jcr->store_bsock) > 0) {
       Dmsg1(100, "<stored: %s", jcr->store_bsock->msg);
-      // ****FIXME**** save actual device name
+      /* The reply names the device the daemon reserved; saved below. */
       ok = bsscanf(jcr->store_bsock->msg, OK_device, device_name.c_str()) == 1;
     } else {
       ok = false;
     }
     if (ok) {
       UnbashSpaces(device_name.c_str());
+      /* Recorded for the bootstrap file, unless it is the Just In Time
+       * placeholder. */
+      if (ReservedDeviceIsKnown(device_name.c_str())) {
+        jcr->dir_impl->write_device_name = device_name.c_str();
+      }
       Jmsg(jcr, M_INFO, 0, T_("Using Device \"%s\" to write.\n"),
            device_name.c_str());
     }

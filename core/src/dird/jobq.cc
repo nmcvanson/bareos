@@ -56,8 +56,7 @@ static bool IncClientConcurrency(JobControlRecord* jcr);
 static void DecClientConcurrency(JobControlRecord* jcr);
 static bool IncJobConcurrency(JobControlRecord* jcr);
 static void DecJobConcurrency(JobControlRecord* jcr);
-static bool IncWriteStore(JobControlRecord* jcr);
-static void DecWriteStore(JobControlRecord* jcr);
+/* IncWriteStore and DecWriteStore are declared in jobq.h. */
 
 /*
  * Initialize a job queue
@@ -902,7 +901,28 @@ void DecReadStore(JobControlRecord* jcr)
   }
 }
 
-static bool IncWriteStore(JobControlRecord* jcr)
+/* Read one Storage's concurrent job count. Callers outside this file
+ * cannot take the mutex that guards it, so they come through here.
+ *
+ * The value is a snapshot and is stale the moment it is returned. That is
+ * acceptable for the LeastUsed storage group policy, which only needs an
+ * ordering hint. Note that jobs with IgnoreStorageConcurrency set
+ * never increment it, so migrate, copy and consolidate control jobs are
+ * invisible to this count. */
+int GetStorageNumConcurrentJobs(StorageResource* store)
+{
+  if (!store || !store->runtime_storage_status) { return 0; }
+
+  lock_mutex(mutex);
+  int num_jobs = store->runtime_storage_status->NumConcurrentJobs;
+  unlock_mutex(mutex);
+
+  return num_jobs;
+}
+
+/* Charge a job against its write Storage's concurrency limit. Returns false
+ * when the Storage is already at its MaxConcurrentJobs. */
+bool IncWriteStore(JobControlRecord* jcr)
 {
   if (jcr->dir_impl->IgnoreStorageConcurrency) { return true; }
 
@@ -930,7 +950,7 @@ static bool IncWriteStore(JobControlRecord* jcr)
   return false;
 }
 
-static void DecWriteStore(JobControlRecord* jcr)
+void DecWriteStore(JobControlRecord* jcr)
 {
   if (jcr->dir_impl->res.write_storage
       && !jcr->dir_impl->IgnoreStorageConcurrency) {

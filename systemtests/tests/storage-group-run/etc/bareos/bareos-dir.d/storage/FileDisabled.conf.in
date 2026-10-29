@@ -1,0 +1,15 @@
+Storage {
+  Name = FileDisabled
+  Address = @hostname@
+  Password = "@sd_password@"
+  Device = FileStorage
+  Media Type = File
+  Port = @sd_port@
+  MaximumConcurrentJobs = 10
+
+  # The whole point of this resource: the storage group policy must drop it
+  # and pick the next member instead. It points at the same device as File,
+  # so if the filter did not work the job would still succeed -- only the
+  # device named in the job log would differ.
+  Enabled = no
+}

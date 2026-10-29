@@ -431,7 +431,8 @@ int BareosDb::FindNextVolume(JobControlRecord* jcr,
                              int item,
                              bool InChanger,
                              MediaDbRecord* mr,
-                             const char* unwanted_volumes)
+                             const char* unwanted_volumes,
+                             bool restrict_to_storage)
 {
   char ed1[50];
   int num_rows = 0;
@@ -471,10 +472,14 @@ retry_fetch:
     PoolMem changer(PM_MESSAGE);
     PoolMem order(PM_MESSAGE);
 
-    // Find next available volume
+    /* Find next available volume. A storage group member searches only its
+     * own storage (restrict_to_storage); other jobs run the same SQL as
+     * before. */
     if (InChanger) {
       Mmsg(changer, "AND InChanger=1 AND StorageId=%s",
            edit_int64(mr->StorageId, ed1));
+    } else if (restrict_to_storage) {
+      Mmsg(changer, "AND StorageId=%s", edit_int64(mr->StorageId, ed1));
     }
 
     if (bstrcmp(mr->VolStatus, "Recycle") || bstrcmp(mr->VolStatus, "Purged")) {

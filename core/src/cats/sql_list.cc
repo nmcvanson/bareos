@@ -491,7 +491,8 @@ void BareosDb::ListJobRecords(JobControlRecord* jcr,
                               bool count,
                               OutputFormatter* sendit,
                               e_list_type type,
-                              bool descending)
+                              bool descending,
+                              const char* storagename)
 {
   char ed1[50];
   char dt[MAX_TIME_LENGTH];
@@ -542,6 +543,18 @@ void BareosDb::ListJobRecords(JobControlRecord* jcr,
     temp.bsprintf(
         "AND Job.poolid = (SELECT poolid FROM pool WHERE name = '%s' LIMIT 1) ",
         poolname);
+    PmStrcat(selection, temp.c_str());
+  }
+
+  /* Only jobs that wrote a volume recorded against this Storage. */
+  if (storagename) {
+    const size_t len = strlen(storagename);
+    std::vector<char> esc_storage(2 * len + 1);
+    EscapeString(jcr, esc_storage.data(), storagename, len);
+    temp.bsprintf(
+        "AND Media.StorageId = "
+        "(SELECT StorageId FROM Storage WHERE Name = '%s' LIMIT 1) ",
+        esc_storage.data());
     PmStrcat(selection, temp.c_str());
   }
 

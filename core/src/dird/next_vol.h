@@ -38,7 +38,8 @@ void CheckIfVolumeValidOrRecyclable(JobControlRecord* jcr,
 bool GetScratchVolume(JobControlRecord* jcr,
                       bool InChanger,
                       MediaDbRecord* mr,
-                      StorageResource* store);
+                      StorageResource* store,
+                      bool restrict_to_storage = false);
 
 } /* namespace directordaemon */
 

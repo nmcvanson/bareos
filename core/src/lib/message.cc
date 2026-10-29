@@ -1232,9 +1232,16 @@ void Jmsg(JobControlRecord* jcr, int type, utime_t mtime, const char* fmt, ...)
       Mmsg(buf, T_("%s Configuration error\n"), my_name);
       break;
     case M_FATAL:
-      Mmsg(buf, T_("%s JobId %" PRIu32 ": Fatal error: "), my_name, JobId);
-      if (jcr) { jcr->setJobStatusWithPriorityCheck(JS_FatalError); }
-      if (jcr && jcr->JobErrors == 0) { jcr->JobErrors = 1; }
+      /* While the Director tries one member of a storage group, a failure
+       * is only a warning: the next member may take the job. */
+      if (jcr && jcr->trying_storage_candidate) {
+        Mmsg(buf, T_("%s JobId %" PRIu32 ": Warning: "), my_name, JobId);
+        jcr->JobWarnings++;
+      } else {
+        Mmsg(buf, T_("%s JobId %" PRIu32 ": Fatal error: "), my_name, JobId);
+        if (jcr) { jcr->setJobStatusWithPriorityCheck(JS_FatalError); }
+        if (jcr && jcr->JobErrors == 0) { jcr->JobErrors = 1; }
+      }
       break;
     case M_ERROR:
       Mmsg(buf, T_("%s JobId %" PRIu32 ": Error: "), my_name, JobId);

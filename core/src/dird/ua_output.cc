@@ -893,6 +893,18 @@ static bool ListJobs(UaContext* ua,
   const char* volumename = GetArgValue(ua, NT_("volume"));
   const char* poolname = GetArgValue(ua, NT_("pool"));
 
+  /* storage= lists the jobs that wrote to one Storage. Like any storage=,
+   * it must be a Storage this console may use. */
+  const char* storagename = nullptr;
+  if (const char* value = GetArgValue(ua, NT_("storage"))) {
+    StorageResource* store = ua->GetStoreResWithName(value);
+    if (!store) {
+      ua->ErrorMsg(T_("Storage \"%s\" not found.\n"), value);
+      return false;
+    }
+    storagename = store->resource_name_;
+  }
+
   switch (llist) {
     case VERT_LIST:
       if (!optionslist.count) {  // count result is one column, no filtering
@@ -933,7 +945,7 @@ static bool ListJobs(UaContext* ua,
                          optionslist.jobstatuslist, optionslist.joblevel_list,
                          optionslist.jobtypes, volumename, poolname, schedtime,
                          optionslist.last, optionslist.count, ua->send.get(),
-                         llist, descending);
+                         llist, descending, storagename);
 
   return true;
 }

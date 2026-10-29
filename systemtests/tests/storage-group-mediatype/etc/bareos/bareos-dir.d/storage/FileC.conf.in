@@ -1,0 +1,9 @@
+Storage {
+  Name = FileC
+  Address = @hostname@
+  Password = "@sd_password@"
+  Device = FileStorageC
+  Media Type = FileShared
+  Port = @sd_port@
+  MaximumConcurrentJobs = 10
+}
