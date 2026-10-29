@@ -249,11 +249,12 @@ static bool SetupDCR(JobControlRecord* jcr,
 {
   if (!jcr->sd_impl->dcr) {
     jcr->sendJobStatus(JS_WaitSD);
-    if (TryReserveAfterUse(jcr, true)) {
+    if (TryReserveAfterUse(jcr, true) && jcr->sd_impl->dcr
+        && jcr->sd_impl->dcr->dev) {
       Jmsg(jcr, M_INFO, 0, T_("Using Device %s to write.\n"),
            jcr->sd_impl->dcr->dev->print_name());
     } else {
-      FreeDeviceControlRecord(jcr->sd_impl->dcr);
+      if (jcr->sd_impl->dcr) { FreeDeviceControlRecord(jcr->sd_impl->dcr); }
       jcr->sd_impl->dcr = nullptr;
       Jmsg(jcr, M_FATAL, 0, T_("Could not reserve any device for this job.\n"));
       return false;
