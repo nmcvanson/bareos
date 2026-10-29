@@ -330,7 +330,11 @@ static bool UseDeviceCmd(JobControlRecord* jcr)
     ok = TryReserveAfterUse(jcr, append);
     if (ok) {
       auto* dcr = append ? jcr->sd_impl->dcr : jcr->sd_impl->read_dcr;
-      PmStrcpy(dev_name, dcr->dev->device_resource->resource_name_);
+      if (dcr && dcr->dev) {
+        PmStrcpy(dev_name, dcr->dev->device_resource->resource_name_);
+      } else {
+        ok = false;
+      }
     }
   }
 

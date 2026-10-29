@@ -406,3 +406,26 @@ TEST_F(ReservationTest, use_cmd_non_append_reserves_read_only_with_wait)
 
   future.wait();
 }
+
+// The use command of a canceled job fails without touching a device
+TEST_F(ReservationTest, use_cmd_canceled_job_fails)
+{
+  auto bsock = std::make_unique<BareosSocketMock>();
+  auto job = std::make_unique<TestJob>(111u);
+  job->jcr->dir_bsock = bsock.get();
+  job->jcr->setJobStatusWithPriorityCheck(JS_Canceled);
+
+  EXPECT_CALL(*bsock, recv())
+      .WillOnce(BSOCK_RECV(bsock.get(),
+                           "use storage=sssss media_type=File pool_name=ppppp "
+                           "pool_type=ptptp append=0 copy=0 stripe=0"))
+      .WillOnce(BSOCK_RECV(bsock.get(), "use device=auto1"))
+      .WillOnce(Return(BNET_EOD))   // end of device commands
+      .WillOnce(Return(BNET_EOD));  // end of storage command
+
+  EXPECT_CALL(*bsock, send()).WillRepeatedly(Return(true));
+
+  bsock->recv();
+  ASSERT_EQ(use_cmd(job->jcr), false);
+  ASSERT_EQ(job->jcr->getJobStatus(), JS_Canceled);
+}
