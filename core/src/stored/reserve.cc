@@ -180,7 +180,7 @@ bool TryReserveAfterUse(JobControlRecord* jcr, bool append)
   int wait_for_device_retries = 0;
   int repeat = 0;
   bool fail = false;
-  bool found = true;
+  bool found = false;
 
   // Put new dcr in proper location
   if (append) {

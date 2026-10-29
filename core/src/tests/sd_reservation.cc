@@ -36,6 +36,7 @@
 #include "stored/device_control_record.h"
 #include "stored/stored_jcr_impl.h"
 #include "stored/job.h"
+#include "stored/reserve.h"
 #include "stored/sd_plugins.h"
 #include "stored/sd_stats.h"
 #include "stored/stored.h"
@@ -405,6 +406,20 @@ TEST_F(ReservationTest, use_cmd_non_append_reserves_read_only_with_wait)
   auto _ = std::async(std::launch::async, [&job1] { WaitThenUnreserve(job1); });
 
   future.wait();
+}
+
+// A job canceled before the reservation must not get a device
+TEST_F(ReservationTest, try_reserve_canceled_job_fails)
+{
+  auto bsock = std::make_unique<BareosSocketMock>();
+  auto job = std::make_unique<TestJob>(111u);
+  job->jcr->dir_bsock = bsock.get();
+  job->jcr->setJobStatusWithPriorityCheck(JS_Canceled);
+
+  ASSERT_FALSE(TryReserveAfterUse(job->jcr, true));
+  ASSERT_NE(job->jcr->sd_impl->dcr, nullptr);
+  ASSERT_EQ(job->jcr->sd_impl->dcr->dev, nullptr);
+  ASSERT_EQ(job->jcr->getJobStatus(), JS_Canceled);
 }
 
 // The use command of a canceled job fails without touching a device
