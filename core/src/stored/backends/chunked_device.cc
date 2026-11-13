@@ -35,13 +35,52 @@
 #include "stored/device_status_information.h"
 
 #include "stored/stored.h"
+#include "stored/device_control_record.h"
 #include "chunked_device.h"
+#include "flush_wait.h"
+#include "hard_stop.h"
 
 #include "stored/stored_globals.h"
+#include "lib/thread_specific_data.h"
+
+#include <algorithm>
+#include <chrono>
+#include <new>
+#include <vector>
 
 namespace storagedaemon {
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Copy of a device message without its trailing newlines.
+static std::string MessageText(const char* message)
+{
+  std::string text{message ? message : ""};
+  while (!text.empty() && text.back() == '\n') { text.pop_back(); }
+  return text;
+}
+
+// Milliseconds of the steady clock, for the retry times kept in requests.
+static int64_t SteadyMilliseconds()
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// Realtime clock value after the given wait, for timed condition waits.
+static struct timespec AbsoluteTimeAfter(std::chrono::milliseconds wait)
+{
+  struct timeval tv;
+  struct timespec ts;
+
+  gettimeofday(&tv, NULL);
+  const int64_t nsec = static_cast<int64_t>(tv.tv_usec) * 1000
+                       + (wait.count() % 1000) * 1000000;
+  ts.tv_sec = tv.tv_sec + wait.count() / 1000 + nsec / 1000000000;
+  ts.tv_nsec = nsec % 1000000000;
+  return ts;
+}
 
 /*
  * This implements a device abstraction that provides so called chunked
@@ -337,20 +376,41 @@ static void UpdateChunkIoRequest(void* old_item, void* new_item)
   }
 }
 
-// Enqueue a chunk flush request onto the ordered circular buffer.
-bool ChunkedDevice::EnqueueChunk(chunk_io_request* request)
+/* Call back function for putting a failed request back while a newer request
+ * for the same chunk is queued: the larger one is kept. */
+static void UpdateRequeuedChunkIoRequest(void* old_item, void* new_item)
 {
+  chunk_io_request* old_req = (chunk_io_request*)old_item;
+  chunk_io_request* new_req = (chunk_io_request*)new_item;
+
+  if (new_req->wbuflen >= old_req->wbuflen) {
+    UpdateChunkIoRequest(old_item, new_item);
+  }
+}
+
+/* Queues a chunk for upload. While the queue is full the writer waits; on a
+ * cancel, a read-only device or no upload progress for flush_timeout_ seconds
+ * the chunk is queued past the capacity and the write refused. */
+EnqueueResult ChunkedDevice::EnqueueChunk(chunk_io_request* request,
+                                          std::string& refusal)
+{
+  using clock = FlushWaitTracker::clock;
   chunk_io_request *new_request, *enqueued_request;
+  EnqueueResult result = EnqueueResult::kQueued;
+  bool ignore_full = false;
 
   Dmsg2(100, "Enqueueing chunk %" PRIu16 " of volume %s (%" PRIu32 " bytes)\n",
         request->chunk, request->volname, request->wbuflen);
 
   if (!io_threads_started_) {
-    if (!StartIoThreads()) { return false; }
+    if (!StartIoThreads()) {
+      refusal = T_("the upload threads could not be started");
+      return EnqueueResult::kFailed;
+    }
   }
 
-  new_request = (chunk_io_request*)malloc(sizeof(chunk_io_request));
-  memset(new_request, 0, sizeof(chunk_io_request));
+  // Value-initialized in malloc memory: the request is released with free().
+  new_request = new (malloc(sizeof(chunk_io_request))) chunk_io_request{};
   new_request->volname = strdup(request->volname);
   new_request->chunk = request->chunk;
   new_request->buffer = request->buffer;
@@ -361,20 +421,94 @@ bool ChunkedDevice::EnqueueChunk(chunk_io_request* request)
   Dmsg2(100, "Allocated chunk io request of %" PRIuz " bytes at %p\n",
         sizeof(chunk_io_request), new_request);
 
-  /* Enqueue the item onto the ordered circular buffer.
-   * This returns either the same request as we passed
-   * in or the previous flush request for the same chunk. */
-  enqueued_request = (chunk_io_request*)cb_->enqueue(
-      new_request, sizeof(chunk_io_request), CompareChunkIoRequest,
-      UpdateChunkIoRequest, false, /* use_reserved_slot */
-      false /* no_signal */);
+  // Counted before an io-thread can take it, uncounted if it is not kept.
+  CountPendingRequest(request->volname, request->chunk, 1);
+  FlushWaitTracker tracker{std::chrono::seconds{flush_timeout_}, clock::now(),
+                           GetUploadState().done};
+  while (true) {
+    const struct timespec slice = AbsoluteTimeAfter(std::chrono::seconds{1});
+    bool was_full = false;
+
+    /* Enqueue the item onto the ordered circular buffer.
+     * This returns either the same request as we passed
+     * in or the previous flush request for the same chunk. */
+    enqueued_request = (chunk_io_request*)cb_->enqueue(
+        new_request, sizeof(chunk_io_request), CompareChunkIoRequest,
+        UpdateChunkIoRequest, false, /* use_reserved_slot */
+        false /* no_signal */, &slice, &was_full, ignore_full);
+    if (!was_full) { break; }
+
+    const UploadState uploads = GetUploadState();
+    PoolMem message(PM_MESSAGE);
+    switch (tracker.Check(false, WriterCanceled(), readonly_, uploads.done,
+                          clock::now())) {
+      case FlushWaitResult::kWritten:
+      case FlushWaitResult::kWaiting:
+        continue;
+      case FlushWaitResult::kCanceled:
+        refusal = T_("job canceled while waiting for a free upload slot");
+        break;
+      case FlushWaitResult::kReadOnly:
+        refusal = uploads.readonly_reason;
+        break;
+      case FlushWaitResult::kTimedOut:
+        Mmsg(message,
+             T_("no upload progress for %" PRIu32
+                " seconds while the upload queue was full; the chunks stay "
+                "queued. Last backend error: %s"),
+             flush_timeout_,
+             uploads.last_error.empty() ? "none" : uploads.last_error.c_str());
+        refusal = message.c_str();
+        Emsg2(M_ERROR, 0, T_("Setting device %s readonly: %s.\n"), print_name(),
+              refusal.c_str());
+        SetReadonly(refusal);
+        break;
+    }
+    ignore_full = true;
+    result = EnqueueResult::kKeptButRefused;
+  }
+
+  if (!enqueued_request) {
+    // The caller keeps the chunk's buffer.
+    CountPendingRequest(request->volname, request->chunk, -1);
+    new_request->release = false;
+    FreeChunkIoRequest(new_request);
+    refusal = T_("the upload queue did not take the chunk");
+    return EnqueueResult::kFailed;
+  }
 
   // Compare the return value from the enqueue.
-  if (enqueued_request && enqueued_request != new_request) {
+  if (enqueued_request != new_request) {
+    CountPendingRequest(request->volname, request->chunk, -1);
     FreeChunkIoRequest(new_request);
   }
 
-  return (enqueued_request) ? true : false;
+  return result;
+}
+
+/* Puts a request taken by dequeue() back into its reserved slot without
+ * waking the other io-threads; false when the buffer did not take it. */
+bool ChunkedDevice::RequeueChunk(chunk_io_request* request)
+{
+  chunk_io_request* enqueued_request = (chunk_io_request*)cb_->enqueue(
+      request, sizeof(chunk_io_request), CompareChunkIoRequest,
+      UpdateRequeuedChunkIoRequest, true, /* use_reserved_slot */
+      true /* no_signal */);
+  if (!enqueued_request) {
+    Dmsg2(100, "Error: Chunk %d of volume %s not appended to queue\n",
+          request->chunk, request->volname);
+    return false;
+  }
+
+  /* If it is different there was already a chunk io request for the same
+   * chunk on the ordered circular buffer. */
+  if (enqueued_request != request) {
+    Dmsg2(100, "Attempted to append chunk %d of volume %s twice\n",
+          request->chunk, request->volname);
+    CountPendingRequest(request->volname, request->chunk, -1);
+    FreeChunkIoRequest(request);
+  }
+  return true;
 }
 
 /*
@@ -384,9 +518,9 @@ bool ChunkedDevice::EnqueueChunk(chunk_io_request* request)
 bool ChunkedDevice::DequeueChunk()
 {
   char ed1[50];
-  struct timeval tv;
   struct timespec ts;
   bool requeued = false;
+  std::chrono::milliseconds retry_pause{0};
   chunk_io_request* new_request;
 
   /* Loop while we are not done either due to the ordered circular buffer being
@@ -398,108 +532,360 @@ bool ChunkedDevice::DequeueChunk()
     if (cb_->IsFlushing()) { return false; }
 
     /* Calculate the next absolute timeout if we find out there is no work to be
-     * done. */
-    gettimeofday(&tv, NULL);
-    ts.tv_nsec = tv.tv_usec * 1000;
-    ts.tv_sec = tv.tv_sec + DEFAULT_RECHECK_INTERVAL;
+     * done; after putting a chunk back, wait for its retry pause. */
+    ts = AbsoluteTimeAfter(requeued
+                               ? retry_pause
+                               : std::chrono::milliseconds{std::chrono::seconds{
+                                     DEFAULT_RECHECK_INTERVAL}});
 
     /* Dequeue the next item from the ordered circular buffer and reserve the
      * slot as we might need to put this item back onto the ordered circular
-     * buffer if we fail to flush it to the remote backing store. Also let the
-     * dequeue wake up every DEFAULT_RECHECK_INTERVAL seconds to retry failed
-     * previous uploads. */
+     * buffer if we fail to flush it to the remote backing store. */
     new_request = (chunk_io_request*)cb_->dequeue(
         true,     /* reserve_slot we may need to enqueue the request */
         requeued, /* request is requeued due to failure ? */
         &ts, DEFAULT_RECHECK_INTERVAL);
     if (!new_request) { return false; }
 
-    Dmsg3(100, "Flushing chunk %d of volume %s by thread %s\n",
-          new_request->chunk, new_request->volname,
-          edit_pthread(pthread_self(), ed1, sizeof(ed1)));
-
-    if (!FlushRemoteChunk(new_request)) {
-      chunk_io_request* enqueued_request;
-
-      /* See if we have a maximum number of retries to upload chunks to the
-       * backing store and if we have and exceeded those tries for this chunk
-       * set the device to read-only so any next write to the device will error
-       * out. This should prevent us from hanging the flushing to the backing
-       * store on misconfigured devices. */
-      new_request->tries++;
-      if (retries_ > 0 && new_request->tries >= retries_) {
-        Mmsg4(errmsg,
-              T_("Unable to flush chunk %d of volume %s to backing store after "
-                 "%d tries, setting device %s readonly\n"),
-              new_request->chunk, new_request->volname, new_request->tries,
-              print_name());
-        Emsg0(M_ERROR, 0, "%s", errmsg);
-        readonly_ = true;
-        goto bail_out;
-      }
-
-      /* We failed to flush the chunk to the backing store
-       * so enqueue it again using the reserved slot by dequeue()
-       * but don't signal the workers otherwise we would try uploading
-       * the same chunk again and again by different io-threads.
-       * As we set the requeued flag to the dequeue method on the ordered
-       * circular buffer we will not try dequeueing any new item either until a
-       * new item is put onto the ordered circular buffer or after the retry
-       * interval has expired. */
-      Dmsg2(100, "Enqueueing chunk %d of volume %s for retry of upload later\n",
-            new_request->chunk, new_request->volname);
-
-      /* Enqueue the item onto the ordered circular buffer.
-       * This returns either the same request as we passed
-       * in or the previous flush request for the same chunk. */
-      enqueued_request = (chunk_io_request*)cb_->enqueue(
-          new_request, sizeof(chunk_io_request), CompareChunkIoRequest,
-          UpdateChunkIoRequest, true, /* use_reserved_slot */
-          true /* no_signal */);
-      // See if the enqueue succeeded.
-      if (!enqueued_request) {
-        Dmsg2(100, "Error: Chunk %d of volume %s not appended to queue\n",
-              new_request->chunk, new_request->volname);
-        return false;
-      }
-
-      /* Compare the return value from the enqueue against our new_request.
-       * If it is different there was already a chunk io request for the
-       * same chunk on the ordered circular buffer. */
-      if (enqueued_request != new_request) {
-        Dmsg2(100, "Attempted to append chunk %d of volume %s twice\n",
-              new_request->chunk, new_request->volname);
-        FreeChunkIoRequest(new_request);
-      }
-
+    // A chunk whose retry is not due yet goes back; this thread waits for it.
+    const int64_t now_ms = SteadyMilliseconds();
+    if (new_request->retry_at_ms > now_ms) {
+      retry_pause
+          = std::chrono::milliseconds{new_request->retry_at_ms - now_ms};
+      if (!RequeueChunk(new_request)) { return false; }
       requeued = true;
       continue;
     }
 
-  bail_out:
-    // Unreserve the slot on the ordered circular buffer reserved by dequeue().
+    Dmsg3(100, "Flushing chunk %d of volume %s by thread %s\n",
+          new_request->chunk, new_request->volname,
+          edit_pthread(pthread_self(), ed1, sizeof(ed1)));
+
+    // Read before the request can go back to the queue or be released.
+    const bool was_retry = new_request->tries > 0;
+    const size_t chunk_bytes = new_request->wbuflen;
+    if (!FlushRemoteChunk(new_request)) {
+      // Another thread uploads this chunk: back in a second, not a failed try.
+      if (new_request->lease_conflict) {
+        new_request->lease_conflict = false;
+        retry_pause = std::chrono::milliseconds{1000};
+        new_request->retry_at_ms = SteadyMilliseconds() + retry_pause.count();
+        if (!RequeueChunk(new_request)) { return false; }
+        requeued = true;
+        continue;
+      }
+
+      const std::string error = MessageText(errmsg);
+
+      /* A chunk that used up its maximum number of tries sets the device
+       * read-only, so that further writes fail. The chunk is kept and
+       * retried below until it is uploaded. */
+      if (new_request->tries < UINT8_MAX) { new_request->tries++; }
+      if (retries_ > 0 && new_request->tries == retries_) {
+        PoolMem reason(PM_MESSAGE);
+        Mmsg(reason,
+             T_("chunk %d of volume %s could not be uploaded after %d tries: "
+                "%s"),
+             new_request->chunk, new_request->volname, new_request->tries,
+             error.c_str());
+        Emsg2(M_ERROR, 0,
+              T_("Setting device %s readonly: %s. The chunk stays queued and "
+                 "is retried.\n"),
+              print_name(), reason.c_str());
+        SetReadonly(reason.c_str());
+      }
+
+      /* The chunk goes back without waking the other io-threads and is tried
+       * again after a pause that grows with its number of tries. */
+      retry_pause = UploadRetryPause(new_request->tries,
+                                     std::chrono::seconds{flush_timeout_});
+      new_request->retry_at_ms = SteadyMilliseconds() + retry_pause.count();
+      Dmsg3(100, "Enqueueing chunk %d of volume %s for retry in %lld ms\n",
+            new_request->chunk, new_request->volname,
+            static_cast<long long>(retry_pause.count()));
+      if (!RequeueChunk(new_request)) { return false; }
+
+      NotifyUploadEvent(false, error, 0, was_retry);
+      requeued = true;
+      continue;
+    }
+
+    /* Uncounted before the slot reserved by dequeue() is given back, so a
+     * drained buffer means no chunk is counted any more. */
+    CountPendingRequest(new_request->volname, new_request->chunk, -1);
     cb_->unreserve_slot();
 
     // Processed the chunk so clean it up now.
     FreeChunkIoRequest(new_request);
 
+    ClearReadonlyIfDrained();
+    NotifyUploadEvent(true, {}, chunk_bytes, was_retry);
+
     return true;
   }
 }
 
-/*
- * Internal method for flushing a chunk to the backing store.
- * The retry logic is in the io-threads but if those are not
- * used we give this one try and otherwise drop the chunk and
- * Like the retry logic in the io-threads this tries to upload
- * several times and otherwise drop the chunk and
- * return an IO error to the upper level callers. That way the
- * volume will go into error.
- */
+// Records a finished upload try and wakes a waiting flush.
+void ChunkedDevice::NotifyUploadEvent(bool uploaded,
+                                      const std::string& error,
+                                      size_t bytes,
+                                      bool retry)
+{
+  {
+    std::lock_guard<std::mutex> lock(upload_mutex_);
+    ++upload_state_.events;
+    if (retry) { ++upload_state_.retried_tries; }
+    if (uploaded) {
+      ++upload_state_.done;
+      // An empty chunk is created, not uploaded; it is not counted.
+      if (bytes > 0) {
+        ++upload_state_.uploaded_chunks;
+        upload_state_.uploaded_bytes += bytes;
+      }
+    } else {
+      ++upload_state_.failed_tries;
+      upload_state_.last_error = error;
+    }
+    upload_state_.outcome_ms = SteadyMilliseconds();
+    upload_state_.outcome_ok = uploaded;
+    upload_state_.outcome_error = uploaded ? std::string{} : error;
+  }
+  upload_cv_.notify_all();
+}
+
+// Keeps the last backend error for the message of a failed flush wait.
+void ChunkedDevice::SetLastError(const std::string& error)
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  upload_state_.last_error = error;
+}
+
+// Makes further writes fail; the reason is reported to the jobs.
+void ChunkedDevice::SetReadonly(const std::string& reason)
+{
+  {
+    std::lock_guard<std::mutex> lock(upload_mutex_);
+    upload_state_.readonly_reason = reason;
+  }
+  readonly_ = true;
+}
+
+// Lets the device take writes again once nothing is queued or inflight.
+void ChunkedDevice::ClearReadonlyIfDrained()
+{
+  if (!readonly_ || !cb_->empty_with_no_reserve() || NrInflightChunks() > 0) {
+    return;
+  }
+  bool expected = true;
+  if (readonly_.compare_exchange_strong(expected, false)) {
+    {
+      std::lock_guard<std::mutex> lock(upload_mutex_);
+      upload_state_.readonly_reason.clear();
+    }
+    Emsg1(M_INFO, 0,
+          T_("All queued chunks of device %s are uploaded, it takes writes "
+             "again.\n"),
+          print_name());
+  }
+}
+
+UploadState ChunkedDevice::GetUploadState()
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  return upload_state_;
+}
+
+// Whether the job of the calling thread was canceled or has failed.
+bool ChunkedDevice::WriterCanceled()
+{
+  JobControlRecord* jcr = GetJcrFromThreadSpecificData();
+  return jcr != nullptr && jcr->IsJobCanceled();
+}
+
+/* Fails the job of the calling thread with the message. The status is set
+ * directly, as Jmsg skips it when no destination takes fatal messages. */
+void ChunkedDevice::FailWriter(const char* message)
+{
+  JobControlRecord* jcr = GetJcrFromThreadSpecificData();
+  Jmsg(jcr, M_FATAL, 0, "%s", message);
+  if (jcr) { jcr->setJobStatusWithPriorityCheck(JS_FatalError); }
+}
+
+// A chunk with data was handed to the upload path.
+void ChunkedDevice::CountReceivedChunk(size_t bytes)
+{
+  if (bytes == 0) { return; }
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  ++upload_state_.received_chunks;
+}
+
+// Adds change to the number of queued or uploading requests of the volume.
+void ChunkedDevice::CountPendingRequest(const char* volname,
+                                        uint16_t chunk,
+                                        int change)
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  int& count = pending_requests_[volname];
+  count += change;
+  if (count == 0) { pending_requests_.erase(volname); }
+
+  // The first request of a chunk starts its age; the last one ends it.
+  const auto key = std::make_pair(std::string(volname), chunk);
+  auto& since = pending_since_[key];
+  if (since.first == 0 && change > 0) { since.second = SteadyMilliseconds(); }
+  since.first += change;
+  if (since.first <= 0) { pending_since_.erase(key); }
+}
+
+/* Number of chunks of the volume that this device has queued or is uploading,
+ * including a chunk an io-thread holds between two tries. */
+int ChunkedDevice::PendingChunksOfVolume(const char* volname)
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  auto it = pending_requests_.find(volname);
+  return it == pending_requests_.end() ? 0 : it->second;
+}
+
+// Read-only reason of a kept chunk whose upload failed.
+static std::string KeptChunkFailure(uint16_t chunk,
+                                    const std::string& volname,
+                                    const std::string& error)
+{
+  PoolMem reason(PM_MESSAGE);
+  Mmsg(reason, T_("chunk %d of volume %s could not be uploaded: %s"), chunk,
+       volname.c_str(), error.c_str());
+  return reason.c_str();
+}
+
+/* Without io-threads: puts the current chunk on the kept list. A failed chunk
+ * moves its buffer there and makes the device read-only; a release flush
+ * keeps a copy. Caller holds chunk_mutex_. */
+void ChunkedDevice::KeepCurrentChunk(bool failed, const std::string& error)
+{
+  KeptChunk entry;
+  entry.volname = current_volname_;
+  entry.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  entry.buflen = current_chunk_->buflen;
+  if (failed) {
+    entry.buffer = current_chunk_->buffer;
+    entry.tries = 1;
+    entry.retry_at_ms
+        = SteadyMilliseconds()
+          + UploadRetryPause(1, std::chrono::seconds{flush_timeout_}).count();
+  } else {
+    entry.buffer = allocate_chunkbuffer();
+    memcpy(entry.buffer, current_chunk_->buffer, current_chunk_->buflen);
+  }
+
+  // Listed and read-only before the chunk leaves current_chunk_.
+  size_t kept = 0;
+  {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    if (failed) {
+      SetReadonly(KeptChunkFailure(entry.chunk, entry.volname, error));
+    }
+    kept_chunks_.push_back(std::move(entry));
+    CountPendingRequest(current_volname_, kept_chunks_.back().chunk, 1);
+    kept = ++kept_count_;
+  }
+  if (kept > 2) {
+    Emsg2(M_WARNING, 0, T_("Device %s keeps %d chunks waiting for upload.\n"),
+          print_name(), static_cast<int>(kept));
+  }
+
+  if (failed) {
+    current_chunk_->buffer = allocate_chunkbuffer();
+    current_chunk_->buflen = 0;
+  }
+  current_chunk_->need_flushing = false;
+}
+
+/* Uploads a kept chunk that the caller marked as uploading, without holding
+ * kept_mutex_; true when it is stored. */
+bool ChunkedDevice::UploadKeptChunk(std::list<KeptChunk>::iterator entry)
+{
+  chunk_io_request request{};
+  request.volname = entry->volname.c_str();
+  request.chunk = entry->chunk;
+  request.buffer = entry->buffer;
+  request.wbuflen = entry->buflen;
+
+  const bool was_retry = entry->tries > 0;
+  const size_t bytes = entry->buflen;
+  const bool uploaded = FlushRemoteChunk(&request);
+  const bool busy = !uploaded && request.lease_conflict;
+  const std::string error = uploaded ? std::string{} : MessageText(errmsg);
+  {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    if (uploaded) {
+      CountPendingRequest(entry->volname.c_str(), entry->chunk, -1);
+      FreeChunkbuffer(entry->buffer);
+      kept_chunks_.erase(entry);
+      if (--kept_count_ == 0) { ClearKeptReadonly(); }
+    } else if (busy || request.canceled) {
+      // Another copy is being uploaded, or the job was canceled: the chunk
+      // stays kept, with its tries and read-only reason unchanged.
+      entry->retry_at_ms = SteadyMilliseconds() + 1000;
+      entry->uploading = false;
+    } else {
+      if (entry->tries < UINT8_MAX) { entry->tries++; }
+      entry->retry_at_ms
+          = SteadyMilliseconds()
+            + UploadRetryPause(entry->tries,
+                               std::chrono::seconds{flush_timeout_})
+                  .count();
+      entry->uploading = false;
+      SetReadonly(KeptChunkFailure(entry->chunk, entry->volname, error));
+    }
+  }
+  NotifyUploadEvent(uploaded, error, bytes, was_retry);
+  return uploaded;
+}
+
+/* Gives at most limit idle kept chunks, all or those whose retry is due, one
+ * upload try each; no pause and no lock is held across a try. */
+void ChunkedDevice::TryKeptChunks(bool only_due, size_t limit)
+{
+  std::vector<std::list<KeptChunk>::iterator> taken;
+  {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    const int64_t now_ms = SteadyMilliseconds();
+    for (auto it = kept_chunks_.begin();
+         it != kept_chunks_.end() && taken.size() < limit; ++it) {
+      if (it->uploading || (only_due && it->retry_at_ms > now_ms)) { continue; }
+      it->uploading = true;
+      taken.push_back(it);
+    }
+  }
+  for (auto entry : taken) {
+    Dmsg2(100, "Uploading kept chunk %d of volume %s\n", entry->chunk,
+          entry->volname.c_str());
+    UploadKeptChunk(entry);
+  }
+}
+
+// Lets the device take writes again; caller holds kept_mutex_.
+void ChunkedDevice::ClearKeptReadonly()
+{
+  if (!readonly_) { return; }
+  {
+    std::lock_guard<std::mutex> lock(upload_mutex_);
+    upload_state_.readonly_reason.clear();
+  }
+  readonly_ = false;
+  Emsg1(M_INFO, 0,
+        T_("All kept chunks of device %s are uploaded, it takes writes "
+           "again.\n"),
+        print_name());
+}
+
+/* Queues the current chunk for the io-threads, or without them uploads it once;
+ * a refused, unqueued or failed chunk fails the writer's job and is kept.
+ * Caller holds chunk_mutex_. */
 bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
 {
   bool retval = false;
-  chunk_io_request request;
+  chunk_io_request request{};
 
   // Calculate in which chunk we are currently.
   request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
@@ -507,13 +893,51 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
   request.buffer = current_chunk_->buffer;
   request.wbuflen = current_chunk_->buflen;
   request.release = release_chunk;
+  CountReceivedChunk(request.wbuflen);
 
   if (io_threads_) {
-    retval = EnqueueChunk(&request);
+    std::string refusal;
+    PoolMem message(PM_MESSAGE);
+    switch (EnqueueChunk(&request, refusal)) {
+      case EnqueueResult::kQueued:
+        retval = true;
+        break;
+      case EnqueueResult::kKeptButRefused:
+        Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+             refusal.c_str());
+        FailWriter(message.c_str());
+        break;
+      case EnqueueResult::kFailed:
+        // The chunk stays in the device's buffer, still to be flushed.
+        Mmsg(message,
+             T_("Device %s could not queue chunk %d of volume %s: %s\n"),
+             print_name(), request.chunk, request.volname, refusal.c_str());
+        FailWriter(message.c_str());
+        return false;
+    }
   } else {
     // no multithreading
     Dmsg1(100, "Try to flush chunk number: %d\n", request.chunk);
     retval = FlushRemoteChunk(&request);
+    if (retval) {
+      NotifyUploadEvent(true, {}, request.wbuflen);
+    } else if (request.lease_conflict && request.wbuflen > 0) {
+      // Another job uploads this chunk now: keep a copy, the writer goes on.
+      KeepCurrentChunk(false, {});
+      retval = true;
+    } else {
+      // A chunk with data is kept for a later upload, never dropped.
+      const std::string error = MessageText(errmsg);
+      PoolMem message(PM_MESSAGE);
+      Mmsg(message,
+           T_("Device %s could not upload chunk %d of volume %s: %s\n"),
+           print_name(), request.chunk, request.volname, error.c_str());
+      if (request.wbuflen > 0) {
+        KeepCurrentChunk(true, error);
+        NotifyUploadEvent(false, error);
+      }
+      FailWriter(message.c_str());
+    }
   }
 
   // Clear the need flushing flag.
@@ -527,6 +951,8 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
     current_chunk_->end_offset
         = current_chunk_->start_offset + (current_chunk_->chunk_size - 1);
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
   } else {
     // If we enqueued the data we need to allocate a new buffer.
     if (release_chunk && io_threads_) { current_chunk_->buffer = NULL; }
@@ -537,10 +963,163 @@ bool ChunkedDevice::FlushChunk(bool release_chunk, bool move_to_next_chunk)
   return retval;
 }
 
-// Internal method for reading a chunk from the backing store.
-bool ChunkedDevice::ReadChunk()
+/* Enqueues a copy of the current chunk and keeps the device's buffer, so a
+ * queued upload never points into a buffer the device frees or reuses.
+ * Caller holds chunk_mutex_. */
+bool ChunkedDevice::FlushChunkCopy(std::string& refusal)
 {
-  chunk_io_request request;
+  chunk_io_request request{};
+
+  request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  request.volname = current_volname_;
+  request.buffer = allocate_chunkbuffer();
+  memcpy(request.buffer, current_chunk_->buffer, current_chunk_->buflen);
+  request.wbuflen = current_chunk_->buflen;
+  request.release = true;
+  CountReceivedChunk(request.wbuflen);
+
+  switch (EnqueueChunk(&request, refusal)) {
+    case EnqueueResult::kQueued:
+      current_chunk_->need_flushing = false;
+      return true;
+    case EnqueueResult::kKeptButRefused:
+      current_chunk_->need_flushing = false;
+      return false;
+    case EnqueueResult::kFailed:
+      FreeChunkbuffer(request.buffer);
+      return false;
+  }
+  return false;
+}
+
+// Ends the worker of a speculative read, frees its buffer and drops the slot.
+auto ChunkedDevice::EraseReadAhead(
+    std::vector<std::unique_ptr<ReadAheadSlot>>::iterator it)
+    -> std::vector<std::unique_ptr<ReadAheadSlot>>::iterator
+{
+  (*it)->stop.store(true);
+  if ((*it)->worker.joinable()) { (*it)->worker.join(); }
+  free((*it)->buffer);
+  return read_ahead_.erase(it);
+}
+
+// Ends every speculative read; the workers are joined before this returns.
+void ChunkedDevice::StopReadAhead()
+{
+  for (auto& slot : read_ahead_) { slot->stop.store(true); }
+  while (!read_ahead_.empty()) { EraseReadAhead(read_ahead_.begin()); }
+}
+
+/* Starts speculative reads of the chunks after the current one while a
+ * read-only volume is read sequentially; never past the catalog size. */
+void ChunkedDevice::TopUpReadAhead()
+{
+  if (!current_chunk_ || current_chunk_->writing || !current_volname_
+      || current_chunk_->start_offset < 0 || !SupportsReadAhead()) {
+    return;
+  }
+  const int64_t chunk_size = current_chunk_->chunk_size;
+  const int64_t current = current_chunk_->start_offset / chunk_size;
+
+  for (auto it = read_ahead_.begin(); it != read_ahead_.end();) {
+    if ((*it)->volname != current_volname_ || (*it)->chunk <= current) {
+      it = EraseReadAhead(it);
+    } else {
+      ++it;
+    }
+  }
+
+  const uint64_t volume_bytes = VolCatInfo.VolCatBytes;
+  for (int64_t next = current + 1;
+       read_ahead_.size() < kReadAheadChunks
+       && next <= current + int64_t{kReadAheadChunks};
+       ++next) {
+    if (next >= MAX_CHUNKS
+        || static_cast<uint64_t>(next) * chunk_size >= volume_bytes) {
+      break;
+    }
+    if (std::any_of(read_ahead_.begin(), read_ahead_.end(),
+                    [next](const auto& slot) { return slot->chunk == next; })) {
+      continue;
+    }
+    auto slot = std::make_unique<ReadAheadSlot>();
+    slot->buffer = static_cast<char*>(malloc(chunk_size));
+    if (!slot->buffer) { break; }
+    slot->volname = current_volname_;
+    slot->chunk = static_cast<uint16_t>(next);
+    slot->size = static_cast<uint32_t>(chunk_size);
+    ReadAheadSlot* raw = slot.get();
+    try {
+      raw->worker = std::thread([this, raw] {
+        tls_hard_stop = &raw->stop;
+        std::string error;
+        uint32_t received = 0;
+        const bool ok
+            = ReadAheadFetch(raw->volname.c_str(), raw->chunk, raw->buffer,
+                             raw->size, &received, &error);
+        tls_hard_stop = nullptr;
+        if (ok) {
+          ++download_objects_;
+          download_bytes_ += received;
+        } else if (!raw->stop.load()) {
+          ++download_failures_;
+        }
+        std::lock_guard<std::mutex> lock(raw->mutex);
+        raw->ok = ok;
+        raw->received = received;
+        raw->error = std::move(error);
+        raw->finished = true;
+        raw->finished_cv.notify_all();
+      });
+    } catch (const std::system_error&) {
+      free(slot->buffer);
+      break;
+    }
+    read_ahead_.push_back(std::move(slot));
+  }
+}
+
+/* Makes the speculative read of the chunk the current chunk's data; false
+ * when there is none or it failed, and the caller reads the chunk itself. */
+bool ChunkedDevice::TakeReadAhead(uint16_t chunk)
+{
+  auto it = std::find_if(read_ahead_.begin(), read_ahead_.end(),
+                         [&](const auto& slot) {
+                           return slot->chunk == chunk && current_volname_
+                                  && slot->volname == current_volname_;
+                         });
+  if (it == read_ahead_.end()) { return false; }
+  ReadAheadSlot& slot = **it;
+  {
+    std::unique_lock<std::mutex> lock(slot.mutex);
+    while (!slot.finished) {
+      // A canceled job ends the read at once; the caller then fails fast.
+      if (WriterCanceled()) { slot.stop.store(true); }
+      slot.finished_cv.wait_for(lock, std::chrono::milliseconds{100});
+    }
+  }
+  /* A speculative read has no metadata size: it is taken when it is a full
+   * chunk or the last chunk of the volume; a shorter one is left to the
+   * job's own read with its own checks. */
+  const int64_t chunk_end
+      = (static_cast<int64_t>(chunk) + 1) * current_chunk_->chunk_size;
+  const bool usable
+      = slot.ok
+        && static_cast<ssize_t>(slot.received) <= current_chunk_->chunk_size
+        && (static_cast<ssize_t>(slot.received) == current_chunk_->chunk_size
+            || static_cast<uint64_t>(chunk_end) >= VolCatInfo.VolCatBytes);
+  if (usable) {
+    std::swap(current_chunk_->buffer, slot.buffer);
+    current_chunk_->buflen = slot.received;
+  }
+  EraseReadAhead(it);
+  return usable;
+}
+
+// Internal method for reading a chunk from the backing store.
+bool ChunkedDevice::ReadChunk(bool full)
+{
+  chunk_io_request request{};
 
   // Calculate in which chunk we are currently.
   request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
@@ -549,16 +1128,99 @@ bool ChunkedDevice::ReadChunk()
   request.wbuflen = current_chunk_->chunk_size;
   request.rbuflen = &current_chunk_->buflen;
   request.release = false;
+  request.for_write = current_chunk_->writing;
+  if (!full && SupportsPartialRead()) {
+    request.read_mode = ChunkReadMode::kMetadata;
+  }
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
 
   current_chunk_->end_offset
       = current_chunk_->start_offset + (current_chunk_->chunk_size - 1);
 
-  if (!ReadRemoteChunk(&request)) {
+  if (full && TakeReadAhead(request.chunk)) {
+    current_chunk_->loaded_end = current_chunk_->buflen;
+    return true;
+  }
+
+  const bool read_ok = ReadRemoteChunk(&request);
+  // A metadata request is a HEAD, not a transfer.
+  if (request.read_mode != ChunkReadMode::kMetadata && read_ok) {
+    ++download_objects_;
+    download_bytes_ += current_chunk_->buflen;
+  }
+  if (!read_ok) {
     // If the chunk doesn't exist on the backing store it has a size of 0 bytes.
     current_chunk_->buflen = 0;
     return false;
   }
 
+  if (request.read_mode == ChunkReadMode::kFull) {
+    current_chunk_->loaded_end = current_chunk_->buflen;
+  }
+
+  return true;
+}
+
+// Only covered bytes may be copied. Sequential reading promotes a small first
+// range to the rest of the chunk once; seeking uses one replacement interval.
+bool ChunkedDevice::EnsureChunkBytes(size_t offset, size_t count, bool full)
+{
+  if (full) {
+    offset = 0;
+    count = current_chunk_->buflen;
+  }
+  if (count == 0) { return true; }
+  if (offset >= current_chunk_->buflen) {
+    dev_errno = EIO;
+    errno = EIO;
+    return false;
+  }
+  count = std::min(count, size_t{current_chunk_->buflen} - offset);
+  if (current_chunk_->loaded_begin <= offset
+      && current_chunk_->loaded_end >= offset + count) {
+    return true;
+  }
+  if (!SupportsPartialRead()) { return false; }
+
+  size_t begin = offset;
+  size_t end = std::min(
+      size_t{current_chunk_->buflen},
+      offset
+          + std::max(count, size_t{max_block_size ? max_block_size
+                                                  : DEFAULT_BLOCK_SIZE}));
+  const bool sequential = !full && current_chunk_->loaded_end > 0
+                          && offset >= current_chunk_->loaded_begin
+                          && offset <= current_chunk_->loaded_end;
+  if (sequential) {
+    begin = current_chunk_->loaded_end;
+    end = current_chunk_->buflen;
+  }
+  uint32_t received{};
+  chunk_io_request request{};
+  request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  request.volname = current_volname_;
+  request.buffer = current_chunk_->buffer;
+  request.wbuflen = current_chunk_->chunk_size;
+  request.rbuflen = &received;
+  request.read_mode = ChunkReadMode::kRange;
+  request.read_offset = begin;
+  request.read_length = end - begin;
+  request.object_size = current_chunk_->buflen;
+  const bool range_ok = ReadRemoteChunk(&request);
+  if (range_ok) {
+    ++download_objects_;
+    download_bytes_ += received;
+  }
+  if (!range_ok || received != end - begin) {
+    ++download_failures_;
+    dev_errno = EIO;
+    errno = EIO;
+    InvalidateCurrentChunk();
+    return false;
+  }
+  if (!sequential) { current_chunk_->loaded_begin = begin; }
+  current_chunk_->loaded_end = end;
   return true;
 }
 
@@ -571,10 +1233,23 @@ bool ChunkedDevice::ReadChunk()
 int ChunkedDevice::SetupChunk(const char*, int flags, int)
 {
   int retval = -1;
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
+
+  // Kept chunks get one upload try, so a recovered store ends read-only.
+  if (io_threads_ == 0 && kept_count_ > 0) { TryKeptChunks(false); }
+
   /* If device is (re)opened and we are put into readonly mode because
    * of problems flushing chunks to the backing store we return EROFS
    * to the upper layers. */
   if ((flags & O_RDWR) && readonly_) {
+    if (io_threads_ == 0 && kept_count_ > 0 && !WriterCanceled()) {
+      // Fails the job once, so that it does not wait for an operator mount.
+      PoolMem message(PM_MESSAGE);
+      Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+           GetUploadState().readonly_reason.c_str());
+      FailWriter(message.c_str());
+    }
     dev_errno = EROFS; /** Read-only file system */
     return -1;
   }
@@ -603,11 +1278,14 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
     current_chunk_->buflen = 0;
     current_chunk_->start_offset = -1;
     current_chunk_->end_offset = -1;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
   }
 
   if (flags & O_RDWR) { current_chunk_->writing = true; }
 
   current_chunk_->chunk_setup = false;
+  chunk_dropped_ = false;
 
   /* We need to limit the maximum size of a chunked volume to MAX_CHUNKS *
    * chunk_size). */
@@ -634,12 +1312,25 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
   if (LoadChunk()) {
     current_chunk_->opened = true;
     retval = 0;
-  } else if (flags & O_CREAT) {
+  } else if ((flags & O_CREAT)
+             && (!SupportsPartialRead() || dev_errno == ENOENT)) {
     /* create a chunk */
     if (FlushChunk(false /* release */, false /* move_to_next_chunk */)) {
       current_chunk_->opened = true;
       retval = 0;
     }
+  }
+
+  /* A failed open of a device nobody else has open leaves nothing behind:
+   * the next open loads its chunk again and a reader is not a writer. */
+  if (retval != 0 && !current_chunk_->opened) {
+    current_chunk_->writing = false;
+    current_chunk_->chunk_setup = false;
+    current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
+    current_chunk_->start_offset = -1;
+    current_chunk_->end_offset = -1;
   }
 
   return retval;
@@ -649,10 +1340,19 @@ int ChunkedDevice::SetupChunk(const char*, int flags, int)
 ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
 {
   ssize_t retval = 0;
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
 
   if (current_chunk_->opened) {
     ssize_t wanted_offset;
     ssize_t bytes_left;
+
+    // A refused seek dropped the chunk: nothing is read until a seek loads one.
+    if (chunk_dropped_) {
+      dev_errno = EIO;
+      errno = EIO;
+      retval = -1;
+      goto bail_out;
+    }
 
     /* Shortcut logic see if end_of_media_ is set then we are at the End of the
      * Media */
@@ -694,6 +1394,10 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
       }
 
       if (bytes_left > 0) {
+        if (!EnsureChunkBytes(wanted_offset, bytes_left)) {
+          retval = -1;
+          goto bail_out;
+        }
         memcpy(buffer, current_chunk_->buffer + wanted_offset, bytes_left);
       }
       offset_ += bytes_left;
@@ -715,6 +1419,10 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
                            ((ssize_t)current_chunk_->buflen - wanted_offset));
 
           if (bytes_left > 0) {
+            if (!EnsureChunkBytes(wanted_offset, bytes_left)) {
+              retval = -1;
+              goto bail_out;
+            }
             Dmsg2(
                 200,
                 "Reading %zd bytes of %zu byte read-request from end of chunk "
@@ -729,27 +1437,44 @@ ssize_t ChunkedDevice::ReadChunked(int, void* buffer, size_t count)
           }
         }
 
-        // Read in the next chunk.
+        // A complete sequential chunk is followed by one full GET, rather
+        // than another small range and suffix. A partial/random read keeps
+        // the next chunk lazy so a short restore does not over-read it.
+        const bool full_chunk
+            = current_chunk_->loaded_begin == 0
+              && size_t{current_chunk_->loaded_end}
+                     == static_cast<size_t>(current_chunk_->chunk_size);
         current_chunk_->start_offset += current_chunk_->chunk_size;
-        if (!ReadChunk()) {
+        if (!ReadChunk(full_chunk)) {
           switch (dev_errno) {
             case EIO:
-              /* If the are no more chunks to read we return only the bytes
-               * available. We also set end_of_media_ as we are at the end of
-               * media. */
-              end_of_media_ = true;
+            case ENOENT:
+              /* Only a chunk that is absent from the volume, at or after the
+               * catalog size, is the end of media: return the bytes available
+               * and set end_of_media_. Any other failure is an error. */
+              if (ReadEndsTheVolume()) {
+                end_of_media_ = true;
+              } else {
+                retval = -1;
+              }
               goto bail_out;
             default:
               retval = -1;
               goto bail_out;
           }
         } else {
+          // A fully read chunk makes the reading sequential: read ahead.
+          if (full_chunk) { TopUpReadAhead(); }
           /* Calculate how much data we can read from the just freshly read
            * chunk. */
           bytes_left
               = MIN(((ssize_t)count - offset), (ssize_t)current_chunk_->buflen);
 
           if (bytes_left > 0) {
+            if (!EnsureChunkBytes(0, bytes_left)) {
+              retval = -1;
+              goto bail_out;
+            }
             Dmsg2(200,
                   "Reading %" PRIiz " bytes of %" PRIuz
                   " byte read-request from next chunk\n",
@@ -777,10 +1502,16 @@ bail_out:
 ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
 {
   ssize_t retval = 0;
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
 
   /* If we are put into readonly mode because of problems flushing chunks to the
    * backing store we return EIO to the upper layers. */
   if (readonly_) {
+    PoolMem message(PM_MESSAGE);
+    Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+         GetUploadState().readonly_reason.c_str());
+    FailWriter(message.c_str());
+    dev_errno = EIO;
     errno = EIO;
     retval = -1;
     goto bail_out;
@@ -789,6 +1520,15 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
   if (current_chunk_->opened) {
     ssize_t wanted_offset;
 
+    // A refused seek dropped the chunk: nothing is written until a seek loads
+    // one, so that no write restarts at chunk 0.
+    if (chunk_dropped_) {
+      dev_errno = EIO;
+      errno = EIO;
+      retval = -1;
+      goto bail_out;
+    }
+
     /* If we are starting writing without the chunk being setup it means we
      * are start writing to an empty file because otherwise the d_lseek method
      * would have read in the correct chunk. */
@@ -796,12 +1536,21 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
       current_chunk_->start_offset = 0;
       current_chunk_->end_offset = (current_chunk_->chunk_size - 1);
       current_chunk_->buflen = 0;
+      current_chunk_->loaded_begin = 0;
+      current_chunk_->loaded_end = 0;
       current_chunk_->chunk_setup = true;
 
       // See if we have to allocate a new buffer.
       if (!current_chunk_->buffer) {
         current_chunk_->buffer = allocate_chunkbuffer();
       }
+    }
+
+    // A label/seek may have loaded only part of an existing native object.
+    // Preserve all of its old bytes before the first modification.
+    if (!EnsureChunkBytes(0, current_chunk_->buflen, true)) {
+      retval = -1;
+      goto bail_out;
     }
 
     // See if we can write the whole data inside the current chunk.
@@ -820,6 +1569,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
       if ((wanted_offset + count) > current_chunk_->buflen) {
         current_chunk_->buflen = wanted_offset + count;
       }
+      current_chunk_->loaded_begin = 0;
+      current_chunk_->loaded_end = current_chunk_->buflen;
       current_chunk_->need_flushing = true;
       retval = count;
     } else {
@@ -854,6 +1605,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
                 > (ssize_t)current_chunk_->buflen) {
               current_chunk_->buflen = wanted_offset + bytes_left;
             }
+            current_chunk_->loaded_begin = 0;
+            current_chunk_->loaded_end = current_chunk_->buflen;
             current_chunk_->need_flushing = true;
             offset += bytes_left;
             retval += bytes_left;
@@ -862,6 +1615,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
 
         // Flush out the current chunk.
         if (!FlushChunk(true /* release */, true /* move_to_next_chunk */)) {
+          dev_errno = EIO;
+          errno = EIO;
           retval = -1;
           goto bail_out;
         }
@@ -880,6 +1635,8 @@ ssize_t ChunkedDevice::WriteChunked(int, const void* buffer, size_t count)
 
           memcpy(current_chunk_->buffer, ((char*)buffer + offset), bytes_left);
           current_chunk_->buflen = bytes_left;
+          current_chunk_->loaded_begin = 0;
+          current_chunk_->loaded_end = current_chunk_->buflen;
           current_chunk_->need_flushing = true;
           offset_ += bytes_left;
           offset += bytes_left;
@@ -900,6 +1657,11 @@ bail_out:
 int ChunkedDevice::CloseChunk()
 {
   int retval = -1;
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
+
+  // Kept chunks whose retry is due get one upload try.
+  if (io_threads_ == 0 && kept_count_ > 0) { TryKeptChunks(true); }
 
   if (current_chunk_->opened) {
     if (current_chunk_->need_flushing) {
@@ -926,6 +1688,8 @@ int ChunkedDevice::CloseChunk()
     current_chunk_->opened = false;
     current_chunk_->chunk_setup = false;
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->start_offset = -1;
     current_chunk_->end_offset = -1;
   } else {
@@ -938,13 +1702,29 @@ int ChunkedDevice::CloseChunk()
 // Truncate a chunked volume.
 bool ChunkedDevice::TruncateChunkedVolume(DeviceControlRecord* dcr)
 {
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
   if (current_chunk_->opened) {
+    // Chunks still waiting for upload would land in the truncated volume.
+    if (const int pending = PendingChunksOfVolume(getVolCatName());
+        pending > 0) {
+      PoolMem message(PM_MESSAGE);
+      Mmsg(message,
+           T_("Volume %s on device %s has %d chunk(s) waiting for upload; it "
+              "cannot be truncated before they are uploaded.\n"),
+           getVolCatName(), print_name(), pending);
+      PmStrcpy(errmsg, message.c_str());
+      Jmsg(dcr ? dcr->jcr : nullptr, M_ERROR, 0, "%s", message.c_str());
+      dev_errno = EBUSY;
+      return false;
+    }
     if (!TruncateRemoteVolume(dcr)) { return false; }
 
     // Reinitialize the initial chunk.
     current_chunk_->start_offset = 0;
     current_chunk_->end_offset = (current_chunk_->chunk_size - 1);
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->chunk_setup = true;
     current_chunk_->need_flushing = false;
 
@@ -968,6 +1748,8 @@ static int CompareVolumeName(void* item1, void* item2)
 // Get the current size of a volume.
 ssize_t ChunkedDevice::ChunkedVolumeSize()
 {
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+
   /* Check if the current chunk needs flushing. In that case, we just wrote to
    * the chunk. As we can only ever write to the last chunk, it is safe to
    * assume that the end of the last write in this chunk is the end of the
@@ -1045,8 +1827,9 @@ ssize_t ChunkedDevice::ChunkedVolumeSize()
     }
   }
 
-  // Get the actual length by contacting the remote backing store.
-  return RemoteVolumeSize();
+  /* Get the actual length by contacting the remote backing store. An error is
+   * -1, never a size. */
+  return RemoteVolumeSize().value_or(-1);
 }
 
 bool ChunkedDevice::is_written()
@@ -1056,6 +1839,20 @@ bool ChunkedDevice::is_written()
    * inflight as then the RemoteVolumeSize() method will fail to
    * determine the size of the data as its not fully stored on the backing store
    * yet. */
+
+  // A kept chunk of any volume is not stored yet.
+  if (kept_count_ > 0) {
+    Dmsg0(100, "storage is pending, as chunks are kept for upload\n");
+    return false;
+  }
+
+  // A writer holding the chunk is still changing it.
+  std::unique_lock<std::recursive_mutex> chunk_lock(chunk_mutex_,
+                                                    std::try_to_lock);
+  if (!chunk_lock.owns_lock()) {
+    Dmsg0(100, "storage is pending, as a writer holds the current chunk\n");
+    return false;
+  }
 
   if (current_chunk_->need_flushing) {
     Dmsg1(100, "volume %s is pending, as current chunk needs flushing\n",
@@ -1095,17 +1892,27 @@ bool ChunkedDevice::is_written()
     }
   }
 
-  /* compare expected to written volume size */
-  size_t remote_volume_size = RemoteVolumeSize();
+  /* compare expected to written volume size; an unknown size is checked again
+   * later, a volume without chunks holds 0 bytes */
+  const std::optional<ssize_t> remote_size = RemoteVolumeSize();
+  if (!remote_size) {
+    const std::string error = MessageText(errmsg);
+    Dmsg2(100, "volume %s is pending, as its remote size is unknown: %s\n",
+          current_volname_, error.c_str());
+    SetLastError(error);
+    return false;
+  }
+  const uint64_t remote_volume_size
+      = *remote_size > 0 ? static_cast<uint64_t>(*remote_size) : 0;
   Dmsg3(100,
-        "volume: %s, RemoteVolumeSize = %" PRIuz
+        "volume: %s, RemoteVolumeSize = %" PRIu64
         ", VolCatInfo.VolCatBytes "
         "= %" PRIu64 "\n",
         current_volname_, remote_volume_size, VolCatInfo.VolCatBytes);
 
   if (remote_volume_size < VolCatInfo.VolCatBytes) {
     Dmsg3(100,
-          "volume %s is pending, as 'remote volume size' = %" PRIuz
+          "volume %s is pending, as 'remote volume size' = %" PRIu64
           " < 'catalog "
           "volume size' = %" PRIu64 "\n",
           current_volname_, remote_volume_size, VolCatInfo.VolCatBytes);
@@ -1116,22 +1923,134 @@ bool ChunkedDevice::is_written()
 }
 
 
-// Busy waits until write buffer is empty.
-bool ChunkedDevice::WaitUntilChunksWritten()
+/* Waits until every chunk is uploaded, retrying kept chunks without io-threads.
+ * Fails with the reason set on cancel, on a read-only device or when no upload
+ * succeeded for flush_timeout_ seconds. */
+bool ChunkedDevice::WaitUntilChunksWritten(
+    const std::function<bool()>& is_canceled,
+    std::string& reason)
 {
-  if (!current_chunk_) { return true; }
-  if (current_chunk_->need_flushing) {
-    if (!FlushChunk(false /* release */, false /* move_to_next_chunk */)) {
-      dev_errno = EIO;
-      return false;
+  using clock = FlushWaitTracker::clock;
+  constexpr auto recheck_interval
+      = std::chrono::seconds{DEFAULT_RECHECK_INTERVAL_WRITE_BUFFER};
+  constexpr auto poll_interval = std::chrono::seconds{1};
+  PoolMem message(PM_MESSAGE);
+  std::string volname;
+  bool current_flushed = false;
+  bool not_writing = false;
+
+  /* Hands the dirty current chunk to the uploads once no writer holds it;
+   * false when the device refuses it. Runs without the device lock. */
+  auto flush_current = [&]() {
+    std::unique_lock<std::recursive_mutex> chunk_lock(chunk_mutex_,
+                                                      std::try_to_lock);
+    if (!chunk_lock.owns_lock()) { return true; }
+    current_flushed = true;
+    if (!current_chunk_ || !current_chunk_->writing) {
+      not_writing = true;
+      return true;
+    }
+    volname = current_volname_ ? current_volname_ : "";
+    if (!current_chunk_->need_flushing) { return true; }
+    if (io_threads_ == 0) {
+      KeepCurrentChunk(false, {});
+      return true;
+    }
+    std::string refusal;
+    if (FlushChunkCopy(refusal)) { return true; }
+    Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+         refusal.c_str());
+    reason = message.c_str();
+    dev_errno = EIO;
+    return false;
+  };
+
+  if (!flush_current()) { return false; }
+  // A device not opened for writing has none of its own chunks to wait for.
+  if (not_writing) { return true; }
+
+  FlushWaitTracker tracker{std::chrono::seconds{flush_timeout_}, clock::now(),
+                           GetUploadState().done};
+  auto next_check = clock::now();
+  uint64_t seen_events = 0;
+  bool written = false;
+
+  while (true) {
+    if (!current_flushed) {
+      if (!flush_current()) { return false; }
+      if (not_writing) { return true; }
+    }
+    // One try per slice, so a cancel waits for at most one upload.
+    if (io_threads_ == 0 && kept_count_ > 0) { TryKeptChunks(true, 1); }
+
+    if (clock::now() >= next_check) {
+      // Read before the check, so that no wake-up is lost.
+      seen_events = GetUploadState().events;
+      written = current_flushed && is_written();
+      next_check = clock::now() + recheck_interval;
+    }
+
+    // Kept chunks make the device read-only; this wait retries them.
+    const bool retrying_kept = io_threads_ == 0 && kept_count_ > 0;
+    const UploadState uploads = GetUploadState();
+    switch (tracker.Check(written, is_canceled(), readonly_ && !retrying_kept,
+                          uploads.done, clock::now())) {
+      case FlushWaitResult::kWritten:
+        return true;
+      case FlushWaitResult::kWaiting:
+        break;
+      case FlushWaitResult::kCanceled:
+        Mmsg(message,
+             T_("Upload of volume %s on device %s not finished: job "
+                "canceled.\n"),
+             volname.c_str(), print_name());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+      case FlushWaitResult::kReadOnly:
+        Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+             uploads.readonly_reason.c_str());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+      case FlushWaitResult::kTimedOut:
+        if (retrying_kept) {
+          std::lock_guard<std::mutex> lock(kept_mutex_);
+          if (!kept_chunks_.empty()) {
+            Mmsg(message,
+                 T_("Upload of chunk %d of volume %s on device %s made no "
+                    "progress for %" PRIu32
+                    " seconds; the chunk stays kept and is tried again when "
+                    "the device is opened or closed. Last backend error: "
+                    "%s\n"),
+                 kept_chunks_.front().chunk,
+                 kept_chunks_.front().volname.c_str(), print_name(),
+                 flush_timeout_,
+                 uploads.last_error.empty() ? "none"
+                                            : uploads.last_error.c_str());
+            reason = message.c_str();
+            dev_errno = EIO;
+            return false;
+          }
+        }
+        Mmsg(message,
+             T_("Upload of volume %s on device %s made no progress for %" PRIu32
+                " seconds; the pending chunks stay queued. Last backend "
+                "error: %s\n"),
+             volname.c_str(), print_name(), flush_timeout_,
+             uploads.last_error.empty() ? "none" : uploads.last_error.c_str());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(upload_mutex_);
+    if (upload_cv_.wait_for(lock, poll_interval, [this, seen_events] {
+          return upload_state_.events != seen_events;
+        })) {
+      next_check = clock::now();
     }
   }
-
-  while (!is_written()) {
-    Bmicrosleep(DEFAULT_RECHECK_INTERVAL_WRITE_BUFFER, 0);
-  }
-
-  return true;
 }
 
 
@@ -1153,9 +2072,10 @@ static int CloneIoRequest(void* item1, void* item2)
 }
 
 // Make sure we have the right chunk in memory.
-bool ChunkedDevice::LoadChunk()
+bool ChunkedDevice::LoadChunk(bool full)
 {
   boffset_t start_offset;
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
 
   start_offset
       = (offset_ / current_chunk_->chunk_size) * current_chunk_->chunk_size;
@@ -1167,7 +2087,14 @@ bool ChunkedDevice::LoadChunk()
 
   // If the wrong chunk is loaded populate the chunk buffer with the right data.
   if (start_offset != current_chunk_->start_offset) {
+    // The switch drops the dirty data; its flag must not flush the next
+    // chunk, which may be loaded only in part.
+    current_chunk_->need_flushing = false;
+    // A seek is not sequential reading: speculative reads are dropped.
+    StopReadAhead();
     current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
     current_chunk_->start_offset = start_offset;
 
     /* See if we are using io-threads or not and the ordered CircularBuffer is
@@ -1175,7 +2102,7 @@ bool ChunkedDevice::LoadChunk()
      * is still inflight as then the ReadChunk() method will fail to read the
      * data as its not stored on the backing store yet. */
     if (io_threads_ > 0 && cb_) {
-      chunk_io_request request;
+      chunk_io_request request{};
 
       request.chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
       request.volname = current_volname_;
@@ -1195,6 +2122,7 @@ bool ChunkedDevice::LoadChunk()
               == &request) {
             current_chunk_->end_offset
                 = start_offset + (current_chunk_->chunk_size - 1);
+            current_chunk_->loaded_end = current_chunk_->buflen;
             goto bail_out;
           }
         }
@@ -1232,7 +2160,7 @@ bool ChunkedDevice::LoadChunk()
     }
 
     // Read the chunk from the backing store.
-    if (!ReadChunk()) {
+    if (!ReadChunk(full)) {
       switch (dev_errno) {
         case EIO:
           if (current_chunk_->writing) {
@@ -1248,9 +2176,197 @@ bool ChunkedDevice::LoadChunk()
   }
 
 bail_out:
+  if (full && !EnsureChunkBytes(0, current_chunk_->buflen, true)) {
+    return false;
+  }
   current_chunk_->chunk_setup = true;
+  chunk_dropped_ = false;
 
   return true;
+}
+
+// Whether the current chunk holds data that is not flushed yet.
+bool ChunkedDevice::CurrentChunkNeedsFlushing()
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  return current_chunk_ && current_chunk_->need_flushing;
+}
+
+/* Forgets the current chunk after a refused seek and makes reads and writes
+ * fail until a seek loads a chunk; a chunk with unflushed data is kept. */
+void ChunkedDevice::InvalidateCurrentChunk()
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  StopReadAhead();
+  if (!current_chunk_ || current_chunk_->need_flushing) { return; }
+  current_chunk_->start_offset = -1;
+  current_chunk_->end_offset = -1;
+  current_chunk_->buflen = 0;
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
+  current_chunk_->chunk_setup = false;
+  chunk_dropped_ = true;
+}
+
+/* A fresh listing and catalog size distinguish EOF from a failed chunk read.
+ * EOF forgets the chunk position; an error reports the cause and invalidates
+ * the chunk until a seek reloads it. */
+bool ChunkedDevice::ReadEndsTheVolume()
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  const int chunk = current_chunk_->start_offset / current_chunk_->chunk_size;
+  const uint64_t chunk_start
+      = static_cast<uint64_t>(chunk) * current_chunk_->chunk_size;
+  std::string read_error = MessageText(errmsg);
+  const ChunkPresence presence = RemoteChunkPresence(chunk);
+  const ReadEnd end
+      = DecideReadEnd(presence, chunk_start, VolCatInfo.VolCatBytes);
+
+  if (end == ReadEnd::kEndOfVolume) {
+    current_chunk_->start_offset = -1;
+    current_chunk_->end_offset = -1;
+    current_chunk_->buflen = 0;
+    current_chunk_->loaded_begin = 0;
+    current_chunk_->loaded_end = 0;
+    return true;
+  }
+
+  // A failed read that is not the end of the volume is a download failure.
+  ++download_failures_;
+  PoolMem message(PM_MESSAGE);
+  if (end == ReadEnd::kShortVolume) {
+    Mmsg(message,
+         T_("Volume %s on device %s is short: chunk %d is missing, the "
+            "catalog has %" PRIu64 " bytes.\n"),
+         getVolCatName(), print_name(), chunk,
+         static_cast<uint64_t>(VolCatInfo.VolCatBytes));
+  } else {
+    if (presence == ChunkPresence::kUnknown) {
+      read_error += " (listing failed: " + MessageText(errmsg) + ")";
+    }
+    Mmsg(message, T_("Reading chunk %d of volume %s on device %s failed: %s\n"),
+         chunk, getVolCatName(), print_name(), read_error.c_str());
+  }
+  PmStrcpy(errmsg, message.c_str());
+  dev_errno = EIO;
+  errno = EIO;
+  Jmsg(GetJcrFromThreadSpecificData(), M_ERROR, 0, "%s", message.c_str());
+  InvalidateCurrentChunk();
+  return false;
+}
+
+/* Whether the listing has the layout of a healthy volume: chunks 0..N in a
+ * row, every one but the last of them full. */
+bool ChunkedDevice::LayoutIsHealthy(const std::map<int, size_t>& chunk_sizes)
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+  if (!current_chunk_) { return false; }
+  const size_t full = static_cast<size_t>(current_chunk_->chunk_size);
+  int expected = 0;
+  size_t seen = 0;
+  for (const auto& [number, size] : chunk_sizes) {
+    ++seen;
+    if (number != expected++ || size > full) { return false; }
+    if (seen < chunk_sizes.size() && size != full) { return false; }
+  }
+  return true;
+}
+
+/* Starts an empty chunk after the last full chunk of the volume (chunk_sizes
+ * lists the volume: 0..N-1, all full, offset_ at the end) for a writer with
+ * nothing pending; changes nothing and returns false otherwise. */
+bool ChunkedDevice::StartEmptyChunkAfterLast(
+    const std::map<int, size_t>& chunk_sizes)
+{
+  std::lock_guard<std::recursive_mutex> chunk_lock(chunk_mutex_);
+
+  if (!current_chunk_ || !current_chunk_->writing || !current_volname_
+      || current_chunk_->need_flushing) {
+    return false;
+  }
+  const int chunks = static_cast<int>(chunk_sizes.size());
+  int expected = 0;
+  for (const auto& [number, size] : chunk_sizes) {
+    if (number != expected++ || size != (size_t)current_chunk_->chunk_size) {
+      return false;
+    }
+  }
+  if (chunks == 0
+      || offset_ != (boffset_t)chunks * (boffset_t)current_chunk_->chunk_size) {
+    return false;
+  }
+
+  chunk_io_request next{};
+  next.volname = current_volname_;
+  next.chunk = chunks;
+  if (PendingChunksOfVolume(current_volname_) != 0 || IsInflightChunk(&next)) {
+    return false;
+  }
+
+  current_chunk_->start_offset = offset_;
+  current_chunk_->end_offset = offset_ + (current_chunk_->chunk_size - 1);
+  current_chunk_->buflen = 0;
+  current_chunk_->loaded_begin = 0;
+  current_chunk_->loaded_end = 0;
+  current_chunk_->chunk_setup = true;
+  chunk_dropped_ = false;
+  return true;
+}
+
+/* Waits until no chunk of the volume is queued, uploading or kept, as long as
+ * the uploads make progress (flush_timeout_); false with the reason when the
+ * device refuses writes, the job is canceled or the uploads stall. */
+bool ChunkedDevice::WaitForPendingChunks(
+    const std::function<bool()>& is_canceled,
+    std::string& reason)
+{
+  using clock = FlushWaitTracker::clock;
+  PoolMem message(PM_MESSAGE);
+  const std::string volname = current_volname_ ? current_volname_ : "";
+  FlushWaitTracker tracker{std::chrono::seconds{flush_timeout_}, clock::now(),
+                           GetUploadState().done};
+
+  while (true) {
+    // Read before the check, so that no wake-up is lost.
+    const UploadState uploads = GetUploadState();
+    const bool written = PendingChunksOfVolume(volname.c_str()) == 0;
+    switch (tracker.Check(written, is_canceled(), readonly_, uploads.done,
+                          clock::now())) {
+      case FlushWaitResult::kWritten:
+        return true;
+      case FlushWaitResult::kWaiting:
+        break;
+      case FlushWaitResult::kCanceled:
+        Mmsg(message,
+             T_("Upload of volume %s on device %s not finished: job "
+                "canceled.\n"),
+             volname.c_str(), print_name());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+      case FlushWaitResult::kReadOnly:
+        Mmsg(message, T_("Device %s refuses writes: %s\n"), print_name(),
+             uploads.readonly_reason.c_str());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+      case FlushWaitResult::kTimedOut:
+        Mmsg(message,
+             T_("Upload of volume %s on device %s made no progress for %" PRIu32
+                " seconds; the pending chunks stay queued. Last backend "
+                "error: %s\n"),
+             volname.c_str(), print_name(), flush_timeout_,
+             uploads.last_error.empty() ? "none" : uploads.last_error.c_str());
+        reason = message.c_str();
+        dev_errno = EIO;
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(upload_mutex_);
+    upload_cv_.wait_for(lock, std::chrono::seconds{1}, [this, &uploads] {
+      return upload_state_.events != uploads.events;
+    });
+  }
 }
 
 static int ListIoRequest(void* request, void* data)
@@ -1266,6 +2382,32 @@ static int ListIoRequest(void* request, void* data)
   return 0;
 }
 
+// Queued requests of the upload buffer and those waiting for a retry.
+struct IoTally {
+  int queued{};
+  int retrying{};
+};
+
+static int TallyIoRequest(void* request, void* data)
+{
+  auto* tally = static_cast<IoTally*>(data);
+  ++tally->queued;
+  if (static_cast<chunk_io_request*>(request)->tries > 0) { ++tally->retrying; }
+  return 0;
+}
+
+// Age in ms of the oldest chunk still queued, uploading or kept; -1 if none.
+int64_t ChunkedDevice::OldestPendingMs()
+{
+  std::lock_guard<std::mutex> lock(upload_mutex_);
+  int64_t oldest = -1;
+  for (const auto& entry : pending_since_) {
+    const int64_t age = SteadyMilliseconds() - entry.second.second;
+    if (age > oldest) { oldest = age; }
+  }
+  return oldest;
+}
+
 // Return specific device status information.
 bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
 {
@@ -1273,13 +2415,33 @@ bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
   int inflight_chunks = 0;
   PoolMem inflights(PM_MESSAGE);
 
-  dst->status_length = 0;
-  if (CheckRemoteConnection()) {
+  /* The status does not probe the endpoint, which can block for minutes when
+   * it is unreachable; it reports the last upload outcome and the state. */
+  const UploadState uploads = GetUploadState();
+  if (uploads.outcome_ms == 0) {
     dst->status_length
-        = PmStrcpy(dst->status, T_("Backend connection is working.\n"));
+        = PmStrcpy(dst->status, T_("No upload since the daemon started.\n"));
   } else {
-    dst->status_length
-        = PmStrcpy(dst->status, T_("Backend connection is not working.\n"));
+    const long long seconds
+        = (SteadyMilliseconds() - uploads.outcome_ms) / 1000;
+    std::string error = uploads.outcome_error;
+    while (!error.empty() && (error.back() == '\n' || error.back() == '\r')) {
+      error.pop_back();
+    }
+    PoolMem outcome(PM_MESSAGE);
+    if (uploads.outcome_ok) {
+      outcome.bsprintf(T_("Last upload succeeded %lld s ago.\n"), seconds);
+    } else {
+      outcome.bsprintf(T_("Last upload failed %lld s ago: %s\n"), seconds,
+                       error.c_str());
+    }
+    dst->status_length = PmStrcpy(dst->status, outcome.c_str());
+  }
+  if (readonly_) {
+    PoolMem refuses(PM_MESSAGE);
+    refuses.bsprintf(T_("Device refuses writes: %s\n"),
+                     uploads.readonly_reason.c_str());
+    dst->status_length = PmStrcat(dst->status, refuses.c_str());
   }
   /* See if we are using io-threads or not and the ordered CircularBuffer is
    * created and not empty. */
@@ -1298,17 +2460,111 @@ bool ChunkedDevice::DeviceStatus(DeviceStatusInformation* dst)
     }
   }
 
+  if (io_threads_ == 0) {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    if (!kept_chunks_.empty()) {
+      pending = true;
+      dst->status_length
+          = PmStrcat(dst->status, T_("Kept chunks waiting for upload:\n"));
+      for (const auto& entry : kept_chunks_) {
+        PoolMem status(PM_MESSAGE);
+        status.bsprintf("   /%s/%04d - %" PRIu32 " (try=%d)\n",
+                        entry.volname.c_str(), entry.chunk, entry.buflen,
+                        entry.tries);
+        dst->status_length = PmStrcat(dst->status, status.c_str());
+      }
+    }
+  }
+
   if (!pending) {
     dst->status_length
         = PmStrcat(dst->status, T_("No pending IO flush requests.\n"));
   }
 
+  /* Counters and the pending split come from memory only: queued, uploading
+   * and kept chunks, the chunks waiting for a retry and the oldest age. */
+  IoTally tally;
+  if (io_threads_ > 0 && cb_ && !cb_->empty()) {
+    cb_->peek(storagedaemon::PEEK_LIST, &tally, TallyIoRequest);
+  }
+  size_t kept = 0;
+  int waiting_retry = tally.retrying;
+  {
+    std::lock_guard<std::mutex> lock(kept_mutex_);
+    for (const auto& entry : kept_chunks_) {
+      ++kept;
+      if (entry.tries > 0) { ++waiting_retry; }
+    }
+  }
+  const int64_t oldest_ms = OldestPendingMs();
+  PoolMem summary(PM_MESSAGE);
+  summary.bsprintf(
+      T_("Chunks: received %llu, uploaded %llu, pending %d (queued %d, "
+         "uploading %d, kept %zu), waiting for retry %d"),
+      static_cast<unsigned long long>(uploads.received_chunks),
+      static_cast<unsigned long long>(uploads.uploaded_chunks),
+      tally.queued + inflight_chunks + static_cast<int>(kept), tally.queued,
+      inflight_chunks, kept, waiting_retry);
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+  if (oldest_ms >= 0) {
+    summary.bsprintf(T_(", oldest pending %lld s"),
+                     static_cast<long long>(oldest_ms / 1000));
+    dst->status_length = PmStrcat(dst->status, summary.c_str());
+  }
+  dst->status_length = PmStrcat(dst->status, ".\n");
+  summary.bsprintf(
+      T_("Upload: %llu chunks, %llu bytes; failed tries %llu, retried tries "
+         "%llu.\n"),
+      static_cast<unsigned long long>(uploads.uploaded_chunks),
+      static_cast<unsigned long long>(uploads.uploaded_bytes),
+      static_cast<unsigned long long>(uploads.failed_tries),
+      static_cast<unsigned long long>(uploads.retried_tries));
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+  summary.bsprintf(
+      T_("Download: %llu objects, %llu bytes, failed %llu; transport "
+         "retries %llu.\n"),
+      static_cast<unsigned long long>(download_objects_.load()),
+      static_cast<unsigned long long>(download_bytes_.load()),
+      static_cast<unsigned long long>(download_failures_.load()),
+      static_cast<unsigned long long>(TransportRetries()));
+  dst->status_length = PmStrcat(dst->status, summary.c_str());
+
   return (dst->status_length > 0);
+}
+
+static int CollectIoRequest(void* item, void* data)
+{
+  auto* request = static_cast<chunk_io_request*>(item);
+  static_cast<std::vector<std::pair<std::string, uint16_t>>*>(data)
+      ->emplace_back(request->volname, request->chunk);
+  return 0;
+}
+
+// Volume and number of every chunk still queued or kept for upload.
+std::vector<std::pair<std::string, uint16_t>> ChunkedDevice::ChunksNotUploaded()
+{
+  std::vector<std::pair<std::string, uint16_t>> chunks;
+  if (cb_ && !cb_->empty()) {
+    cb_->peek(storagedaemon::PEEK_LIST, &chunks, CollectIoRequest);
+  }
+  std::lock_guard<std::mutex> lock(kept_mutex_);
+  for (const auto& entry : kept_chunks_) {
+    chunks.emplace_back(entry.volname, entry.chunk);
+  }
+  return chunks;
 }
 
 ChunkedDevice::~ChunkedDevice()
 {
+  StopReadAhead();
   if (thread_ids_) { StopThreads(); }
+
+  // Chunks not uploaded by now are lost with the daemon.
+  for (const auto& [volname, chunk] : ChunksNotUploaded()) {
+    Emsg3(M_ERROR, 0,
+          T_("Chunk %d of volume %s on device %s was never uploaded.\n"), chunk,
+          volname.c_str(), print_name());
+  }
 
   if (cb_) {
     // If there is any work on the ordered circular buffer remove it.
@@ -1326,6 +2582,9 @@ ChunkedDevice::~ChunkedDevice()
     delete cb_;
     cb_ = NULL;
   }
+
+  for (auto& entry : kept_chunks_) { free(entry.buffer); }
+  kept_chunks_.clear();
 
   if (current_chunk_) {
     if (current_chunk_->buffer) { FreeChunkbuffer(current_chunk_->buffer); }

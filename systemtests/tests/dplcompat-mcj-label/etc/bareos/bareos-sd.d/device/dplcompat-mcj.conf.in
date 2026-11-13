@@ -1,0 +1,38 @@
+Device {
+  Name = dplcompat-mcj
+  Media Type = dplcompat-mcj
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=0"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 2
+}
+
+Device {
+  Name = dplcompat-mcj-io
+  Media Type = dplcompat-mcj
+  Archive Device = S3 Object Storage
+  Device Options = "iothreads=2"
+                   ",ioslots=1"
+                   ",flush_timeout=120"
+                   ",program=@confdir@/fault-wrapper.sh"
+                   ",storage_path=@archivedir@"
+                   ",fault_dir=@tmpdir@/faults"
+  Device Type = dplcompat
+  LabelMedia = yes
+  Random Access = yes
+  AutomaticMount = yes
+  RemovableMedia = no
+  AlwaysOpen = no
+  Maximum File Size = 20000000
+  Maximum Concurrent Jobs = 2
+}

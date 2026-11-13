@@ -129,8 +129,14 @@ class StorageResource
 
   bool enable_ktls{false};
 
+  /**< Bytes of client messages one backup job may hold, 0 = no bound */
+  uint64_t max_append_queue_size{0};
+
   StorageResource() = default;
   virtual ~StorageResource() = default;
+
+  // Refuses a negative Maximum Append Queue Size, which parses as a huge size.
+  bool Validate() override;
 };
 
 ConfigurationParser* InitSdConfig(const char* configfile, int exit_code);

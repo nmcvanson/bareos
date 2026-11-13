@@ -1,0 +1,8 @@
+Storage {
+  Name = dplcompat-sync
+  Address = localhost
+  Password = "@sd_password@"
+  Device = dplcompat-sync
+  Media Type = dplcompat-sync
+  Port = "@sd_port@"
+}

@@ -117,6 +117,7 @@ static const ResourceItem store_items[] = {
   { "SecureEraseCommand", CFG_TYPE_STR, ITEM(res_store, secure_erase_cmdline), {config::IntroducedIn{15, 2, 1}, config::Description{"Specify command that will be called when bareos unlinks files."}}},
   { "LogTimestampFormat", CFG_TYPE_STR, ITEM(res_store, log_timestamp_format), {config::IntroducedIn{15, 2, 3}, config::DefaultValue{"%d-%b %H:%M"}}},
   { "EnableKtls", CFG_TYPE_BOOL, ITEM(res_store, enable_ktls), {config::DefaultValue{"false"}, config::Description{"If set to \"yes\", Bareos will allow the SSL implementation to use Kernel TLS."}, config::IntroducedIn{23, 0, 0}}},
+  { "MaximumAppendQueueSize", CFG_TYPE_SIZE64, ITEM(res_store, max_append_queue_size), {config::IntroducedIn{25, 1, 1}, config::DefaultValue{"0"}, config::Description{"Maximum bytes of client data a backup job holds in the storage daemon while it waits to be written, 0 means no bound."}}},
     TLS_COMMON_CONFIG(res_store),
     TLS_CERT_CONFIG(res_store),
   {}
@@ -733,6 +734,18 @@ static void DumpResource(int type,
         = DumpResource_(type, p, sendit, sock, hide_sensitive_data, verbose);
     p = p->next_;
   }
+}
+
+bool StorageResource::Validate()
+{
+  if (max_append_queue_size > INT64_MAX) {
+    Jmsg1(nullptr, M_ERROR, 0,
+          T_("Maximum Append Queue Size of Storage \"%s\" must not be "
+             "negative.\n"),
+          resource_name_);
+    return false;
+  }
+  return true;
 }
 
 static bool SaveResource(int type, const ResourceItem* items, int pass)

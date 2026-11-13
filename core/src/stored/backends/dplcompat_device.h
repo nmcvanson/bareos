@@ -25,27 +25,52 @@
 #include "chunked_device.h"
 #include <gsl/span>
 #include <map>
+#include <memory>
+#include <optional>
 #include "crud_storage.h"
+#include "object_store.h"
 #include <tl/expected.hpp>
 
 namespace storagedaemon {
 
 class DropletCompatibleDevice : public ChunkedDevice {
+  friend class DplcompatLeaseTest;  // unit test of the lease conflict path
+
  private:
   /* maximum number of chunks in a volume (0000 to 9999) */
   static constexpr int max_chunks_ = 10000;
-  CrudStorage m_storage;
+  // The transport chosen by option "transport"; set up by setup_impl().
+  std::unique_ptr<ObjectStore> m_storage{std::make_unique<CrudStorage>()};
   bool m_setup_succeeded{false};
   tl::expected<void, std::string> setup_impl();
+  void InstallStore(std::unique_ptr<ObjectStore> store);
+  static bool CallingJobCanceled();
 
   // Interface from ChunkedDevice
   bool CheckRemoteConnection() override;
   bool FlushRemoteChunk(chunk_io_request* request) override;
   bool ReadRemoteChunk(chunk_io_request* request) override;
-  ssize_t RemoteVolumeSize() override;
+  bool SupportsPartialRead() const override
+  { return m_storage->supports_range_download(); }
+  uint64_t TransportRetries() const override
+  { return m_storage->transport_retries(); }
+  bool SupportsReadAhead() const override
+  { return m_storage->supports_range_download(); }
+  bool ReadAheadFetch(const char* volname,
+                      uint16_t chunk,
+                      char* buffer,
+                      uint32_t size,
+                      uint32_t* received,
+                      std::string* error) override;
+  std::optional<ssize_t> RemoteVolumeSize() override;
+  std::optional<std::map<int, size_t>> ListChunkSizes();
+  ChunkPresence RemoteChunkPresence(int chunk) override;
   bool TruncateRemoteVolume(DeviceControlRecord* dcr) override;
 
  public:
+  // The read-ahead workers use the transport: they end before it is destroyed.
+  ~DropletCompatibleDevice() override { StopReadAhead(); }
+
   // Interface from Device
   bool setup() override;
   SeekMode GetSeekMode() const override { return SeekMode::BYTES; }

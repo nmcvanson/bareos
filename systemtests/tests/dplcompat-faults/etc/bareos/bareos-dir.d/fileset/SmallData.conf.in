@@ -1,0 +1,9 @@
+FileSet {
+  Name = "SmallData"
+  Include {
+    Options {
+      Signature = XXH128
+    }
+    File = "@tmpdir@/smalldata"
+  }
+}

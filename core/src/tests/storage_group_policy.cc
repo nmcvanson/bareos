@@ -20,8 +20,8 @@
 */
 
 /* The storage group policy: name lookup, the Pool-then-Job-then-default
- * resolver, the Enabled filter, and ListedOrder's order. LeastUsed needs a
- * running Director and is covered by the system tests.
+ * resolver, the Enabled filter, and dispatch slot selection. System tests
+ * also check the device, catalog and restored data under real contention.
  *
  * Every test reparses the configuration, so a test may mutate a resource
  * (to disable a storage, or to move one to another daemon) without
@@ -30,11 +30,15 @@
 #include "testing_dir_common.h"
 
 #include "dird/dird_conf.h"
+#include "dird/dird.h"
 #include "dird/director_jcr_impl.h"
 #include "dird/jcr_util.h"
+#include "dird/jobq.h"
 #include "dird/storage.h"
 #include "dird/storage_group_policy.h"
 #include "include/jcr.h"
+
+#include <vector>
 
 using namespace directordaemon;
 
@@ -47,14 +51,10 @@ void Test_FreeJcr(JobControlRecord* jcr) { FreeJcr(jcr); }
 using JcrPtr = std::unique_ptr<JobControlRecord, decltype(&Test_FreeJcr)>;
 
 JobResource* GetJob(const char* name)
-{
-  return dynamic_cast<JobResource*>(my_config->GetResWithName(R_JOB, name));
-}
+{ return dynamic_cast<JobResource*>(my_config->GetResWithName(R_JOB, name)); }
 
 PoolResource* GetPool(const char* name)
-{
-  return dynamic_cast<PoolResource*>(my_config->GetResWithName(R_POOL, name));
-}
+{ return dynamic_cast<PoolResource*>(my_config->GetResWithName(R_POOL, name)); }
 
 StorageResource* GetStorage(const char* name)
 {
@@ -346,4 +346,209 @@ TEST(StorageGroupPolicy, ApplyRejectsMissingInputs)
   ASSERT_NE(jcr.get(), nullptr);
   ASSERT_EQ(jcr->dir_impl->res.write_storage_list, nullptr);
   EXPECT_EQ(ApplyStorageGroupPolicy(jcr.get()), 0);
+}
+
+class StorageGroupDispatch : public ::testing::Test {
+ protected:
+  void SetUp() override
+  {
+    InitDirGlobals();
+    config_ = DirectorPrepareResources(kConfig);
+    ASSERT_TRUE(config_);
+    first_ = GetStorage("storage01");
+    second_ = GetStorage("storage02");
+    ASSERT_NE(first_, nullptr);
+    ASSERT_NE(second_, nullptr);
+    for (auto* store : {first_, second_}) {
+      store->runtime_storage_status = std::make_shared<RuntimeStorageStatus>();
+      store->MaxConcurrentJobs = 2;
+    }
+  }
+
+  void TearDown() override
+  {
+    for (auto* jcr : charged_) { DecWriteStore(jcr); }
+    jobs_.clear();
+    config_.reset();
+  }
+
+  JobControlRecord* NewJob(const char* name = "job-with-policy")
+  {
+    auto jcr = MakeJcrWithGroup(config_, name);
+    if (!jcr) { return nullptr; }
+    jcr->setJobType(JT_BACKUP);
+    jcr->setJobProtocol(PT_NATIVE);
+    jcr->setJobLevel(L_FULL);
+    jcr->dir_impl->uses_storage_group = true;
+    auto* result = jcr.get();
+    jobs_.push_back(std::move(jcr));
+    return result;
+  }
+
+  bool Acquire(JobControlRecord* jcr)
+  {
+    const bool acquired = TryAcquireWriteStorageSlot(jcr);
+    if (acquired) { charged_.push_back(jcr); }
+    return acquired;
+  }
+
+  PConfigParser config_;
+  StorageResource* first_{};
+  StorageResource* second_{};
+  std::vector<JcrPtr> jobs_;
+  std::vector<JobControlRecord*> charged_;
+};
+
+TEST_F(StorageGroupDispatch, DispatchRechecksTheLeastUsedMember)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  // Pool's LeastUsed overrides the Job's ListedOrder. The setup choice is A.
+  ASSERT_EQ(jcr->dir_impl->res.write_storage, first_);
+  first_->runtime_storage_status->NumConcurrentJobs = 1;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, second_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->first(), second_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 1);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 1);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->get(1), first_);
+}
+
+TEST_F(StorageGroupDispatch, DispatchWaitsWhenEveryMemberIsFull)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->runtime_storage_status->NumConcurrentJobs = 2;
+  second_->runtime_storage_status->NumConcurrentJobs = 2;
+  EXPECT_FALSE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->first(), first_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 2);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 2);
+}
+
+TEST_F(StorageGroupDispatch, DispatchRechecksAfterASlotIsReleased)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->runtime_storage_status->NumConcurrentJobs = 2;
+  second_->runtime_storage_status->NumConcurrentJobs = 2;
+  ASSERT_FALSE(Acquire(jcr));
+  second_->runtime_storage_status->NumConcurrentJobs = 1;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, second_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 2);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 2);
+}
+
+TEST_F(StorageGroupDispatch, DispatchStableTiesUseConfiguredOrder)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->runtime_storage_status->NumConcurrentJobs = 1;
+  ASSERT_EQ(ApplyStorageGroupPolicy(jcr), 2);
+  ASSERT_EQ(jcr->dir_impl->res.write_storage, second_);
+  first_->runtime_storage_status->NumConcurrentJobs = 0;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+}
+
+TEST_F(StorageGroupDispatch, DispatchSkipsAFullMemberEvenWhenItHasFewerJobs)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->MaxConcurrentJobs = 1;
+  first_->runtime_storage_status->NumConcurrentJobs = 1;
+  second_->MaxConcurrentJobs = 3;
+  second_->runtime_storage_status->NumConcurrentJobs = 2;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, second_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->first(), second_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->get(1), first_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 1);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 3);
+}
+
+TEST_F(StorageGroupDispatch, DispatchDoesNotMoveListedOrderJobs)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  jcr->dir_impl->res.pool->storage_group_policy = nullptr;
+  first_->runtime_storage_status->NumConcurrentJobs = 2;
+  EXPECT_FALSE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 0);
+}
+
+TEST_F(StorageGroupDispatch, DispatchDoesNotMoveSingleStorageJobs)
+{
+  auto* jcr = NewJob("job-without-policy");
+  ASSERT_NE(jcr, nullptr);
+  first_->runtime_storage_status->NumConcurrentJobs = 2;
+  EXPECT_FALSE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 0);
+}
+
+TEST_F(StorageGroupDispatch, DispatchDoesNotMoveVirtualFullOrNonNativeJobs)
+{
+  for (int job_type : {JT_RESTORE, JT_VERIFY, JT_COPY, JT_MIGRATE}) {
+    auto* jcr = NewJob();
+    ASSERT_NE(jcr, nullptr);
+    jcr->setJobType(job_type);
+    first_->runtime_storage_status->NumConcurrentJobs = 2;
+    EXPECT_FALSE(Acquire(jcr));
+    EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  }
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  jcr->setJobLevel(L_VIRTUAL_FULL);
+  EXPECT_FALSE(Acquire(jcr));
+  jcr->setJobLevel(L_FULL);
+  jcr->setJobProtocol(PT_NDMP_NATIVE);
+  EXPECT_FALSE(Acquire(jcr));
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 0);
+}
+
+TEST_F(StorageGroupDispatch, DispatchOmitsDisabledMemberFromFallback)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->enabled = false;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, second_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 1);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 0);
+}
+
+TEST_F(StorageGroupDispatch, DispatchKeepsAllDisabledFallback)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  first_->enabled = false;
+  second_->enabled = false;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  EXPECT_EQ(jcr->dir_impl->res.write_storage_list->size(), 2);
+}
+
+TEST_F(StorageGroupDispatch, DispatchNoReselectWhenConcurrencyIgnored)
+{
+  auto* jcr = NewJob();
+  ASSERT_NE(jcr, nullptr);
+  jcr->dir_impl->IgnoreStorageConcurrency = true;
+  first_->runtime_storage_status->NumConcurrentJobs = 2;
+  ASSERT_TRUE(Acquire(jcr));
+  EXPECT_EQ(jcr->dir_impl->res.write_storage, first_);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(first_), 2);
+  EXPECT_EQ(GetStorageNumConcurrentJobs(second_), 0);
+}
+
+TEST_F(StorageGroupDispatch, DispatchMissingInputsFail)
+{
+  EXPECT_FALSE(TryAcquireWriteStorageSlot(nullptr));
+  JcrPtr jcr(NewDirectorJcr(config_->GetCurrentConfiguration()), &Test_FreeJcr);
+  ASSERT_NE(jcr, nullptr);
+  EXPECT_FALSE(TryAcquireWriteStorageSlot(jcr.get()));
 }

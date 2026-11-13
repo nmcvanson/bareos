@@ -1,0 +1,82 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# At the end of the job the store lists no chunk of the volume (an empty
+# listing that exits 0) although the catalog has bytes on it: the job fails
+# by flush_timeout and never ends OK.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+start_test
+setup_data
+faults_clear
+
+log="$tmp/list-empty.out"
+rm -f "$log"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=ListEmpty-0001 storage=dplcompat pool=ListEmpty
+quit
+END_OF_DATA
+run_bconsole
+
+# The label is the first upload; after the job's upload the listing is empty.
+fault_list_empty_after 2
+start=${SECONDS}
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-list-empty yes
+wait
+messages
+quit
+END_OF_DATA
+run_bconsole
+elapsed=$((SECONDS - start))
+jobid=$(queued_jobid "$log")
+faults_clear
+
+expect_termination "${jobid}" "Backup Error"
+expect_grep "Failed to flush device" "$log" \
+  "the job did not fail on the flush"
+expect_grep "made no progress for 120 seconds" "$log" \
+  "the job log does not give the reason of the failed flush"
+if ((elapsed > 180)); then
+  set_error "job ${jobid} took ${elapsed} s, more than flush_timeout + 60 s"
+fi
+
+end_test

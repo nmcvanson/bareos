@@ -58,7 +58,10 @@ wait_terminal()
       ".sql query=\"SELECT 'STATUS=' || jobstatus FROM job WHERE jobid=${jobid}\""
     status=$(grep -o "STATUS=[A-Za-z]" "$tmp/status.out" | tail -1 | cut -d= -f2 || :)
     case "$status" in
-      T | E | e | f | A | W) echo "$status"; return ;;
+      T | E | e | f | A | W)
+        echo "$status"
+        return
+        ;;
     esac
     sleep 1
   done
@@ -72,20 +75,20 @@ queued_jobid()
   grep "Job queued. JobId=" "$1" | tail -1 | sed -n -e 's/^.*JobId=//p'
 }
 
-# restore_and_verify <backup jobid> <device that wrote it>
+# restore_and_verify <backup jobid> <device that wrote it> [backup client]
 #
 # Restore one backup job and check that it terminated normally, read from
 # the device that wrote the data, and restored files identical to the source.
 restore_and_verify()
 {
-  local jobid="$1" wrotedev="$2"
+  local jobid="$1" wrotedev="$2" backupclient="${3:-bareos-fd}"
   local restlog="$tmp/restore-${jobid}.out"
   local restdir="$tmp/bareos-restores-${jobid}"
   local restid rstatus readdev
 
   rm -rf "$restdir"
   bcon "@out $restlog" \
-    "restore client=bareos-fd jobid=${jobid} where=${restdir} all done yes"
+    "restore client=${backupclient} restoreclient=bareos-fd jobid=${jobid} where=${restdir} all done yes"
   restid=$(queued_jobid "$restlog")
   rstatus=$(wait_terminal "$restid")
   bcon "@out $restlog" "messages"
@@ -174,11 +177,15 @@ check_case()
     [ -f "${archivedir}/a/${vname}" ] && dir="storage/a"
     [ -f "${archivedir}/b/${vname}" ] && dir="storage/b"
     echo "   volume ${vname}: catalog MediaType=${mtype} Storage=${store}, file in ${dir}" >>"$report"
-    if [ "$device" = "FileStorageA" ] && { [ "$mtype" != "FileA" ] || [ "$dir" != "storage/a" ]; }; then
+    if [ "$device" = "FileStorageA" ] && {
+      [ "$mtype" != "FileA" ] || [ "$dir" != "storage/a" ]
+    }; then
       echo "   MISMATCH: written by FileStorageA but catalog/location disagree" >>"$report"
       estat=1
     fi
-    if [ "$device" = "FileStorageB" ] && { [ "$mtype" != "FileB" ] || [ "$dir" != "storage/b" ]; }; then
+    if [ "$device" = "FileStorageB" ] && {
+      [ "$mtype" != "FileB" ] || [ "$dir" != "storage/b" ]
+    }; then
       echo "   MISMATCH: written by FileStorageB but catalog/location disagree" >>"$report"
       estat=1
     fi
@@ -190,7 +197,10 @@ check_case()
     fi
   done
 
-  [ "$status" = "T" ] || { echo >>"$report"; return; }
+  [ "$status" = "T" ] || {
+    echo >>"$report"
+    return
+  }
 
   restore_and_verify "$jobid" "$device"
   echo >>"$report"
@@ -531,6 +541,272 @@ expect_grep 'Storage "NoSuchStorage" not found' \
 expect_not_grep "backup-shared" \
   "$listbad" \
   "An unknown storage= listed jobs instead of refusing."
+
+# ---------------------------------------------------------------------
+# Isolated MCJ1 aliases test dispatch without changing the original device-
+# contention cases. Live status is necessary: catalog status can lag while
+# a job is waiting for scheduler resources.
+dispatch_snapshot()
+{
+  local prefix="$1" log="$2"
+  bcon "@out ${prefix}.current" ".status dir current" \
+    "@out ${prefix}.sd" "status storage=DispatchA" "@out $log" "messages"
+  # Only count jobs which have actually transferred data, not merely reserved
+  # a device. The SD inventory contains both devices on this daemon.
+  awk '
+    /^JobId=/ { split($1, field, "="); id=field[2]; device=""; writing=0 }
+    /Writing: Volume=/ { writing=1 }
+    /device=/ && writing {
+      if (/FileStorageA/) device="FileStorageA"
+      if (/FileStorageB/) device="FileStorageB"
+      writing=0
+    }
+    /Files=.*Bytes=/ && device != "" {
+      bytes=$0; sub(/.* Bytes=/, "", bytes); sub(/ .*/, "", bytes)
+      gsub(/,/, "", bytes)
+      if (bytes+0 > 0) print id "|" device "|" bytes
+    }
+  ' "${prefix}.sd" >"${prefix}.writes"
+}
+
+dispatch_expect_idle()
+{
+  local label="$1" i prefix
+  for ((i = 0; i < 20; i++)); do
+    prefix="$tmp/dispatch-${label}-idle-${i}"
+    bcon "@out ${prefix}.out" ".status dir current"
+    if ! grep -Eq 'JobId=[1-9][0-9]* ' "${prefix}.out"; then return; fi
+    sleep 1
+  done
+  set_error "Dispatch ${label}: jobs remained live after all terminal waits."
+}
+
+dispatch_check_backup()
+{
+  local jobid="$1" log="$2" backupclient="${3:-bareos-fd}"
+  local status device member mediatype directory otherdevice othermember
+  local rows row volumes volume name type storage files bytes errors sddevice
+  local joblog="$tmp/dispatch-joblog-${jobid}.out"
+  status=$(wait_terminal "$jobid" 120)
+  # Console messages are shared and drained by other checks/restores. Read
+  # persistent per-job evidence instead of depending on the consuming console.
+  bcon "@out $joblog w" "list joblog jobid=${jobid}" \
+    "@out $tmp/dispatch-backup-${jobid}.out w" \
+    ".sql query=\"SELECT 'BACKUP=' || jobfiles || '|' || jobbytes || '|' || joberrors FROM job WHERE jobid=${jobid}\"" \
+    ".sql query=\"SELECT DISTINCT 'VOL=' || m.volumename || '|' || m.mediatype || '|' || s.name FROM jobmedia jm JOIN media m ON m.mediaid=jm.mediaid JOIN storage s ON s.storageid=m.storageid WHERE jm.jobid=${jobid}\"" \
+    "@out $log" "messages"
+  echo "   Dispatch backup ${jobid}: ${status}" >>"$report"
+  rows="$tmp/dispatch-backup-${jobid}.out"
+  row=$(grep -oE 'BACKUP=[0-9]+\|[0-9]+\|[0-9]+' "$rows" | tail -1 || :)
+  IFS='|' read -r files bytes errors <<<"${row#BACKUP=}"
+  if [ "$status" != T ] || [ "${files:-0}" -le 0 ] \
+    || [ "${bytes:-0}" -lt 3000000 ] || [ "${errors:-1}" -ne 0 ]; then
+    set_error "Dispatch backup ${jobid}: missing successful nonempty backup."
+    return
+  fi
+  device=$(sed -n 's/.*Using Device "\([^"]*\)" to write\..*/\1/p' "$joblog" \
+    | sort -u | paste -sd, -)
+  sddevice=$(sed -n 's/.*Releasing device "\([^"]*\)".*/\1/p' "$joblog" \
+    | sort -u | paste -sd, -)
+  if [ -z "$device" ] || [ "$sddevice" != "$device" ]; then
+    set_error "Dispatch backup ${jobid}: Director reservation and actual SD device disagree."
+    return
+  fi
+  case "$device" in
+    FileStorageA)
+      member=DispatchA
+      mediatype=FileA
+      directory=a
+      otherdevice=FileStorageB
+      othermember=DispatchB
+      ;;
+    FileStorageB)
+      member=DispatchB
+      mediatype=FileB
+      directory=b
+      otherdevice=FileStorageA
+      othermember=DispatchA
+      ;;
+    *)
+      set_error "Dispatch backup ${jobid}: no actual permitted device."
+      return
+      ;;
+  esac
+  expect_grep "Storage group: dispatching to .${member}." "$joblog" \
+    "Dispatch backup does not confirm the final scheduler member."
+  expect_not_grep "Storage group: dispatching to .${othermember}.\|JustInTime Device" \
+    "$joblog" "Dispatch backup reports a different member or deferred reservation."
+  expect_not_grep "NumConcurrentJobs Dec Wstore\|NumConcurrentJobs Dec Rstore\|NumConcurrentReadJobs Dec Rstore" \
+    "$joblog" "Dispatch backup storage counters became negative."
+  volumes=$(grep -oE 'VOL=[A-Za-z0-9_.-]+\|[^ |]+\|[^ |]+' "$rows" || :)
+  if [ -z "$volumes" ]; then
+    set_error "Dispatch backup ${jobid}: no JobMedia/catalog volume to verify."
+    return
+  fi
+  for volume in $volumes; do
+    IFS='|' read -r name type storage <<<"${volume#VOL=}"
+    echo "   ${device}: ${name}, catalog ${type}/${storage}, storage/${directory}" >>"$report"
+    if [ "$type" != "$mediatype" ] || [ "$storage" != "$member" ] \
+      || [ ! -f "${archivedir}/${directory}/${name}" ]; then
+      set_error "Dispatch backup ${jobid}: physical device/catalog/location mismatch."
+    fi
+  done
+  if [ ! -f "${working_dir}/dispatch-${jobid}.bsr" ]; then
+    set_error "Dispatch backup ${jobid}: no per-job bootstrap."
+  else
+    expect_grep "^Storage=\"${member}\"$" "${working_dir}/dispatch-${jobid}.bsr" \
+      "Dispatch bootstrap does not name the final member."
+    expect_grep "^Device=\"${device}\"$" "${working_dir}/dispatch-${jobid}.bsr" \
+      "Dispatch bootstrap does not name the actual reserved device."
+    expect_not_grep "${othermember}\|${otherdevice}\|JustInTime Device" \
+      "${working_dir}/dispatch-${jobid}.bsr" "Dispatch bootstrap names another device/member."
+  fi
+  restore_and_verify "$jobid" "$device" "$backupclient"
+}
+
+dispatch_burst()
+{
+  local label="$1" log="$tmp/dispatch-${1}.out" when id i prefix devices waiting
+  local overlap=no
+  local ids=()
+  dispatch_expect_idle "$label"
+  if on_freebsd_host; then
+    when=$(date -r "$(($(date +%s) + 15))" '+%F %H:%M:%S')
+  else
+    when=$(date '+%F %H:%M:%S' --date='15 seconds')
+  fi
+  bcon "@out /dev/null" "messages" "@out $log" \
+    "run job=backup-dispatch level=Full when=\"${when}\" yes" \
+    "run job=backup-dispatch level=Full when=\"${when}\" yes" \
+    "run job=backup-dispatch level=Full when=\"${when}\" yes" "messages" \
+    "@out $tmp/dispatch-${label}-setup.out" ".status dir current"
+  while read -r id; do ids+=("$id"); done \
+    < <(sed -n 's/.*Job queued. JobId=\([0-9]*\).*/\1/p' "$log")
+  if [ "${#ids[@]}" -ne 3 ]; then
+    set_error "Dispatch ${label}: did not queue three jobs."
+    return
+  fi
+  echo "== Dispatch ${label}: three stale setup choices, two storage slots" >>"$report"
+  for id in "${ids[@]}"; do
+    bcon "@out $tmp/dispatch-setup-${id}.out w" "list joblog jobid=${id}"
+    expect_grep "Storage group:.*using .DispatchA." "$tmp/dispatch-setup-${id}.out" \
+      "Dispatch precondition: every idle setup must choose DispatchA."
+    expect_grep "JobId=${id} JobStatus=t " "$tmp/dispatch-${label}-setup.out" \
+      "Dispatch precondition: setup must finish before scheduled queue admission."
+  done
+  for ((i = 0; i < 40; i++)); do
+    prefix="$tmp/dispatch-${label}-poll-${i}"
+    dispatch_snapshot "$prefix" "$log"
+    devices=$(grep -E "^(${ids[0]}|${ids[1]}|${ids[2]})\|" "${prefix}.writes" \
+      | cut -d'|' -f2 | sort -u | paste -sd, - || :)
+    waiting=$(grep -Ec "JobId=(${ids[0]}|${ids[1]}|${ids[2]}) JobStatus=s " \
+      "${prefix}.current" || :)
+    if [ "$devices" = FileStorageA,FileStorageB ] && [ "$waiting" -eq 1 ]; then
+      overlap=yes
+      echo "   concurrent positive-byte writers A/B; one storage waiter (${prefix})" >>"$report"
+      break
+    fi
+    sleep 1
+  done
+  if [ "$overlap" != yes ]; then
+    set_error "Dispatch ${label}: did not use both slots while the excess job waited."
+  fi
+  for id in "${ids[@]}"; do dispatch_check_backup "$id" "$log"; done
+  dispatch_expect_idle "$label"
+  expect_not_grep "NumConcurrentJobs Dec Wstore\|NumConcurrentReadJobs Dec Rstore" \
+    "$log" "Dispatch storage counters became negative."
+}
+
+dispatch_rollback()
+{
+  local kind="$1" waitstatus="$2" backupclient="${3:-bareos-fd}"
+  local log="$tmp/dispatch-${kind}-rollback.out" when id i prefix active waiter probe
+  local observed=no overlap=no
+  local ids=()
+  dispatch_expect_idle "${kind}-rollback"
+  if on_freebsd_host; then
+    when=$(date -r "$(($(date +%s) + 15))" '+%F %H:%M:%S')
+  else
+    when=$(date '+%F %H:%M:%S' --date='15 seconds')
+  fi
+  bcon "@out /dev/null" "messages" "@out $log" \
+    "run job=backup-dispatch-${kind}-limit level=Full when=\"${when}\" yes" \
+    "run job=backup-dispatch-${kind}-limit level=Full when=\"${when}\" yes" "messages"
+  while read -r id; do ids+=("$id"); done \
+    < <(sed -n 's/.*Job queued. JobId=\([0-9]*\).*/\1/p' "$log")
+  if [ "${#ids[@]}" -ne 2 ]; then
+    set_error "Dispatch ${kind}: did not queue two capped jobs."
+    return
+  fi
+  echo "== Dispatch ${kind} rollback: spare storage slot must remain usable" >>"$report"
+  for id in "${ids[@]}"; do
+    bcon "@out $tmp/dispatch-setup-${id}.out w" "list joblog jobid=${id}"
+    expect_grep "Storage group:.*using .DispatchA." "$tmp/dispatch-setup-${id}.out" \
+      "Dispatch rollback precondition: both setups must choose DispatchA."
+  done
+  for ((i = 0; i < 35; i++)); do
+    prefix="$tmp/dispatch-${kind}-wait-${i}"
+    dispatch_snapshot "$prefix" "$log"
+    for id in "${ids[@]}"; do
+      if grep -q "JobId=${id} JobStatus=${waitstatus} " "${prefix}.current"; then
+        waiter="$id"
+        active="${ids[0]}"
+        if [ "$active" = "$waiter" ]; then active="${ids[1]}"; fi
+        if grep -q "^${active}|FileStorageA|" "${prefix}.writes"; then
+          observed=yes
+          break
+        fi
+      fi
+    done
+    if [ "$observed" = yes ]; then break; fi
+    sleep 1
+  done
+  if [ "$observed" != yes ]; then
+    set_error "Dispatch ${kind}: capped job did not reach its resource wait after storage selection."
+    for id in "${ids[@]}"; do dispatch_check_backup "$id" "$log" "$backupclient"; done
+    return
+  fi
+  bcon "@out $tmp/dispatch-${kind}-probe.out" "run job=backup-dispatch level=Full yes"
+  probe=$(queued_jobid "$tmp/dispatch-${kind}-probe.out")
+  # Once the probe takes B, the capped job can wait for storage on its next
+  # retry. The earlier c/j snapshot already proves the rollback branch ran.
+  for ((i = 0; i < 15; i++)); do
+    prefix="$tmp/dispatch-${kind}-probe-${i}"
+    dispatch_snapshot "$prefix" "$log"
+    if grep -q "^${active}|FileStorageA|" "${prefix}.writes" \
+      && grep -q "^${probe}|FileStorageB|" "${prefix}.writes" \
+      && grep -q "JobId=${waiter} JobStatus=[${waitstatus}s] " "${prefix}.current"; then
+      overlap=yes
+      echo "   job ${waiter} reached ${waitstatus}; independent ${probe} writes B alongside ${active}" >>"$report"
+      break
+    fi
+    sleep 1
+  done
+  if [ "$overlap" != yes ]; then
+    set_error "Dispatch ${kind}: rollback stranded the spare slot or exceeded a resource cap."
+  fi
+  bcon "@out $log" "cancel jobid=${waiter} yes"
+  if [ "$(wait_terminal "$waiter")" != A ]; then
+    set_error "Dispatch ${kind}: waiting job did not cancel."
+  fi
+  bcon "@out $tmp/dispatch-${kind}-cancelled.out w" \
+    ".sql query=\"SELECT 'MEDIA=' || COUNT(*) FROM jobmedia WHERE jobid=${waiter}\"" \
+    "list joblog jobid=${waiter}"
+  expect_grep 'MEDIA=0' "$tmp/dispatch-${kind}-cancelled.out" \
+    "Dispatch canceled resource waiter unexpectedly wrote a volume."
+  expect_not_grep 'Storage group: dispatching to' "$tmp/dispatch-${kind}-cancelled.out" \
+    "Dispatch canceled resource waiter unexpectedly reached a worker."
+  dispatch_check_backup "$active" "$log" "$backupclient"
+  dispatch_check_backup "$probe" "$log"
+  dispatch_expect_idle "${kind}-rollback"
+  # Refill both slots and queue an excess job again: leaked charges must not
+  # be hidden by merely letting the surviving jobs finish.
+  dispatch_burst "after-${kind}-rollback"
+}
+
+dispatch_burst burst
+dispatch_rollback client c DispatchClient
+dispatch_rollback job j
 
 echo "---------------- storage group / media type report ----------------"
 cat "$report"

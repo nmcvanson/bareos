@@ -1,0 +1,118 @@
+#!/bin/bash
+
+#   BAREOS® - Backup Archiving REcovery Open Sourced
+#
+#   Copyright (C) 2026-2026 Bareos GmbH & Co. KG
+#
+#   This program is Free Software; you can redistribute it and/or
+#   modify it under the terms of version three of the GNU Affero General Public
+#   License as published by the Free Software Foundation and included
+#   in the file LICENSE.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#   02110-1301, USA.
+
+# A job waiting for a free upload slot is canceled: the cancel command returns
+# and the job ends canceled within 30 s, long before flush_timeout; its queued
+# chunks are kept and reach the store when the outage ends.
+
+set -e
+set -o pipefail
+set -u
+
+TestName="$(basename "$(pwd)")"
+export TestName
+
+#shellcheck source=../../environment.in
+. ./environment
+
+#shellcheck source=../../scripts/functions
+. "${BAREOS_SCRIPTS_DIR}"/functions
+
+#shellcheck source=fault-functions
+. ./fault-functions
+
+start_test
+setup_bigdata
+faults_clear
+
+log="$tmp/slot-cancel.out"
+rm -f "$log"
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out ${NULL_DEV}
+messages
+@$out $log
+label volume=SlotCancel-0001 storage=dplcompat-slot pool=SlotCancel
+quit
+END_OF_DATA
+run_bconsole
+
+fault_fail_uploads
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+run job=backup-slot-cancel yes
+quit
+END_OF_DATA
+run_bconsole
+jobid=$(queued_jobid "$log")
+
+# Both upload slots hold failing chunks, so the writer waits for a free slot.
+# No "status storage" here: it waits for the device the writer holds.
+waited=0
+until grep -q "^SlotCancel-0001.0001 failed " "${fault_dir}/upload.log" \
+  2>/dev/null; do
+  if ((waited >= 60)); then
+    set_error "job ${jobid} never filled the upload slots"
+    break
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+sleep 2
+
+start=${SECONDS}
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+cancel jobid=${jobid}
+quit
+END_OF_DATA
+run_bconsole
+cancel_elapsed=$((SECONDS - start))
+
+cat <<END_OF_DATA >"$tmp/bconcmds"
+@$out $log
+wait jobid=${jobid}
+messages
+quit
+END_OF_DATA
+run_bconsole
+elapsed=$((SECONDS - start))
+
+expect_termination "${jobid}" "Backup Canceled"
+# The Director drops the SD's messages of a canceled job: read the SD's log.
+expect_grep "JobId ${jobid}: .*job canceled while waiting for a free upload slot" \
+  "${logdir}/bareos-sd.log" \
+  "the SD log does not show that the slot wait ended on the cancel"
+if ((cancel_elapsed > 30)); then
+  set_error "the cancel command took ${cancel_elapsed} s to return"
+fi
+if ((elapsed > 30)); then
+  set_error "job ${jobid} took ${elapsed} s to end after the cancel"
+fi
+
+# The outage ends: the kept chunks are uploaded.
+uploads_before=$(upload_log_lines)
+faults_clear
+for chunk in 0000 0001 0002; do
+  wait_uploaded dplcompat-slot SlotCancel-0001 "${chunk}" "${uploads_before}" 90
+done
+
+end_test
